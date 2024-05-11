@@ -4,9 +4,10 @@
 
 #ifndef RASPO3B_OS_FILESYSTEM_H
 #define RASPO3B_OS_FILESYSTEM_H
+#define FS_NOT_FOUND -1
 
-
-typedef void * fsHANDLER;   // handler of a file system
+typedef void * fsHANDLER;           // handler of a file system
+typedef int DirectoryEntryID;       // holds an ID to a file or directory. In FAT32 it is cluster number of that file
 
 typedef enum file_system_format {
     FAT32 = 0

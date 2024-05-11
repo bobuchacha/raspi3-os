@@ -110,4 +110,16 @@ fsHANDLER f32_init();
 HDirectory fat32_read_root_directory(f32FS_HANDLER fs);
 HDirectory fat32_read_directory(f32FS_HANDLER fs,int cluster_num);
 
+/**
+ * search an entry (file or directory) in a directory using name ascii or unicode and return its cluster number (id)
+ * @param fs
+ * @param parentDir
+ * @param name
+ * @param unicode
+ * @return
+ */
+DirectoryEntryID fat32_lookup_directory_entry(f32FS_HANDLER fs, DirectoryEntryID parentDir, unsigned char *name, unsigned short *unicode);
+DirectoryEntryID fat32_lookup_file(f32FS_HANDLER fs, DirectoryEntryID parentDir, unsigned char *name, unsigned short *unicode);
+DirectoryEntryID fat32_lookup_folder(f32FS_HANDLER fs, DirectoryEntryID parentDir, unsigned char *name, unsigned short *unicode);
+
 #endif //RASPO3B_OS_MYFAT32_H

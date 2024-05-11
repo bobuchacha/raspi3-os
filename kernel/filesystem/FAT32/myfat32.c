@@ -149,6 +149,46 @@ fsHANDLER f32_init() {
     return (fsHANDLER) f32;
 }
 
+PDirectoryCacheEntry _do_lookup_directory_entry(f32FS_HANDLER fs, DirectoryEntryID parentDir, unsigned char *name, unsigned short *unicode){
+    if (parentDir==0) parentDir = fs->BPB_RootClus;         // if parent directory = 0, lookup root directory
+
+    // read the directory first cluster and get the directory content cache. This should go in pair
+    do_directory_read_cluster(fs, parentDir, 0);
+
+    PDirectoryContentCache _ = dir_cache_get_pointer();
+    PDirectoryCacheEntry entry = _->cache_start;
+
+
+
+    // cache some value for performance
+    int len = strlen(name);
+
+    // traverse through the list
+    for (int i=0; i < _->num_of_entries; i++, entry++){
+        if (len == 11 && strcmp(name, entry->short_name)==0) return entry;
+        if (strcmp(name, entry->long_name_ascii)==0) return entry;
+        if (unicode && strcmp((char*)unicode, (char*)entry->long_name)==0) return entry;
+    }
+    return NULL;
+}
+
+DirectoryEntryID fat32_lookup_file(f32FS_HANDLER fs, DirectoryEntryID parentDir, unsigned char *name, unsigned short *unicode) {
+    PDirectoryCacheEntry entry = _do_lookup_directory_entry(fs, parentDir, name, unicode);
+    if (entry == NULL || entry->is_directory) return FS_NOT_FOUND;
+    return entry->cluster_num;
+}
+DirectoryEntryID fat32_lookup_folder(f32FS_HANDLER fs, DirectoryEntryID parentDir, unsigned char *name, unsigned short *unicode){
+    PDirectoryCacheEntry entry = _do_lookup_directory_entry(fs, parentDir, name, unicode);
+    if (entry == NULL || !entry->is_directory) return FS_NOT_FOUND;
+    return entry->cluster_num;
+}
+
+DirectoryEntryID fat32_lookup_directory_entry(f32FS_HANDLER fs, DirectoryEntryID parentDir, unsigned char *name, unsigned short *unicode){
+    PDirectoryCacheEntry entry = _do_lookup_directory_entry(fs, parentDir, name, unicode);
+    if (entry == NULL) return FS_NOT_FOUND;
+    return entry->cluster_num;
+}
+
 void print_file_system_info(f32FS_HANDLER fs) {
     printf("\n\n=================== [FILE SYSTEM INFORMATION] ==================\n");
     printf("OEM:                %s\n", fs->BS_OEMName);
@@ -233,7 +273,7 @@ HDirectory fat32_read_directory(f32FS_HANDLER fs,int cluster_num){
 // this is equivalent to change of directory
 int do_directory_read_cluster(f32FS_HANDLER fs, int dir_start_cluster, int is_chain_load) {
 
-    kdebug("do_directory_read_cluster: Reading cluster %d", dir_start_cluster);
+    kdebug("do_directory_read_cluster: Reading cluster %d (%d)", dir_start_cluster, is_chain_load);
 //    printf("cluster size address: 0x%x value (%d)\n", &fs->ClusterSize, fs->ClusterSize);
     unsigned char *buffer = fs->cluster_buffer;
 
@@ -280,6 +320,7 @@ int do_directory_read_cluster(f32FS_HANDLER fs, int dir_start_cluster, int is_ch
             LFNbaseentry = entry++;
             LFNCount++;
         }
+
 
         // short name
         memcpy(cacheEntry.short_name, entry->DIR_Name, 11);

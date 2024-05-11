@@ -23,43 +23,41 @@ FILESYSTEM fs_init(){
    
     sdroot = f32_init();
 
-    HDirectory myDir = fs_getdir("/ROS/Copyright");
+    HDirectory myDir = fs_getdir("/This is a long name Directory");
 }
-
 extern void dir_cache_dump();
-
 /**
  * get content of directory. List of its entry
 */
 HDirectory fs_getdir(char *path){
-    unsigned char * component = strtok(path, "/");
+    unsigned char * lookup_name = strtok(path, "/");
     int i = 0;
-    
+
     // first open root directory
-    HDirectory hDir = fat32_read_root_directory(sdroot);
-    // PDirectoryEntry entry = hDir->directories;
+    DirectoryEntryID currentFolder = 0; // lookup root first
 
-    // printf("========================= [DIR CONTENT] =========================\n");
-    // printf("- Total Entries:            %d\n", hDir->num_of_entries);
-    // printf("- Total Files:              %d\n", hDir->num_of_files);
-    // printf("- Total Directories         %d\n", hDir->num_of_directories);
-    // printf("- Free Entries              %d\n", hDir->num_of_empty_entries);
-    // printf("- Address of Array          0x%x\n", hDir->directories);
-    // printf("Content:\n");
-
-    // for (int i=0; i < hDir->num_of_entries; i++, entry++){
-    //     printf("%d: %s\n", i, entry->short_name);
-    // }
-
-    // dir_cache_dump();
-
-    while (component != NULL){
+    while (lookup_name != NULL){
         // open first folder in root cluster
-
-        component = strtok(NULL, "/");    // get next sub folder name
+        kinfo("fs_getdir: Looking for %s", lookup_name);
+        currentFolder = fat32_lookup_folder(sdroot, currentFolder, (unsigned char*)lookup_name, NULL); // not look for unicode
+        if (currentFolder == FS_NOT_FOUND) break;
+        lookup_name = strtok(NULL, "/");    // get next sub folder name
         i++;
-    }    
+    }
+
+    if (currentFolder == FS_NOT_FOUND) {
+//        kdebug("fs_getdir: not found %s", lookup_name);
+        return NULL;
+    }
+
+//    kinfo("found %s at %d", path, currentFolder);
+
+//    dir_cache_dump();
+
+    // found entry in currentFolder as an ID. Now we need to read its content and return
+    return fat32_read_directory(sdroot, currentFolder);
 }
+
 
 /**
  * search for path and

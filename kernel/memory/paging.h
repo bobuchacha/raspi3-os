@@ -11,11 +11,11 @@
 typedef struct {
         BOOLEAN allocated: TRUE;
         BOOLEAN kernel_page: TRUE;
-        INT32   reserved: 30;
+        unsigned int   reserved: 30;
 } PAGE_FLAGS, page_flags_t;
 
 typedef struct PAGE {
-        INT32           vaddr_mapped;   // the virtual address mapped to this page
+        unsigned int           vaddr_mapped;   // the virtual address mapped to this page
         PAGE_FLAGS      flags;
         struct PAGE*           next_page;
         struct PAGE*           prev_page;
@@ -23,15 +23,15 @@ typedef struct PAGE {
 
 typedef struct PAGE_LIST { 
         struct PAGE *  head; 
-        struct PAGE *  tail; 
-        INT32   size;
+        struct PAGE *  tail;
+    unsigned int   size;
 } PAGE_LIST, page_list_t;
 
-typedef struct heap_segment{
+typedef struct __attribute((__packed__, aligned(16))) heap_segment{
     struct heap_segment * next;
     struct heap_segment * prev;
-    INT32 is_allocated;
-    INT32 segment_size;  // Includes this header
+    unsigned int is_allocated;
+    unsigned int segment_size;  // Includes this header
 } HEAP_SEGMENT, heap_segment_t;
 
 INT mem_get_size(atag_t* atags);

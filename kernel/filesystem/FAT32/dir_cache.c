@@ -8,17 +8,19 @@
 #include "../../memory/paging.h"
 
 static DirectoryContentCache directoryContentCache;
-
+static int _added = 0;
 void dir_cache_alloc() {
-    int cacheIncNum = FAT32_DIR_CACHE_ENTRY_LENGTH_INCREMENT;
+    int cacheIncNum = directoryContentCache.num_of_entries + FAT32_DIR_CACHE_ENTRY_LENGTH_INCREMENT;
 //    kdebug("dir_cache_alloc::Initializing %d more directory entries for cache", cacheIncNum);
-    directoryContentCache.cache_start = krealloc(directoryContentCache.cache_start, sizeof(DirectoryCacheEntry) * cacheIncNum);
-    directoryContentCache.num_of_empty_entries += cacheIncNum;
+    directoryContentCache.cache_start = krealloc(directoryContentCache.cache_start,
+                                                 sizeof(DirectoryCacheEntry) * (cacheIncNum)); // pad 1KB info incase of over flow for some reason
+//    directoryContentCache.cache_start = kmalloc(sizeof(DirectoryCacheEntry) * cacheIncNum);
+    directoryContentCache.num_of_empty_entries = FAT32_DIR_CACHE_ENTRY_LENGTH_INCREMENT;
 }
 
 void dir_cache_reset() {
+
     if (directoryContentCache.cache_start) {
-        kdebug("dir_cache_reset: Freeing cache_start at 0x%x", directoryContentCache.cache_start);
         kfree(directoryContentCache.cache_start);
     }
     directoryContentCache.num_of_entries       = 0;
@@ -27,22 +29,25 @@ void dir_cache_reset() {
     directoryContentCache.num_of_empty_entries = 0;
     directoryContentCache.next_entry           = 0;
     directoryContentCache.index                 = 0;
+    _added = 0; // debug only
     // reinitialize the cache
     dir_cache_alloc();
 }
 
 void dir_cache_add(PDirectoryCacheEntry entry) {
     // alloc more memory if no room left for next one
-    if (directoryContentCache.num_of_empty_entries == 0) dir_cache_alloc();
+//    kinfo("%3d - dir_cache_add called for this directory, current num entries is %d", ++_added, directoryContentCache.num_of_empty_entries);
+    if (directoryContentCache.num_of_empty_entries == 0) {
+//        kdebug("dir_cache_add: We need more room for entries. We now have %d. Allocate more...\n\n", directoryContentCache.num_of_entries);
+        dir_cache_alloc();
+    }
     void* next_cache_addr = directoryContentCache.cache_start + directoryContentCache.next_entry;
-//    printf("dir_cache_add: Writing to 0x%x\n", next_cache_addr);
+
     // copy information
     memcpy(next_cache_addr,
            entry,
            sizeof(DirectoryCacheEntry));
 
-//    uart_dump(entry);
-//    asm volatile("brk #0");
 
     //directoryContentCache.cache_start++;
     directoryContentCache.num_of_entries++;        // add total entries

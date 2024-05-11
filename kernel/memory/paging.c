@@ -119,7 +119,7 @@ void mem_init_paging(atag_t * atags){
 }
 
 static void heap_init(INT heap_start) {
-        printf("Heap intialized at 0x%d. Total size: %d KB\n", heap_start, KERNEL_HEAP_SIZE / 1024);
+        printf("Heap intialized at 0x%d. Total size: %d KB. Size of heap segment is %d\n", heap_start, KERNEL_HEAP_SIZE / 1024, sizeof(heap_segment_t));
     heap_segment_list_head = (heap_segment_t *) heap_start;
     bzero(heap_segment_list_head, sizeof(heap_segment_t));
     heap_segment_list_head->segment_size = KERNEL_HEAP_SIZE;
@@ -172,7 +172,6 @@ void * krealloc(void *ptr, INT32 bytes){
                 kdebug("  -> Not allocated. Allocating new segment");
                 return kmalloc(bytes);
         }
-
         heap_segment_t * header = ptr - sizeof(heap_segment_t);
         void *newchunk = kmalloc(bytes);                        // allocate new chunk
         if(newchunk == NULL) return NULL;                       // Don't know if this can actually happen
@@ -193,6 +192,8 @@ void * kmalloc(INT32 bytes) {
 
     // Find the allocation that is closest in size to this request
     for (curr = heap_segment_list_head; curr != NULL; curr = curr->next) {
+//       kdebug("---> curr: 0x%x, next 0x%x, address of next 0x%x", curr, curr->next, &curr->next); // some readon curr gets to a really big number curr: 0x202020317E554E5F;
+
         diff = curr->segment_size - bytes;
         if (!curr->is_allocated && diff < best_diff && diff >= 0) {
             best = curr;
@@ -200,12 +201,12 @@ void * kmalloc(INT32 bytes) {
         }
     }
 
+
     // There must be no free memory right now :(
     if (best == NULL){
         kerror("kmalloc: Heap not available for %d bytes", bytes);
         return NULL;
     }
-
 
     // If the best difference we could come up with was large, split up this segment into two.
     // Since our segment headers are rather large, the criterion for splitting the segment is that
@@ -219,11 +220,10 @@ void * kmalloc(INT32 bytes) {
         best->next->segment_size = best->segment_size - bytes;
         best->segment_size = bytes;
     }
-
         kdebug("  -> Allocated at address: 0x%x", best+1);
     best->is_allocated = 1;
 
-    return best + 1;
+    return best + 1;    // after segment metadata
 }
 
 INT64 pointer_to_int(void* ptr){
@@ -242,6 +242,7 @@ void kfree(void *ptr) {
         // try to coalesce segements to the left
         while(seg->prev != NULL && !seg->prev->is_allocated) {
                 seg->prev->next = seg->next;
+                //kinfo("kfree: setting previous segment's next pointer to 0x%x", seg->next);
                 seg->prev->segment_size += seg->segment_size;
                 seg = seg->prev;
 //                kdebug("  -> Merge to left free segment at: 0x%x", seg->prev);
@@ -250,6 +251,7 @@ void kfree(void *ptr) {
         while(seg->next != NULL && !seg->next->is_allocated) {
                 seg->segment_size += seg->next->segment_size;
                 seg->next = seg->next->next;
+            //kinfo("kfree: setting next segment's next pointer to 0x%x", seg->next->next);
 //                kdebug("  -> Merge to right free segment at: 0x%x", seg->next);
         }
 }

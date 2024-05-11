@@ -21,12 +21,12 @@ typedef struct __attribute((__packed__, aligned(4))) fat32_cache_entry_s {
 } DirectoryCacheEntry, *PDirectoryCacheEntry;
 
 typedef struct __attribute((__packed__, aligned(4))) fat32_cache_s {
-    int index;
-    int num_of_entries;                     // total entries in this Directory
-    int num_of_directories;                 // total sub directories
-    int num_of_files;                       // total files in this directory
-    int num_of_empty_entries;               // empty entry. when it is zero, initialize FAT32_DIR_CACHE_ENTRY_LENGTH_INCREMENT more entries
-    int next_entry;                         // next empty entry
+    unsigned int index;
+    unsigned int num_of_entries;                     // total entries in this Directory
+    unsigned int num_of_directories;                 // total sub directories
+    unsigned int num_of_files;                       // total files in this directory
+    unsigned int num_of_empty_entries;               // empty entry. when it is zero, initialize FAT32_DIR_CACHE_ENTRY_LENGTH_INCREMENT more entries
+    unsigned int next_entry;                         // next empty entry
     PDirectoryCacheEntry cache_start;
 } DirectoryContentCache, *PDirectoryContentCache;
 // end of sync
