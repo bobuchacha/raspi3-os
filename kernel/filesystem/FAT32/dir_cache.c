@@ -52,9 +52,13 @@ void dir_cache_add(PDirectoryCacheEntry entry) {
     if (entry->is_directory) directoryContentCache.num_of_directories++;
     else directoryContentCache.num_of_files++;
 }
-
+//OK
 PDirectoryContentCache dir_cache_get_pointer(){
     return &directoryContentCache;
+}
+
+DirectoryContentCache dir_cache_get(){
+    return directoryContentCache;
 }
 
 void dir_cache_dump(){
@@ -67,10 +71,13 @@ void dir_cache_dump(){
     printf("Content:\n");
 
     PDirectoryCacheEntry entry = directoryContentCache.cache_start;
+    //printf("Address from pre-dump 0x%x\n", &directoryContentCache.cache_start);
+
     for (int i = 0; i < directoryContentCache.num_of_entries; i++, entry++) {
         printf("%d\t%d %d\t%8s\t\t%s\n", i, entry->file_size, entry->cluster_num, entry->short_name, entry->long_name_ascii);
     }
 
+    //printf("Address from dump 0x%x\n", directoryContentCache);
     printf("====================================================================\n");
 }
 

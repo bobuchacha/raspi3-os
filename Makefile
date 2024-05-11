@@ -30,11 +30,11 @@ OBJS = $(addprefix $(OBJ_FOLDER)/, $(SRCS:.c=.o))
 INC_FLAGS=-Ikernel -Iinclude
 CFLAGS = -Werror -O2 -ffreestanding -nostdinc -nostdlib -nostartfiles -mstrict-align $(INC_FLAGS)
 
-TOOLCHAIN = /Applications/ArmGNUToolchain/12.3.rel1/aarch64-none-elf/bin/aarch64-none-elf
+#TOOLCHAIN = /Applications/ArmGNUToolchain/12.3.rel1/aarch64-none-elf/bin/aarch64-none-elf
 TOOLCHAIN = /Applications/ArmGNUToolchain/13.2.Rel1/aarch64-none-elf/bin/aarch64-none-elf
 QEMU = qemu-system-aarch64
-TOOLCHAIN = toolchain/Windows/arm-gnu-toolchain-13.2.Rel1-mingw-w64-i686-aarch64-none-elf/bin/aarch64-none-elf
-QEMU = c:\qemu\qemu-system-aarch64.exe
+#TOOLCHAIN = toolchain/Windows/arm-gnu-toolchain-13.2.Rel1-mingw-w64-i686-aarch64-none-elf/bin/aarch64-none-elf
+#QEMU = c:\qemu\qemu-system-aarch64.exe
 GCC = $(TOOLCHAIN)-gcc
 LD = $(TOOLCHAIN)-ld
 OBJ_COPY = $(TOOLCHAIN)-objcopy
@@ -66,11 +66,12 @@ kernel8.img: start.o font_psf.o font_sfn.o $(OBJS)
 
 clean:
 	@echo "Cleaning build system"
+	@rm -rf objs/kernel
 	@rm $(OUT_FOLDER)/kernel8.elf *.o >/dev/null 2>/dev/null || true
 
-run: all
+run: kernel8.img
 	@echo Running.....
 	@echo ------------------------------------------------------------------------------------------
 	@echo
 	@echo
-	@$(QEMU) -M raspi3b -kernel $(OUT_FOLDER)/kernel8.img -drive file=test.dmg,if=sd,format=raw -serial stdio -d int
+	@$(QEMU) -M raspi3b -kernel $(OUT_FOLDER)/kernel8.img -drive file=fat32.img,if=sd,format=raw -serial stdio -d int

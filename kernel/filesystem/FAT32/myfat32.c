@@ -144,7 +144,7 @@ fsHANDLER f32_init() {
     f32->cluster_buffer = kmalloc(f32->ClusterSize * 2);
 
     // print the info
-    print_file_system_info(f32);
+    // print_file_system_info(f32);
 
     return (fsHANDLER) f32;
 }
@@ -165,9 +165,7 @@ void print_file_system_info(f32FS_HANDLER fs) {
 
     // read root directory
     do_directory_read_cluster(fs, fs->BPB_RootClus, 0);
-    unsigned char name[30];
-/*    formatDirectory("Thang.txt", name);
-    printf("\n\nformatDirectory %s\n", name);*/
+   // dir_cache_dump();
 }
 
 
@@ -220,6 +218,16 @@ void write_fat_entry(f32FS_HANDLER fs, int cluster_num, int fat_index, int value
 }
 
 
+HDirectory fat32_read_root_directory(f32FS_HANDLER fs){
+    return fat32_read_directory(fs, fs->BPB_RootClus);;
+}
+
+HDirectory fat32_read_directory(f32FS_HANDLER fs,int cluster_num){
+    do_directory_read_cluster(fs, cluster_num, 0);
+    // now the content is in cache
+    return (HDirectory)dir_cache_get_pointer();
+}
+
 
 // read a directory and return its content
 // this is equivalent to change of directory
@@ -231,13 +239,13 @@ int do_directory_read_cluster(f32FS_HANDLER fs, int dir_start_cluster, int is_ch
 
     //kpanic("buffer is 0x%x, cluster_buffer 0x%x", buffer, fs->cluster_buffer);
     DirectoryCacheEntry cacheEntry;
-    PDirectoryEntry     entry;
-    PDirectoryEntry     LFNbaseentry;
+    PFAT32DirectoryEntry     entry;
+    PFAT32DirectoryEntry     LFNbaseentry;
 
     // check for size of directory entry. Note: Must be 32
 //    void* a = entry;
 //    void* b = ++entry;
-//    printf("\n\nENTRY 1 0x%x, NEXT 0x%x, Delta %d, size %d\n\n", a, b, b-a, sizeof(DirectoryEntry));
+//    printf("\n\nENTRY 1 0x%x, NEXT 0x%x, Delta %d, size %d\n\n", a, b, b-a, sizeof(FAT32DirectoryEntry));
 //    asm volatile("brk #0");
 
     // first empty out cache
@@ -247,7 +255,7 @@ int do_directory_read_cluster(f32FS_HANDLER fs, int dir_start_cluster, int is_ch
     // read first cluster
     read_cluster(fs, buffer, dir_start_cluster);
 
-    entry = (PDirectoryEntry) buffer;    // point first entry to first byte of buffer
+    entry = (PFAT32DirectoryEntry) buffer;    // point first entry to first byte of buffer
 
 
     // iterate through all entries in this cluster

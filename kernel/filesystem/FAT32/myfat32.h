@@ -104,4 +104,10 @@ typedef struct __attribute__((__packed__)) fat32_descriptor_s {
  */
 fsHANDLER f32_init();
 
+
+// interface
+
+HDirectory fat32_read_root_directory(f32FS_HANDLER fs);
+HDirectory fat32_read_directory(f32FS_HANDLER fs,int cluster_num);
+
 #endif //RASPO3B_OS_MYFAT32_H

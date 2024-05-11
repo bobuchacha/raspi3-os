@@ -5,10 +5,12 @@
 #ifndef DIR_CACHE_H
 #define DIR_CACHE_H
 
+
 // every time if a cache entry length hit this number, we will reallocate the memory to expand the cache
 #define FAT32_DIR_CACHE_ENTRY_LENGTH_INCREMENT 10;
 
-typedef struct fat32_cache_entry_s {
+// when edit this struct make sure to sync changes with fileystem.h DirectoryEntry 
+typedef struct __attribute((__packed__, aligned(4))) fat32_cache_entry_s {
         unsigned char short_name[13];            // name of the file or directory. 15 char so we can achieve alignment
         unsigned char checksum;         // checksum of the short name (for search)
         unsigned short long_name[256];       // long name of the entry - unicode
@@ -18,7 +20,7 @@ typedef struct fat32_cache_entry_s {
         unsigned int is_directory;          // is this a directory
 } DirectoryCacheEntry, *PDirectoryCacheEntry;
 
-typedef struct fat32_cache_s {
+typedef struct __attribute((__packed__, aligned(4))) fat32_cache_s {
     int index;
     int num_of_entries;                     // total entries in this Directory
     int num_of_directories;                 // total sub directories
@@ -27,6 +29,7 @@ typedef struct fat32_cache_s {
     int next_entry;                         // next empty entry
     PDirectoryCacheEntry cache_start;
 } DirectoryContentCache, *PDirectoryContentCache;
+// end of sync
 
 
 void dir_cache_alloc();
@@ -35,5 +38,6 @@ void dir_cache_add(PDirectoryCacheEntry entry);     // add an entry to cache
 void dir_cache_dump();                              // dump it
 unsigned int dir_cache_get_size();                  // return size of directory cache for memcpy
 PDirectoryContentCache dir_cache_get_pointer();     // get Entry array pointer
+DirectoryContentCache dir_cache_get();
 
 #endif //DIR_H

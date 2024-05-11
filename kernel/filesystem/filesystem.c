@@ -11,6 +11,7 @@
 
 extern fsHANDLER f32_init();
 static FILESYSTEM myFS;
+fsHANDLER sdroot;
 
 FILESYSTEM fs_init(){
     kdebug("fs_init: Initializing File System Abstract Layer");
@@ -20,18 +21,44 @@ FILESYSTEM fs_init(){
         return 0;
     }
    
+    sdroot = f32_init();
 
-    // we are now only support FAT32
-    myFS->format = FAT32;
-    kdebug("fs_init: Initializing File System Abstract Layer");
+    HDirectory myDir = fs_getdir("/ROS/Copyright");
+}
 
-    myFS->handler = f32_init();
-    kdebug("fs_init: Initializing File System Abstract Layer");
+extern void dir_cache_dump();
 
-    f32FS_HANDLER myF32 = myFS->handler;
+/**
+ * get content of directory. List of its entry
+*/
+HDirectory fs_getdir(char *path){
+    unsigned char * component = strtok(path, "/");
+    int i = 0;
+    
+    // first open root directory
+    HDirectory hDir = fat32_read_root_directory(sdroot);
+    // PDirectoryEntry entry = hDir->directories;
 
-    HFile fn = fs_open("/BOO.TXT");
-    return myFS;
+    // printf("========================= [DIR CONTENT] =========================\n");
+    // printf("- Total Entries:            %d\n", hDir->num_of_entries);
+    // printf("- Total Files:              %d\n", hDir->num_of_files);
+    // printf("- Total Directories         %d\n", hDir->num_of_directories);
+    // printf("- Free Entries              %d\n", hDir->num_of_empty_entries);
+    // printf("- Address of Array          0x%x\n", hDir->directories);
+    // printf("Content:\n");
+
+    // for (int i=0; i < hDir->num_of_entries; i++, entry++){
+    //     printf("%d: %s\n", i, entry->short_name);
+    // }
+
+    // dir_cache_dump();
+
+    while (component != NULL){
+        // open first folder in root cluster
+
+        component = strtok(NULL, "/");    // get next sub folder name
+        i++;
+    }    
 }
 
 /**
@@ -39,19 +66,14 @@ FILESYSTEM fs_init(){
  * @param name
  * @return
  */
-HFile fs_open(char *path){
+HFile fs_fopen(char *path){
     kdebug("fs_open: Opening file %s", path);
-    // now let's use / as root
-    HFile file = (HFile)kmalloc(sizeof(struct file_entry_s));
-    file->fs = myFS;
-
-
 }
 
 /**
  * closes a file
  * @param handler
  */
-void fs_close(HFile handler){
+void fs_fclose(HFile handler){
     kfree(handler);
 }

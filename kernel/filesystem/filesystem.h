@@ -25,14 +25,27 @@ typedef struct file_system_s {
     fsHANDLER      handler;         // point to handler of a file system
 } *FILESYSTEM;
 
-typedef struct file_entry_s {
-    FILESYSTEM  fs;                 // file system of this file
-    unsigned int is_directory;      // if this is a directory. !0 - yes; 0 - no
-    unsigned char *name;            // name of file
-    unsigned int attr;              // attrib of file
-    unsigned int size;              // size of file
-    unsigned int fs_reference;      // file system reference. FAT32 it is cluster number to read file
-} FileHandler, *HFile;                           // Handler to a file, which is pointer to struct file_entry_s
+
+// when edit this struct make sure to sync changes with dir_cache.h DirectoryCacheEntry 
+typedef struct __attribute((__packed__, aligned(4))) directory_entry_s {
+        unsigned char short_name[13];            // name of the file or directory. 15 char so we can achieve alignment
+        unsigned char checksum;         // checksum of the short name (for search)
+        unsigned short long_name[256];       // long name of the entry - unicode
+        unsigned char long_name_ascii[256];   // long name of the entry but non unicode
+        unsigned int cluster_num;              // cluster number of the file or directory
+        unsigned int file_size;                 // file size of the file
+        unsigned int is_directory;          // is this a directory
+} DirectoryEntry, *PDirectoryEntry, *HFile;
+typedef struct __attribute((__packed__, aligned(4))) directory_content_s {
+    int index;
+    int num_of_entries;                     // total entries in this Directory
+    int num_of_directories;                 // total sub directories
+    int num_of_files;                       // total files in this directory
+    int num_of_empty_entries;               // empty entry. when it is zero, initialize FAT32_DIR_CACHE_ENTRY_LENGTH_INCREMENT more entries
+    int next_entry;                         // next empty entry
+    PDirectoryEntry directories;
+} DirectoryContent, *PDirectoryContent, *HDirectory;
+// end of sync
 
 /**
  * initialize file system used by root and return FILESYSTEM struct which we can use to handle
@@ -40,6 +53,7 @@ typedef struct file_entry_s {
  * @return {FILESYSTEM}
  */
 FILESYSTEM fs_init();
-HFile fs_open(char* path);
-void fs_close(HFile handler);
+HDirectory fs_getdir(char *path);       // read a directory
+HFile fs_fopen(char* path);             // open a file
+void fs_cflose(HFile handler);          // close a file
 #endif //RASPO3B_OS_FILESYSTEM_H

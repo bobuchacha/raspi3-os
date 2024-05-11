@@ -19,7 +19,7 @@ typedef struct dir_entry_s {
     unsigned short DIR_WrtDate;            // last written date
     unsigned short DIR_FstClusLO;            // first cluster LO
     unsigned int DIR_FileSize;            // file size (in bytes)
-} DirectoryEntry, *PDirectoryEntry;
+} FAT32DirectoryEntry, *PFAT32DirectoryEntry;
 
 // MICROSOFT STANDARD - DO NOT EDIT
 typedef struct lfn_dir_entry_s {
