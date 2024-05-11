@@ -7,23 +7,33 @@
 #include "../hardware/sdcard/sd.h"
 #include "../hardware/uart/uart.h"
 #include "../lib/string.h"
+#include "../lib/array.h"
 #include "../memory/paging.h"
 
 extern fsHANDLER f32_init();
 static FILESYSTEM myFS;
 fsHANDLER sdroot;
 
-FILESYSTEM fs_init(){
-    kdebug("fs_init: Initializing File System Abstract Layer");
-    // since we only support sdcard, init sdcard
-    if (!sd_init() == SD_OK) {
-        kpanic("Can not initialize SD Card");
-        return 0;
-    }
-   
-    sdroot = f32_init();
+M_CREATE_ARRAY(String, unsigned char)
 
-    HDirectory myDir = fs_getdir("/This is a long name Directory");
+FILESYSTEM fs_init(){
+    String thang = kmalloc(sizeof(String) + sizeof(unsigned char)*50);
+    thang->length = 50;
+    memcpy(thang->baseAddr, "Thang D Cao", 12);
+    uart_dump(thang);
+    printf("size of the array %d = %x", thang->length, thang->baseAddr[2]);
+
+    ///kdebug("fs_init: Initializing File System Abstract Layer");
+    // since we only support sdcard, init sdcard
+    //if (!(sd_init() == SD_OK)) {
+    //    kpanic("Can not initialize SD Card");
+    //    return 0;
+   //}
+   
+    //sdroot = f32_init();
+
+    //HDirectory myDir = fs_getdir("/This is a long name Directory");
+
 }
 extern void dir_cache_dump();
 /**

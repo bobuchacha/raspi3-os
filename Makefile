@@ -31,10 +31,10 @@ INC_FLAGS=-Ikernel -Iinclude
 CFLAGS = -Werror -O2 -ffreestanding -nostdinc -nostdlib -nostartfiles -mstrict-align $(INC_FLAGS)
 
 #TOOLCHAIN = /Applications/ArmGNUToolchain/12.3.rel1/aarch64-none-elf/bin/aarch64-none-elf
-TOOLCHAIN = /Applications/ArmGNUToolchain/13.2.Rel1/aarch64-none-elf/bin/aarch64-none-elf
-QEMU = qemu-system-aarch64
-#TOOLCHAIN = toolchain/Windows/arm-gnu-toolchain-13.2.Rel1-mingw-w64-i686-aarch64-none-elf/bin/aarch64-none-elf
-#QEMU = c:\qemu\qemu-system-aarch64.exe
+#TOOLCHAIN = /Applications/ArmGNUToolchain/13.2.Rel1/aarch64-none-elf/bin/aarch64-none-elf
+#QEMU = qemu-system-aarch64
+TOOLCHAIN = C:\Users/bobuc/Nextcloud/raspo3b-os/toolchain/Windows/arm-gnu-toolchain-13.2.Rel1-mingw-w64-i686-aarch64-none-elf/bin/aarch64-none-elf
+QEMU = c:\qemu\qemu-system-aarch64.exe
 GCC = $(TOOLCHAIN)-gcc
 LD = $(TOOLCHAIN)-ld
 OBJ_COPY = $(TOOLCHAIN)-objcopy
