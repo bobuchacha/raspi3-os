@@ -172,15 +172,51 @@ PDirectoryCacheEntry _do_lookup_directory_entry(f32FS_HANDLER fs, DirectoryEntry
     return NULL;
 }
 
-DirectoryEntryID fat32_lookup_file(f32FS_HANDLER fs, DirectoryEntryID parentDir, unsigned char *name, unsigned short *unicode) {
+HFile fat32_lookup_file(f32FS_HANDLER fs, DirectoryEntryID parentDir, unsigned char *name, unsigned short *unicode) {
     PDirectoryCacheEntry entry = _do_lookup_directory_entry(fs, parentDir, name, unicode);
-    if (entry == NULL || entry->is_directory) return FS_NOT_FOUND;
-    return entry->cluster_num;
+    if (entry == NULL || entry->is_directory) return NULL;
+    return (HFile)entry;
 }
 DirectoryEntryID fat32_lookup_folder(f32FS_HANDLER fs, DirectoryEntryID parentDir, unsigned char *name, unsigned short *unicode){
     PDirectoryCacheEntry entry = _do_lookup_directory_entry(fs, parentDir, name, unicode);
-    if (entry == NULL || !entry->is_directory) return FS_NOT_FOUND;
+    if (entry == NULL || !(entry->is_directory)) return FS_NOT_FOUND;
     return entry->cluster_num;
+}
+
+/**
+ * do the file read
+ * @param fs
+ * @param file
+ * @param buffer
+ * @param position
+ * @return
+ */
+unsigned int fat32_read_file(f32FS_HANDLER fs, HFile file, void*buffer, int position, int length){
+    int fileFirstSector = get_clusters_first_sector(fs, file->cluster_num);           // first sector
+    int lba = fileFirstSector + (position / fs->BPB_BytesPerSec);    // get the sector to read
+    int sectorsToRead = ((position+length)/fs->BPB_BytesPerSec) - (lba - fileFirstSector);
+    int readOffset = (position % fs->BPB_BytesPerSec);
+    if ((position+length) % fs->BPB_BytesPerSec) sectorsToRead++;
+
+    // check for error
+    if ((position + length) > file->file_size) {
+        kerror("fat32_read_file: Out of bound. File size %d, asked to read %d bytes from %d", file->file_size, length, position);
+        return 0;                   // out of bound
+    }
+//    printf("reading file        %s\n", file->long_name_ascii);
+//    printf("file size:          %d\n", file->file_size);
+//    printf("file first sector:  %d\n", fileFirstSector);
+//    printf("LBA:                %d\n", lba);
+//    printf("sectors to read:    %d\n", sectorsToRead);
+//    printf("read offset:       %d\n", readOffset);
+
+    // read and copy data
+    void * _buff = kmalloc(sectorsToRead * fs->BPB_BytesPerSec);
+    sd_readblock(lba, _buff, sectorsToRead);
+    memcpy(buffer, _buff + readOffset, length);
+    kfree(_buff);
+    return length;
+
 }
 
 DirectoryEntryID fat32_lookup_directory_entry(f32FS_HANDLER fs, DirectoryEntryID parentDir, unsigned char *name, unsigned short *unicode){
@@ -263,6 +299,7 @@ HDirectory fat32_read_root_directory(f32FS_HANDLER fs){
 }
 
 HDirectory fat32_read_directory(f32FS_HANDLER fs,int cluster_num){
+    if (cluster_num == 0) cluster_num = fs->BPB_RootClus;
     do_directory_read_cluster(fs, cluster_num, 0);
     // now the content is in cache
     return (HDirectory)dir_cache_get_pointer();

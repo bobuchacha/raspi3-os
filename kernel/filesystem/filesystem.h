@@ -47,14 +47,15 @@ typedef struct __attribute((__packed__, aligned(4))) directory_content_s {
     int next_entry;                         // next empty entry
     PDirectoryEntry directories;
 } DirectoryContent, *PDirectoryContent, *HDirectory;
-typedef struct __attribute((__packed__, aligned(4))) file_path_s {
-    int segment_count = 0;       // total segment
-    *PUnicodeString segments_base;   // dynamic array for segment. Let's do unicode only for now
-} FilePath, *PFilePath;
 typedef struct __attribute((__packed__, aligned(4))) unicode_string_s{
-    int length = 0;             // length
+    int length;             // length
     unsigned short *addr;      // pointer to a dynamic memory that hold that string
 } UnicodeString, *PUnicodeString;
+typedef struct __attribute((__packed__, aligned(4))) file_path_s {
+    int segment_count;       // total segment
+    PUnicodeString segments_base;   // dynamic array for segment. Let's do unicode only for now
+} FilePath, *PFilePath;
+
 // end of sync
 
 /**
@@ -66,4 +67,6 @@ FILESYSTEM fs_init();
 HDirectory fs_getdir(char *path);       // read a directory
 HFile fs_fopen(char* path);             // open a file
 void fs_cflose(HFile handler);          // close a file
+void fs_print_directory_content(HDirectory dir);    // print a directory content
+int fs_read(HFile file, void* buffer, int position, int length);
 #endif //RASPO3B_OS_FILESYSTEM_H
