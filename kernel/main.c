@@ -66,7 +66,7 @@ void main(INT r0, INT r1, INT atags)
     terminal_printf("Welcome\n%s, %d\n\n\n", copyright, a);
 
     // init file system
-    fs_init();
+    //fs_init();
     printf("\n\n\n");
     // display a pixmap
     lfb_showpicture();

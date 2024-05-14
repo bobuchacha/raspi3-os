@@ -9,7 +9,7 @@ static PAGE * all_pages_array;
 struct PAGE_LIST free_pages;
 static heap_segment_t * heap_segment_list_head;
 
-
+extern void init_vmm();
 
 void append_page_list(struct PAGE_LIST * list, PAGE * node) { 
         list->tail->next_page = node; 
@@ -116,6 +116,9 @@ void mem_init_paging(atag_t * atags){
         // Initialize the heap
         page_array_end = (INT)&_end + page_array_len;
         heap_init(page_array_end);
+
+        // initialize the virtual memory
+        init_vmm();
 }
 
 static void heap_init(INT heap_start) {
