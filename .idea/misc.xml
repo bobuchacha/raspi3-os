@@ -3,8 +3,14 @@
   <component name="CidrRootsConfiguration">
     <sourceRoots>
       <file path="$PROJECT_DIR$/include" />
-      <file path="$PROJECT_DIR$/kernel" />
+      <file path="$PROJECT_DIR$/src" />
     </sourceRoots>
+    <excludeRoots>
+      <file path="$PROJECT_DIR$/build/objs" />
+      <file path="$PROJECT_DIR$/not used code" />
+      <file path="$PROJECT_DIR$/objs" />
+      <file path="$PROJECT_DIR$/out" />
+    </excludeRoots>
   </component>
   <component name="ExternalStorageConfigurationManager" enabled="true" />
   <component name="MakefileSettings">
