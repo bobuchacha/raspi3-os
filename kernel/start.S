@@ -112,6 +112,12 @@ entrypoint:
     sub     w2, w2, #1
     cbnz    w2, 3b
 
+__setup_page_tables:
+    mox x29, x30
+    //adrp x0, pg_dir
+    //mov x1, #PG_DIR_SIZE
+    //bl memzero
+
     // jump to C code, should not return
 4:  bl      main
     // for failsafe, halt this core too
