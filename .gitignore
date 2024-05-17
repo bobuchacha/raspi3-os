@@ -1,3 +1,7 @@
 /objs/
 /out/
 /build/objs/
+/_raspberry-pi-os/
+/build/kernel8.elf
+/kernel8.img
+/_raspberry-pi-os/

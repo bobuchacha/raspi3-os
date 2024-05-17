@@ -1,4 +1,5 @@
-#include "mini_uart.h"
+#include "../hardware/uart/uart.h"
+#include "../../../include/typedef.h"
 
 #define DISASSEMBLER 1
 
@@ -11,7 +12,7 @@ char cmd[256], dbg_running=0;
     /**
      * things needed by the disassembler
      */
-    #include "printf.h"
+    #include "../lib/sprintf.h"
     #undef NULL
     #define NULL ((void*)0)
     typedef unsigned long   uint64_t;
@@ -19,7 +20,7 @@ char cmd[256], dbg_running=0;
     typedef unsigned short  uint16_t;
     typedef unsigned char   uint8_t;
     // include the Universal Disassembler Library
-    #include "debugger/disasm.h"
+    #include "disasm.h"
 #endif
 
 /**
@@ -34,11 +35,7 @@ void dbg_decodeexc(unsigned long type)
         case 0: printf("Synchronous"); break;
         case 1: printf("IRQ"); break;
         case 2: printf("FIQ"); break;
-        case 3: {
-            if ((cause == 0b111100)) {printf("DBG");}
-            else {printf("Error");}
-            break;
-        }
+        case 3: printf("SError"); break;
     }
     printf(": ");
     // decode exception type (some, not all. See ARM DDI0487B_b chapter D10.2.28)
@@ -290,10 +287,10 @@ void dbg_main()
                 // for each 16 bytes, do
                 for(a=os;a<oe;a+=16) {
                     // print out address
-                    printf("%08x: ", a);
+                    printf("%8x: ", a);
                     // hex representation
                     for(i=0;i<16;i++) {
-                        printf("%02x%s ",*((unsigned char*)(a+i)),i%4==3?" ":"");
+                        printf("%2x%s ",*((unsigned char*)(a+i)),i%4==3?" ":"");
                     }
                     // character representation
                     for(i=0;i<16;i++) {
