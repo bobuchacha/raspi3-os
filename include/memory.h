@@ -16,9 +16,32 @@
 
 #ifndef __ASSEMBLER__
 
+/**
+ * get a free page base address
+ * @return
+ */
 unsigned long get_free_page();
+
+/**
+ * free a page
+ * @param p
+ */
 void free_page(unsigned long p);
-void memzero(unsigned long src, unsigned long n);
+
+/**
+ * zero out dest address [count] of bytes
+ * @param src_addr
+ * @param count
+ */
+void memzero(unsigned long dest_addr, unsigned long count);
+
+/**
+ * copy from src_addr to dest_addr [count] number of bytes
+ * @param dest_addr
+ * @param src_addr
+ * @param count
+ */
+void memcpy(unsigned char dest_addr, unsigned char src_addr, long count);
 
 #endif
 

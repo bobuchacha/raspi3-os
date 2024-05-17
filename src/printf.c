@@ -204,10 +204,11 @@ void tfp_format(void* putp,putcf putf,char *fmt, va_list va)
     }
 
 
-void init_printf(void* putp,void (*putf) (void*,char))
+void init_printf(void (*putp),void (*putf) (void*,char))
     {
     stdout_putf=putf;
     stdout_putp=putp;
+    kinfo("init_printf: printf ready");
     }
 
 void tfp_printf(char *fmt, ...)
