@@ -12,8 +12,7 @@
         .ifgt \max - (2b - 1b)
         .zero \max - (2b - 1b)
         .endif
-
-        .endm
+.endm
 
 .section ".text.boot"
 
@@ -21,11 +20,11 @@
 _start:
     b entrypoint
 
-//signature:      padded_string "ROS.KRL\0", 8                                                // 8 byte signature
-//executable:     .word 0                                                                     // 4 bytes dummy flag
-//author:         padded_string "THANG CAO", 32
-//copyright:      padded_string "Copyright (c) 2024 Renaissance Pi OS", 64                    // 64 bytes
-//version:        padded_string "0.0.1", 32                                                   // 32 bytes
+signature:      padded_string "ROS.KRL\0", 8                                                // 8 byte signature
+executable:     .word 0                                                                     // 4 bytes dummy flag
+author:         padded_string "THANG CAO", 32
+copyright:      padded_string "Copyright (c) 2024 Renaissance Pi OS", 64                    // 64 bytes
+version:        padded_string "0.0.1", 32                                                   // 32 bytes
 
 entrypoint:
 	mrs	x1, mpidr_el1
