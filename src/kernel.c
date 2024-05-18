@@ -1,4 +1,5 @@
 #include "mini_uart.h"
+#include "uart0.h"
 #include "printf.h"
 #include "utils.h"
 #include "debugger/dbg.h"
@@ -7,6 +8,7 @@
 #include "sched.h"
 #include "fork.h"
 #include "kprint.h"
+#include "mailbox.h"
 
 void user_process1(char *array)
 {
@@ -57,10 +59,9 @@ void kernel_process(){
 
 void kernel_main(void)
 {
-
 	uart_init();
-    init_printf(0, putc);
-
+    uart0_init();
+    init_printf(0, uart0_putc);
     kinfo("kernel_main: Initializing IRQ...");
     disable_irq();
     irq_vector_init();
@@ -75,11 +76,12 @@ void kernel_main(void)
     kinfo("kernel_main: Kernel is running at EL%d", get_el());
     kprint("\nWELCOME TO ROS\n");
 
-
+    kinfo("kernel_main: Initialize UART0...");
+    kprint("Welcome to ROS\n\n");
 
 
     while (1){
-        asm volatile("nop");
-        //schedule();
+        //asm volatile("nop");
+        schedule();
     }
 }
