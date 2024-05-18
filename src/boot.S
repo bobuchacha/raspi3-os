@@ -1,10 +1,6 @@
 #include "arm/sysregs.h"
 #include "memory.h"
 
-
-//---------------------------------------------------------------------------------------
-//- MACRO: padded_string - pads a string with zero                                      -
-//---------------------------------------------------------------------------------------
 .macro padded_string string, max
     1:
         .ascii "\string"
@@ -18,10 +14,6 @@
         .endif
 .endm
 
-
-//---------------------------------------------------------------------------------------
-//- SECTION BOOT                                                                        -
-//---------------------------------------------------------------------------------------
 .section ".text.boot"
 
 .globl _start
@@ -32,11 +24,11 @@ signature:      padded_string "ROS.KRL\0", 8                                    
 executable:     .word 0                                                                     // 4 bytes dummy flag
 author:         padded_string "THANG CAO", 32
 copyright:      padded_string "Copyright (c) 2024 Renaissance Pi OS", 64                    // 64 bytes
-//version:        padded_string "0.0.1", 32                                                   // 32 bytes
+version:        padded_string "0.0.1", 32                                                   // 32 bytes
 
 entrypoint:
 	mrs	x1, mpidr_el1
-	and	x1, x1, #03		// Check processor id (0xFF)
+	and	x1, x1, #0xFF		// Check processor id (0xFF)
 	cbz	x1, master		// Hang for all non-primary CPU
 	b	proc_hang
 
@@ -66,8 +58,6 @@ master:
     adr     x2, _switch_to_EL1_continue
     msr     elr_el3, x2
     eret
-
-
 
 
 switch_to_EL1:
@@ -100,8 +90,8 @@ switch_to_EL1:
     msr     sctlr_el1, x2
 
     // set up exception handlers - moved to irq.S
-    ldr     x2, =vectors_debugger
-    msr     vbar_el1, x2
+    //ldr     x2, =_vectors_debugger
+    //msr     vbar_el1, x2
 
     // change execution level to EL1
     mov     x2, #0x3c4
