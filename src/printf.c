@@ -274,5 +274,6 @@ int tfp_sprintf(char* s,char *fmt, ...)
     tfp_format(&s,putcp,fmt,va);
     putcp(&s,0);
     va_end(va);
+    return 0;
     }
 
