@@ -1,6 +1,9 @@
 #include "arm/sysregs.h"
 #include "memory.h"
 
+//-----------------------------------
+// MACRO create a padded string
+//-----------------------------------
 .macro padded_string string, max
     1:
         .ascii "\string"
@@ -14,6 +17,48 @@
         .endif
 .endm
 
+//-----------------------------------
+// MACRO create PGD entry
+//-----------------------------------
+.macro	create_pgd_entry, tbl, virt, tmp1, tmp2
+        create_table_entry \tbl, \virt, PGD_SHIFT, \tmp1, \tmp2
+        create_table_entry \tbl, \virt, PUD_SHIFT, \tmp1, \tmp2
+.endm
+
+//-----------------------------------
+// MACRO create a table entry
+//-----------------------------------
+.macro	create_table_entry, tbl, virt, shift, tmp1, tmp2
+        lsr	\tmp1, \virt, #\shift
+        and	\tmp1, \tmp1, #ENTRY_PER_TABLE - 1			// table index
+        add	\tmp2, \tbl, #PAGE_SIZE
+        orr	\tmp2, \tmp2, #MM_TYPE_PAGE_TABLE
+        str	\tmp2, [\tbl, \tmp1, lsl #3]
+        add	\tbl, \tbl, #PAGE_SIZE					// next level table page
+.endm
+
+//-----------------------------------
+// MACRO create a block map
+//-----------------------------------
+.macro	create_block_map, tbl, phys, start, end, flags, tmp1
+        lsr	\start, \start, #SECTION_SHIFT
+        and	\start, \start, #ENTRY_PER_TABLE - 1			// table index
+        lsr	\end, \end, #SECTION_SHIFT
+        and	\end, \end, #ENTRY_PER_TABLE - 1				// table end index
+        lsr	\phys, \phys, #SECTION_SHIFT
+        mov	\tmp1, #\flags
+        orr	\phys, \tmp1, \phys, lsl #SECTION_SHIFT			// table entry
+    9999:
+        str	\phys, [\tbl, \start, lsl #3]				// store the entry
+        add	\start, \start, #1					// next entry
+        add	\phys, \phys, #SECTION_SIZE				// next block
+        cmp	\start, \end
+        b.ls	9999b
+.endm
+
+//---------------------------------------------------------------------------------------------------------------------
+// MAIN CODE HERE
+//---------------------------------------------------------------------------------------------------------------------
 .section ".text.boot"
 
 .globl _start
@@ -57,7 +102,7 @@ master:
     msr     spsr_el3, x2
     adr     x2, _switch_to_EL1_continue
     msr     elr_el3, x2
-    eret
+    eret    // jump to EL1
 
 
 switch_to_EL1:
@@ -103,7 +148,7 @@ switch_to_EL1:
     msr     elr_el1, xzr
     msr     far_el1, xzr
 
-    eret
+    eret    // jump to EL1
 
 _switch_to_EL1_continue:
     mov     sp, x1
@@ -114,11 +159,64 @@ el1_entry:
 	sub	x1, x1, x0
 	bl 	memzero             // zero out BSS
 
+//    b kernel_main
+//    b proc_hang
 
-4:
-	mov	sp, #(2 * SECTION_SIZE)
-	bl	kernel_main
-	b 	proc_hang		// should never come here
+init_mmu:
 
+    // prepare virtual memory for main kernel.
+    // we are going to fill in the empty directories
+    bl 	__create_page_tables
 
+    // update stack pointer to use our virtual memory. Since
+    // kernel now use kernel address space, starting at VA_START, we just need to add into our stack pointer
+    // and make sure stack is right below LOW_MEMORY which is 4MB mark
+    mov	x0, #VA_START
+    add	sp, x0, #LOW_MEMORY
 
+    adrp	x0, pg_dir          // load our kernel selector to base of kernel directory
+    msr	ttbr1_el1, x0
+
+    ldr	x0, =(TCR_VALUE)        // load Translation Control Register
+    msr	tcr_el1, x0
+
+    ldr	x0, =(MAIR_VALUE)       // Load our MAIR value
+    msr	mair_el1, x0
+
+    // we need to load kernel entry point into x2 now. This is the absolute address of kernel_main
+    // we must do this before enabling MMU
+    ldr	x2, =kernel_main
+    mov	x0, #SCTLR_MMU_ENABLED  // enable MMU
+    msr	sctlr_el1, x0
+
+    br x2                     // jump to kernel main
+
+    b kernel_main
+1:
+    b proc_hang
+
+__create_page_tables:
+    mov	x29, x30						// save return address
+
+    adrp	x0, pg_dir          // zero out our directories
+    mov	x1, #PG_DIR_SIZE        // it is 3 pages total in length
+    bl 	memzero
+
+    adrp	x0, pg_dir          // map our kernel address space
+    mov	x1, #VA_START
+    create_pgd_entry x0, x1, x6, x7 // table holds in x0, virtual address in x1, x2 and x3 are registers for temporary calculating
+
+    /* Mapping kernel and init stack. */
+    mov 	x1, xzr							// start mapping from physical offset 0
+    mov 	x2, #VA_START						// first virtual address
+    ldr	x3, =(VA_START + DEVICE_BASE - SECTION_SIZE)		// last virtual address
+    create_block_map x0, x1, x2, x3, MMU_FLAGS, x4      // block type, normal access, no cache
+
+    /* Mapping device memory*/
+    mov 	x1, #DEVICE_BASE					// start mapping from device base address
+    ldr 	x2, =(VA_START + DEVICE_BASE)		// first virtual address. TODO: change this to our peripheral address start
+    ldr	x3, =(VA_START + PHYS_MEMORY_SIZE - SECTION_SIZE)	// last virtual address
+    create_block_map x0, x1, x2, x3, MMU_DEVICE_FLAGS, x4
+
+    mov x30, x29    // restore return address
+    ret

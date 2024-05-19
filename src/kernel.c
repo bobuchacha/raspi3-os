@@ -10,6 +10,8 @@
 #include "kprint.h"
 #include "mailbox.h"
 
+unsigned char * msg = "Welcome from Assembly";
+
 void user_process1(char *array)
 {
     char buf[2] = {0};
@@ -76,12 +78,9 @@ void kernel_main(void)
     kinfo("kernel_main: Kernel is running at EL%d", get_el());
     kprint("\nWELCOME TO ROS\n");
 
-    kinfo("kernel_main: Initialize UART0...");
-    kprint("Welcome to ROS\n\n");
-
 
     while (1){
         //asm volatile("nop");
-        schedule();
+//        schedule();
     }
 }

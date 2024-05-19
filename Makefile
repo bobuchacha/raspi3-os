@@ -35,7 +35,8 @@ font_sfn.o: $(BUILD_DIR)/screenfont/font.sfn
 
 #C_FILES = $(wildcard $(SRC_DIR)/*.c)
 C_FILES = $(shell find $(SRC_DIR) -type f -name '*.c')
-ASM_FILES = $(wildcard $(SRC_DIR)/*.S)
+#ASM_FILES = $(wildcard $(SRC_DIR)/*.S)
+ASM_FILES = $(shell find $(SRC_DIR) -type f -name '*.S')
 OBJ_FILES = $(C_FILES:$(SRC_DIR)/%.c=$(OBJS_DIR)/%_c.o)
 OBJ_FILES += $(ASM_FILES:$(SRC_DIR)/%.S=$(OBJS_DIR)/%_s.o)
 DEP_FILES = $(OBJ_FILES:%.o=%.d)
@@ -52,4 +53,4 @@ run: all
 
 asm: all
 	@echo "Running: --------------------------------------------------------------------------------- "
-	@$(QEMU) -M raspi3b -kernel kernel8.img -serial stdio -display none -d in_asm
+	@$(QEMU) -M raspi3b -kernel kernel8.img -serial null -display none -d in_asm
