@@ -2,7 +2,7 @@
 #include "printf.h"
 #include "peripherals/timer.h"
 
-const unsigned int interval = 20000;
+const unsigned int interval = 200000;
 unsigned int curVal = 0;
 
 void timer_init ( void )

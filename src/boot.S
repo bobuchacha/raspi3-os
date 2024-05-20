@@ -56,6 +56,16 @@
         b.ls	9999b
 .endm
 
+//-----------------------------------
+// MACRO implement push and pop sp
+//-----------------------------------
+.macro PUSH, reg
+    str   \reg, [sp, #-16]!         // push {register}
+.endm
+.macro POP, reg
+    ldr   \reg, [sp], #16           // pop {register}
+.endm
+
 //---------------------------------------------------------------------------------------------------------------------
 // MAIN CODE HERE
 //---------------------------------------------------------------------------------------------------------------------
@@ -135,8 +145,9 @@ switch_to_EL1:
     msr     sctlr_el1, x2
 
     // set up exception handlers - moved to irq.S
-    //ldr     x2, =_vectors_debugger
-    //msr     vbar_el1, x2
+    // I need to set this first, so after the MMU is enable the CPU will jump to fork_exit() and call schedule_tail, it then call kernel_main
+    ldr     x2, = vectors_debugger      // for debugger
+    msr     vbar_el1, x2
 
     // change execution level to EL1
     mov     x2, #0x3c4
@@ -159,8 +170,6 @@ el1_entry:
 	sub	x1, x1, x0
 	bl 	memzero             // zero out BSS
 
-//    b kernel_main
-//    b proc_hang
 
 init_mmu:
 
@@ -171,14 +180,18 @@ init_mmu:
     // update stack pointer to use our virtual memory. Since
     // kernel now use kernel address space, starting at VA_START, we just need to add into our stack pointer
     // and make sure stack is right below LOW_MEMORY which is 4MB mark
+
     mov	x0, #VA_START
-    add	sp, x0, #LOW_MEMORY
+    add	sp, x0, #LOW_MEMORY     // for some reason sp is still at physical LOW_MEMORY
+
+    ldr	x0, =(TCR_VALUE)        // load Translation Control Register
+    msr	tcr_el1, x0
+
+    isb // disable interrupt
 
     adrp	x0, pg_dir          // load our kernel selector to base of kernel directory
     msr	ttbr1_el1, x0
 
-    ldr	x0, =(TCR_VALUE)        // load Translation Control Register
-    msr	tcr_el1, x0
 
     ldr	x0, =(MAIR_VALUE)       // Load our MAIR value
     msr	mair_el1, x0
@@ -186,11 +199,22 @@ init_mmu:
     // we need to load kernel entry point into x2 now. This is the absolute address of kernel_main
     // we must do this before enabling MMU
     ldr	x2, =kernel_main
-    mov	x0, #SCTLR_MMU_ENABLED  // enable MMU
+
+    dsb ish
+    isb
+
+    ldr	x0, =(SCTLR_VALUE_MMU_ENABLED)  // enable MMU
     msr	sctlr_el1, x0
 
-    br x2                     // jump to kernel main
+    isb
 
+    br x2
+
+1:
+    b 1b
+    br x2                     // jump to kernel main
+//
+jump_to_kernel:
     b kernel_main
 1:
     b proc_hang

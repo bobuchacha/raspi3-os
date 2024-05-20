@@ -14,7 +14,7 @@ unsigned char * msg = "Welcome from Assembly";
 
 void user_process1(char *array)
 {
-    char buf[2] = {0};
+    char buf[2];
     while (1){
         for (int i = 0; i < 5; i++){
             buf[0] = array[i];
@@ -25,7 +25,7 @@ void user_process1(char *array)
 }
 
 void user_process(){
-    char buf[30] = {0};
+    char buf[30];
     tfp_sprintf(buf, "User process started\n\r");
     call_sys_write(buf);
     unsigned long stack = call_sys_malloc();
@@ -63,6 +63,7 @@ void kernel_main(void)
 {
 	uart_init();
     uart0_init();
+
     init_printf(0, uart0_putc);
     kinfo("kernel_main: Initializing IRQ...");
     disable_irq();
@@ -78,9 +79,7 @@ void kernel_main(void)
     kinfo("kernel_main: Kernel is running at EL%d", get_el());
     kprint("\nWELCOME TO ROS\n");
 
-
     while (1){
-        //asm volatile("nop");
-//        schedule();
+        schedule();
     }
 }

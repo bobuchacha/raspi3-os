@@ -9,7 +9,7 @@ static struct task_struct init_task = INIT_TASK;
 struct task_struct *current = &(init_task);
 struct task_struct * task[NR_TASKS] = {&(init_task), };
 int nr_tasks = 1;
-
+static int _is_kernel_initialized = 0;
 void preempt_disable(void)
 {
     current->preempt_count++;
@@ -65,13 +65,15 @@ void switch_to(struct task_struct * next, int index)
     current = next;
     cpu_switch_to(prev, next);
 }
-
+extern void kernel_main();
 void schedule_tail(void) {
+    if (!_is_kernel_initialized++) kernel_main();       // I DONT KNOW why it jumps here after initialize MMU
     preempt_enable();
 }
 
 void timer_tick()
 {
+
     --current->counter;
     if (current->counter>0 || current->preempt_count >0) {
         return;
