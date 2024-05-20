@@ -1,4 +1,5 @@
 #include "mini_uart.h"
+#include "uart0.h"
 #include "printf.h"
 #include "utils.h"
 #include "debugger/dbg.h"
@@ -7,13 +8,13 @@
 #include "sched.h"
 #include "fork.h"
 #include "kprint.h"
-#include "memory.h"
-#include "fork.h"
-#include "sys.h"
+#include "mailbox.h"
+
+unsigned char * msg = "Welcome from Assembly";
 
 void user_process1(char *array)
 {
-    char buf[2] = {0};
+    char buf[2];
     while (1){
         for (int i = 0; i < 5; i++){
             buf[0] = array[i];
@@ -25,8 +26,6 @@ void user_process1(char *array)
 
 void user_process(){
     char buf[30];
-    memzero(buf, 30);
-
     tfp_sprintf(buf, "User process started\n\r");
     call_sys_write(buf);
     unsigned long stack = call_sys_malloc();
@@ -62,10 +61,10 @@ void kernel_process(){
 
 void kernel_main(void)
 {
-
 	uart_init();
-    init_printf(0, putc);
+    uart0_init();
 
+    init_printf(0, uart0_putc);
     kinfo("kernel_main: Initializing IRQ...");
     disable_irq();
     irq_vector_init();
@@ -79,13 +78,6 @@ void kernel_main(void)
 
     kinfo("kernel_main: Kernel is running at EL%d", get_el());
     kprint("\nWELCOME TO ROS\n");
-
-    kinfo("kernel_main: Starting Kernel process...");
-    int res = copy_process(PF_KTHREAD, (unsigned long)&kernel_process, 0, 0);
-    if (res < 0) {
-        printf("error while starting kernel process");
-        return;
-    }
 
     while (1){
         schedule();

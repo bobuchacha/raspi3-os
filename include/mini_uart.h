@@ -7,4 +7,5 @@ void uart_send ( char c );
 void uart_send_string(char* str);
 void putc ( void* p, char c);
 unsigned char uart_getc();
+
 #endif  /*_MINI_UART_H */
