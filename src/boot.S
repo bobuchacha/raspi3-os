@@ -201,23 +201,25 @@ init_mmu:
     ldr	x2, =kernel_main
 
     dsb ish
-    isb
+    //isb
 
     ldr	x0, =(SCTLR_VALUE_MMU_ENABLED)  // enable MMU
     msr	sctlr_el1, x0
 
+    // CODE WILL NEVER REACH HERE FOR SOME REASON. IT WILL JUMP TO ret_from_fork()
+    // BY SOME KIND OF INTERRUPTS THEN CONTINUE
     isb
 
     br x2
 
+//1:
+//    b 1b
+//    br x2                     // jump to kernel main
+//
+//jump_to_kernel:
+//    b kernel_main
 1:
     b 1b
-    br x2                     // jump to kernel main
-//
-jump_to_kernel:
-    b kernel_main
-1:
-    b proc_hang
 
 __create_page_tables:
     mov	x29, x30						// save return address
