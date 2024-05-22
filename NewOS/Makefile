@@ -45,13 +45,15 @@ DEP_FILES = $(OBJ_FILES:%.o=%.d)
 
 
 kernel8.img: $(SRC_DIR)/link.ld $(OBJ_FILES)
-	@$(ARMGNU)-ld -nostdlib -T $(SRC_DIR)/link.ld -o $(BUILD_DIR)/kernel8.elf  $(OBJ_FILES)
+	@$(ARMGNU)-ld -nostdlib -T $(SRC_DIR)/link.ld -o $(BUILD_DIR)/kernel8.elf  $(OBJ_FILES) -g
 	@$(ARMGNU)-objcopy $(BUILD_DIR)/kernel8.elf -O binary kernel8.img
 
 run: all
 	@echo "Running: --------------------------------------------------------------------------------- "
-	@$(QEMU) -M raspi3b -kernel kernel8.img -serial stdio -display none
+	@$(QEMU) -M raspi3b -kernel kernel8.img -serial stdio -display none -s
 
 asm: all
 	@echo "Running: --------------------------------------------------------------------------------- "
-	@$(QEMU) -M raspi3b -kernel kernel8.img -serial null -display none -d in_asm
+	@$(QEMU) -M raspi3b -kernel kernel8.img -serial null -display none -d in_asm -S -gdb tcp::1234
+gdb:
+	gdb-multiarch -ex 'file ./build/kernel8.elf'  -ex 'set arch aarch64' -ex 'target remote localhost:1234' -ex 'layout split' -ex 'layout regs' -q --nh
