@@ -1,21 +1,20 @@
 #include "entry.h"
-#include "arm/sysregs.h"
 
-.macro handle_invalid_entry type
-	kernel_entry 1
+	.macro handle_invalid_entry type
+	kernel_entry
 	mov	x0, #\type
 	mrs	x1, esr_el1
 	mrs	x2, elr_el1
 	bl	show_invalid_entry_message
 	b	err_hang
-.endm
+	.endm
 
-.macro	ventry	label
-.align	7
+	.macro	ventry	label
+	.align	7
 	b	\label
-.endm
+	.endm
 
-.macro	kernel_entry, el
+	.macro	kernel_entry
 	sub	sp, sp, #S_FRAME_SIZE
 	stp	x0, x1, [sp, #16 * 0]
 	stp	x2, x3, [sp, #16 * 1]
@@ -32,32 +31,10 @@
 	stp	x24, x25, [sp, #16 * 12]
 	stp	x26, x27, [sp, #16 * 13]
 	stp	x28, x29, [sp, #16 * 14]
+	str	x30, [sp, #16 * 15] 
+	.endm
 
-    #if	el == 0
-        mrs	x21, sp_el0
-    #else
-        add	x21, sp, #S_FRAME_SIZE
-    #endif /* \el == 0 */
-
-	mrs	x22, elr_el1
-	mrs	x23, spsr_el1
-
-	stp	x30, x21, [sp, #16 * 15]
-	stp	x22, x23, [sp, #16 * 16]
-.endm
-
-.macro	kernel_exit, el
-	ldp	x22, x23, [sp, #16 * 16]
-	ldp	x30, x21, [sp, #16 * 15]
-
-#if	el == 0
-	msr	sp_el0, x21
-#endif /* \el == 0 */
-
-	msr	elr_el1, x22
-	msr	spsr_el1, x23
-
-
+	.macro	kernel_exit
 	ldp	x0, x1, [sp, #16 * 0]
 	ldp	x2, x3, [sp, #16 * 1]
 	ldp	x4, x5, [sp, #16 * 2]
@@ -73,9 +50,10 @@
 	ldp	x24, x25, [sp, #16 * 12]
 	ldp	x26, x27, [sp, #16 * 13]
 	ldp	x28, x29, [sp, #16 * 14]
-	add	sp, sp, #S_FRAME_SIZE
+	ldr	x30, [sp, #16 * 15] 
+	add	sp, sp, #S_FRAME_SIZE		
 	eret
-.endm
+	.endm
 
 
 /*
@@ -150,9 +128,9 @@ error_invalid_el0_32:
 	handle_invalid_entry  ERROR_INVALID_EL0_32
 
 el1_irq:
-	kernel_entry 1
+	kernel_entry 
 	bl	handle_irq
-	kernel_exit 1
+	kernel_exit 
 
 .globl err_hang
 err_hang: b err_hang

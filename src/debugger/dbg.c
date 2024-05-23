@@ -236,10 +236,12 @@ void dbg_main()
             for(i=0;i<31;i++) {
                 if(i && i%3==0) printf("\n");
                 if(i<10) printf(" ");
-                printf("x%d: %16x  ",i,dbg_regs[i]);
+                printf("x%d: %16X  ",i,dbg_regs[i]);
             }
             // some system registers
-            printf("elr_el1: %X  spsr_el1: %X\n  esr_el1: %X  far_el1: %X\nsctlr_el1: %X  tcr_el1: %X\n",
+            printf( "\n  ELR_EL1: %16x              SPSR_EL1: %16x" \
+                    "\n  ESR_EL1: %16x               FAR_EL1: %16x" \
+                    "\nSCTLR_EL1: %16x               TCR_EL1: %16x\n",
                 dbg_regs[31],dbg_regs[32],dbg_regs[33],dbg_regs[34],dbg_regs[35],dbg_regs[36]);
             continue;
         } else

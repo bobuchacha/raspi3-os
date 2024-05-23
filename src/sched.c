@@ -55,6 +55,7 @@ void _schedule(void)
 
 void schedule(void)
 {
+//    printf(".");
     current->counter = 0;
     _schedule();
 }

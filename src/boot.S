@@ -1,70 +1,7 @@
 #include "arm/sysregs.h"
 #include "memory.h"
 
-//-----------------------------------
-// MACRO create a padded string
-//-----------------------------------
-.macro padded_string string, max
-    1:
-        .ascii "\string"
-    2:
-        .iflt \max - (2b - 1b)
-        .error "String too long"
-        .endif
-
-        .ifgt \max - (2b - 1b)
-        .zero \max - (2b - 1b)
-        .endif
-.endm
-
-//-----------------------------------
-// MACRO create PGD entry
-//-----------------------------------
-.macro	create_pgd_entry, tbl, virt, tmp1, tmp2
-        create_table_entry \tbl, \virt, PGD_SHIFT, \tmp1, \tmp2
-        create_table_entry \tbl, \virt, PUD_SHIFT, \tmp1, \tmp2
-.endm
-
-//-----------------------------------
-// MACRO create a table entry
-//-----------------------------------
-.macro	create_table_entry, tbl, virt, shift, tmp1, tmp2
-        lsr	\tmp1, \virt, #\shift
-        and	\tmp1, \tmp1, #ENTRY_PER_TABLE - 1			// table index
-        add	\tmp2, \tbl, #PAGE_SIZE
-        orr	\tmp2, \tmp2, #MM_TYPE_PAGE_TABLE
-        str	\tmp2, [\tbl, \tmp1, lsl #3]
-        add	\tbl, \tbl, #PAGE_SIZE					// next level table page
-.endm
-
-//-----------------------------------
-// MACRO create a block map
-//-----------------------------------
-.macro	create_block_map, tbl, phys, start, end, flags, tmp1
-        lsr	\start, \start, #SECTION_SHIFT
-        and	\start, \start, #ENTRY_PER_TABLE - 1			// table index
-        lsr	\end, \end, #SECTION_SHIFT
-        and	\end, \end, #ENTRY_PER_TABLE - 1				// table end index
-        lsr	\phys, \phys, #SECTION_SHIFT
-        mov	\tmp1, #\flags
-        orr	\phys, \tmp1, \phys, lsl #SECTION_SHIFT			// table entry
-    9999:
-        str	\phys, [\tbl, \start, lsl #3]				// store the entry
-        add	\start, \start, #1					// next entry
-        add	\phys, \phys, #SECTION_SIZE				// next block
-        cmp	\start, \end
-        b.ls	9999b
-.endm
-
-//-----------------------------------
-// MACRO implement push and pop sp
-//-----------------------------------
-.macro PUSH, reg
-    str   \reg, [sp, #-16]!         // push {register}
-.endm
-.macro POP, reg
-    ldr   \reg, [sp], #16           // pop {register}
-.endm
+#include "../include/asm_macros.inc"
 
 //---------------------------------------------------------------------------------------------------------------------
 // MAIN CODE HERE
@@ -146,8 +83,8 @@ switch_to_EL1:
 
     // set up exception handlers - moved to irq.S
     // I need to set this first, so after the MMU is enable the CPU will jump to fork_exit() and call schedule_tail, it then call kernel_main
-    ldr     x2, = vectors_debugger      // for debugger
-    msr     vbar_el1, x2
+//    ldr     x2, = vectors_debugger      // for debugger
+//    msr     vbar_el1, x2
 
     // change execution level to EL1
     mov     x2, #0x3c4
@@ -162,7 +99,7 @@ switch_to_EL1:
     eret    // jump to EL1
 
 _switch_to_EL1_continue:
-    mov     sp, x1
+    mov     sp, x1      // set stack to _start
 
 el1_entry:
 	adr	x0, bss_begin
@@ -176,7 +113,7 @@ init_mmu:
     // prepare virtual memory for main kernel.
     // we are going to fill in the empty directories
     bl 	__create_page_tables
-
+_after_pg_tlb:
     // update stack pointer to use our virtual memory. Since
     // kernel now use kernel address space, starting at VA_START, we just need to add into our stack pointer
     // and make sure stack is right below LOW_MEMORY which is 4MB mark
@@ -200,15 +137,17 @@ init_mmu:
     // we must do this before enabling MMU
     ldr	x2, =kernel_main
 
-    dsb ish
+//    dsb ish
     //isb
 
-    ldr	x0, =(SCTLR_VALUE_MMU_ENABLED)  // enable MMU
+    _crashed_point:
+//    ldr	x0, =(SCTLR_VALUE_MMU_ENABLED)  // enable MMU
+    mov x0, #1
     msr	sctlr_el1, x0
 
     // CODE WILL NEVER REACH HERE FOR SOME REASON. IT WILL JUMP TO ret_from_fork()
     // BY SOME KIND OF INTERRUPTS THEN CONTINUE
-    isb
+//    isb
 
     br x2
 

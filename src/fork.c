@@ -15,6 +15,8 @@ int copy_process(unsigned long clone_flags, unsigned long fn, unsigned long arg,
         return -1;
     }
 
+    printf("%x", p);
+
     struct pt_regs *childregs = task_pt_regs(p);
     memzero((unsigned long)childregs, sizeof(struct pt_regs));
     memzero((unsigned long)&p->cpu_context, sizeof(struct cpu_context));
