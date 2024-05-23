@@ -1,7 +1,7 @@
 SECTIONS
 {
-    . = 0xffff000000080000;
-/*	. = 0x80000;*/
+    /* . = 0xffff000000080000; */
+	. = 0x80000;
 	.text.boot : { *(.text.boot) }
 
 	. = ALIGN(0x00001000);
@@ -38,4 +38,4 @@ SECTIONS
 	/DISCARD/ : { *(.comment) *(.gnu*) *(.note*) *(.eh_frame*) }
 }
 
-
+bss_size = (bss_end - bss_begin)>>3;

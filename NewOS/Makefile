@@ -9,14 +9,15 @@ SRC_DIR = src
 INCLUDE_DIR = include
 OBJS_DIR = build/objs
 
-COPS = -Wall -nostdlib -nostartfiles -ffreestanding -Iinclude -Isrc -mgeneral-regs-only
-ASMOPS = -Iinclude
+COPS = -g -Wall -nostdlib -nostartfiles -ffreestanding -Iinclude -Isrc -mgeneral-regs-only
+ASMOPS = -g -Iinclude
 
 all: kernel8.img
 
 clean:
 	@echo "Cleaning build system"
 	@rm -rf $(OBJS_DIR)
+	@mkdir -p $(OBJS_DIR)
 	@rm $(BUILD_DIR)/kernel8.elf $(BUILD_DIR)/*.o $(BUILD_DIR)/*.img >/dev/null 2>/dev/null || true
 
 $(OBJS_DIR)/%_c.o: $(SRC_DIR)/%.c
@@ -50,10 +51,13 @@ kernel8.img: $(SRC_DIR)/link.ld $(OBJ_FILES)
 
 run: all
 	@echo "Running: --------------------------------------------------------------------------------- "
-	@$(QEMU) -M raspi3b -kernel kernel8.img -serial stdio -display none -s
+	@$(QEMU) -M raspi3b -kernel kernel8.img -serial stdio -display none -s 
+debug: all
+	@echo "QEMU starting. Remember to start gdb------------------------------------------------------ "
+	@$(QEMU) -M raspi3b -kernel kernel8.img -serial stdio -display none -s -S
 
 asm: all
 	@echo "Running: --------------------------------------------------------------------------------- "
 	@$(QEMU) -M raspi3b -kernel kernel8.img -serial null -display none -d in_asm -S -gdb tcp::1234
 gdb:
-	gdb-multiarch -ex 'file ./build/kernel8.elf'  -ex 'set arch aarch64' -ex 'target remote localhost:1234' -ex 'layout split' -ex 'layout regs' -q --nh
+	gdb-multiarch -ex 'file ./build/kernel8.elf'  -ex 'set arch aarch64' -ex 'target remote localhost:1234' -ex 'layout split' -ex 'layout regs' -ex 'b _start' -q --nh
