@@ -60,4 +60,4 @@ asm: all
 	@echo "Running: --------------------------------------------------------------------------------- "
 	@$(QEMU) -M raspi3b -kernel kernel8.img -serial null -display none -d in_asm -S -gdb tcp::1234
 gdb:
-	gdb -ex 'file build/kernel8.elf'  -ex 'set arch aarch64' -ex 'target remote localhost:1234' -ex 'layout split' -ex 'layout regs' -ex 'b _start' -q --nh
+	gdb -ex 'file build/kernel8.elf'  -ex 'set arch aarch64' -ex 'target remote localhost:1234' -ex 'layout split' -ex 'layout regs' -ex 'b _start' -ex 'b ___breakpoint' -q --nh
