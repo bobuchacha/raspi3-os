@@ -131,6 +131,10 @@ el1_irq:
 	kernel_entry 
 	bl	handle_irq
 	kernel_exit 
+el_dummy:
+    kernel_entry
+    bl	handle_irq
+    kernel_exit
 
 .globl err_hang
 err_hang: b err_hang
@@ -155,7 +159,8 @@ vectors_debugger:
     //ventry el0_sync
 
     // IRQ
-    ventry	el1_irq					// IRQ EL1h
+//    ventry	el1_irq					// IRQ EL1h
+    ventry	el_dummy					// IRQ EL1h
 
     // FIQ
     .align  7

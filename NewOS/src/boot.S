@@ -230,6 +230,7 @@ setup_page_tables:
     ldr 	x2, =(VA_START + DEVICE_BASE)		// first virtual address. TODO: change this to our peripheral address start
     ldr	    x3, =(VA_START + PHYS_MEMORY_SIZE - SECTION_SIZE)	// last virtual address
     create_block_map x0, x1, x2, x3, MMU_DEVICE_FLAGS, x4
+
 __br2:
     // point kernel to the map
     ldr     x10, =pg_dir

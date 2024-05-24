@@ -34,9 +34,11 @@ void kernel_main(void)
     kinfo("kernel_main: Kernel is running at EL%d", get_el());
     kprint("\nWELCOME TO ROS\n");
 
-    // generate a service call
-    asm volatile ("svc #0");
 
+    unsigned long *ptr = (unsigned long *)0xffff0000002d0000;
+    *ptr = 0xDEADCABDE;
+
+    printf("Address of X is %16x, value %x\n", (unsigned long)ptr, *ptr);
     while (1){
         schedule();
     }
