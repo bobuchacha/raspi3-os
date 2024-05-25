@@ -97,6 +97,17 @@ clear_bss:
 _init_mmu:
     bl      mmu_init
 
+_translate_mmu:
+    ldr x10, =0xFFFFFFFFFFe00000
+    at S1E1R, x10
+    mrs x11, par_el1
+
+    ldr x12, =0xFFFFFFFFFFC00000
+    at S1E1R, x12
+    mrs x13, par_el1
+
+___breakpoint:
+
 jump_to_kernel_main:
     b kernel_main
     b proc_hang
