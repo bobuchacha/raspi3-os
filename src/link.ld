@@ -1,8 +1,7 @@
 SECTIONS
 {
-	. = 0x80000;
+	. = 0xffff000000080000;
 	.text.boot : { *(.text.boot) }
-
 
 	. = ALIGN(0x00001000);
 	user_begin = .;
@@ -12,7 +11,7 @@ SECTIONS
     .bss.user : { build/user* (.bss) }
     user_end = .;
 
-    . = 0xffff000000080000;
+
 	.text : { *(.text .text.* .gnu.linkonce.t*) }
 	.rodata : { *(.rodata) }
 	. = ALIGN(4096);

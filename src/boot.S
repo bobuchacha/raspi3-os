@@ -83,8 +83,8 @@ switch_to_EL1:
 
     // set up exception handlers - moved to irq.S
     // I need to set this first, so after the MMU is enable the CPU will jump to fork_exit() and call schedule_tail, it then call kernel_main
-//    ldr     x2, = vectors_debugger      // for debugger
-//    msr     vbar_el1, x2
+    ldr     x2, = vectors_debugger      // for debugger
+    msr     vbar_el1, x2
 
     // change execution level to EL1
     mov     x2, #0x3c4
@@ -147,7 +147,7 @@ _after_pg_tlb:
 
     // CODE WILL NEVER REACH HERE FOR SOME REASON. IT WILL JUMP TO ret_from_fork()
     // BY SOME KIND OF INTERRUPTS THEN CONTINUE
-//    isb
+    isb
 
     br x2
 

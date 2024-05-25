@@ -48,6 +48,9 @@ kernel8.img: $(SRC_DIR)/link.ld $(OBJ_FILES)
 	@$(ARMGNU)-ld -nostdlib -T $(SRC_DIR)/link.ld -o $(BUILD_DIR)/kernel8.elf  $(OBJ_FILES)
 	@$(ARMGNU)-objcopy $(BUILD_DIR)/kernel8.elf -O binary kernel8.img
 
+dump:
+	@$(ARMGNU)-objdump --all-header $(BUILD_DIR)/kernel8.elf >> kernel8.txt
+
 run: all
 	@echo "Running: --------------------------------------------------------------------------------- "
 	@$(QEMU) -M raspi3b -kernel kernel8.img -serial stdio -display none -m 1024M -s
@@ -56,8 +59,8 @@ debug:
 	@$(QEMU) -M raspi3b -kernel kernel8.img -serial stdio -display none -m 1024M -s -S
 asm: all
 	@echo "Running: --------------------------------------------------------------------------------- "
-	@$(QEMU) -M raspi3b -kernel kernel8.img -serial null -display none -d in_asm -m 1024M -s -S
+	@$(QEMU) -M raspi3b -kernel kernel8.img -serial null -d in_asm -m 1024M -s -S -nographic -monitor stdio
 
 gdb:
-	gdb -ex 'file build/kernel8.elf' -ex 'set arch aarch64' -ex 'target remote localhost:1234' -ex 'layout split' -ex 'layout regs' -ex 'b _start' -q --nh
+	gdb-multiarch -ex 'file build/kernel8.elf' -ex 'set arch aarch64' -ex 'target remote localhost:1234' -ex 'layout split' -ex 'layout regs' -ex 'b _start' -q --nh
 
