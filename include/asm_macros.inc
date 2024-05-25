@@ -22,6 +22,8 @@
         create_table_entry \tbl, \virt, PUD_SHIFT, \tmp1, \tmp2
 .endm
 
+#define MM_TYPE_PAGE_TABLE2 (0b11 | (1 << 10) | (1<<6) | (3<<8) | (MT_NORMAL<<2))
+
 //-----------------------------------
 // MACRO create a table entry
 //-----------------------------------
@@ -29,7 +31,7 @@
         lsr	\tmp1, \virt, #\shift
         and	\tmp1, \tmp1, #ENTRY_PER_TABLE - 1			// table index
         add	\tmp2, \tbl, #PAGE_SIZE
-        orr	\tmp2, \tmp2, #MM_TYPE_PAGE_TABLE
+        orr	\tmp2, \tmp2, #MM_TYPE_PAGE_TABLE      // NORMAL MEMORY
         str	\tmp2, [\tbl, \tmp1, lsl #3]
         add	\tbl, \tbl, #PAGE_SIZE					// next level table page
 .endm
