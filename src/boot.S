@@ -109,10 +109,17 @@ _switch_to_EL1_continue:
     mov     sp, x1
 
 el1_entry:
-	adr	x0, bss_begin
-	adr	x1, bss_end
-	sub	x1, x1, x0
-	bl 	memzero             // zero out BSS
+	//adr	x0, bss_begin
+	//adr	x1, bss_end
+	//sub	x2, x1, x0
+	//bl 	memzero             // zero out BSS
+
+    //ldr     x1, =bss_begin
+    //ldr     w2, =bss_size
+//3:  cbz     w2, 4f
+    //str     xzr, [x1], #8
+    //sub     w2, w2, #1
+    //cbnz    w2, 3b
 
 
 4:
