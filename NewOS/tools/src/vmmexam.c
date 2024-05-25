@@ -60,6 +60,17 @@ ULONG get_physical_addr(ULONG va){
     return (block_addr + block_offs);
 }
 
+int get_memory_type_index(ULONG va){
+    unsigned char* type[] = {
+        "DEVICE",
+        "NORMAL"
+    };
+    ULONG pmd_id = GET_PMD_ID(va);
+    ULONG pmd_ent = pmd[pmd_id];
+    int memory_type = (pmd_id >> 2) & 8;
+    return memory_type;
+}
+
 int main(){
     printf("OPENING FILE...\n");
     f = fopen("tools/vmm.bin","rb");  // r for read, b for binary
@@ -82,11 +93,11 @@ int main(){
     printf("first long of PUD %x\n", pud[0]);
     printf("first long of PMD %x\n", pmd[0]);
 
-    ULONG va = 0xFFFF000000380000;
+    ULONG va = 0xFFFF00000F380023;
 
     // all verified
     printf("-------- [0x%llX] --------\n", va);
-    printf("Physical address of 0x%llx is 0x%llx\n", va, get_physical_addr(va));
+    printf("Physical address of 0x%llx is 0x%llx (type: %d)\n", va, get_physical_addr(va), get_memory_type_index(va));
 
     // debug
     printf("----------- DUMP BLOCK MAP ---------------\n");
