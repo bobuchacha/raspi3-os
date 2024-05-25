@@ -1,8 +1,8 @@
 #ARMGNU ?= /Applications/ArmGNUToolchain/12.3.Rel1/aarch64-none-elf/bin/aarch64-none-elf
-#ARMGNU ?= E:\Nextcloud\raspo3b-os/toolchain/Windows/arm-gnu-toolchain-13.2.Rel1-mingw-w64-i686-aarch64-none-elf/bin/aarch64-none-elf
-ARMGNU ?= aarch64-none-elf
-QEMU ?= qemu-system-aarch64
-#QEMU = d:\qemu\qemu-system-aarch64.exe
+ARMGNU ?= E:\Nextcloud\raspo3b-os/toolchain/Windows/arm-gnu-toolchain-13.2.Rel1-mingw-w64-i686-aarch64-none-elf/bin/aarch64-none-elf
+#ARMGNU ?= aarch64-none-elf
+#QEMU ?= qemu-system-aarch64
+QEMU = d:\qemu\qemu-system-aarch64.exe
 
 BUILD_DIR = build
 SRC_DIR = src
@@ -61,4 +61,4 @@ asm: all
 	@echo "Running: --------------------------------------------------------------------------------- "
 	@$(QEMU) -M raspi3b -kernel kernel8.img -serial null -d in_asm -monitor stdio -nographic -S -gdb tcp::1234
 gdb:
-	gdb -ex 'file build/kernel8.elf'  -ex 'set arch aarch64' -ex 'target remote localhost:1234' -ex 'layout split' -ex 'layout regs' -ex 'b _start' -ex 'b ___breakpoint' -q --nh
+	gdb-multiarch -ex 'file build/kernel8.elf'  -ex 'set arch aarch64' -ex 'target remote localhost:1234' -ex 'layout split' -ex 'layout regs' -ex 'b _start' -ex 'b ___breakpoint' -q --nh

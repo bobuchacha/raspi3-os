@@ -73,7 +73,7 @@ int get_memory_type_index(ULONG va){
 
 int main(){
     printf("OPENING FILE...\n");
-    f = fopen("tools/vmm.bin","rb");  // r for read, b for binary
+    f = fopen("tools/workmmu.bin","rb");  // r for read, b for binary
 
     if (!f) {
         printf("[ERROR] File vmm.bin not found");
@@ -90,10 +90,10 @@ int main(){
     printf("Memory different from value to file offset is 0x%X\n", mem_offset);
 
     printf("first long of PGD %x\n", pgd[0]);
-    printf("first long of PUD %x\n", pud[0]);
+    printf("last long of PUD %x\n", pud[511]);
     printf("first long of PMD %x\n", pmd[0]);
 
-    ULONG va = 0xFFFF00000F380023;
+    ULONG va = 0xFFFFFFFFFF000000;
 
     // all verified
     printf("-------- [0x%llX] --------\n", va);
