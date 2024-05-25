@@ -38,6 +38,7 @@ void init_vmm(){
 
 #define TTBR_CNP    1
 
+
 // get addresses from linker
 extern volatile unsigned char _data;
 extern volatile unsigned char _end;

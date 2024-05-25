@@ -261,6 +261,46 @@ void kpanic(char *fmt, ...) {
     asm volatile("brk #0"); // call debugger
 }
 
+void print_c(unsigned char c){
+    stdout_putf(stdout_putp, c);
+}
+
+/**
+ * Dump memory
+ */
+void kdump(void *ptr)
+{
+    kdump_size(ptr, 512);
+}
+
+void kdump_size(void *ptr, int size)
+{
+    unsigned long a;
+    unsigned long b;
+    unsigned long d;
+    unsigned char c;
+
+    printf("\n--------------------------------- [DUMP HEX 0x%X + %d] ----------------------------------\n", ptr, size);
+    for(a=(unsigned long)ptr;a<(unsigned long)ptr+size;a+=16) {
+        printf("%16X:    ");
+        for(b=0;b<16;b++) {
+            c=*((unsigned char*)(a+b));
+            d=(unsigned int)c;d>>=4;d&=0xF;d+=d>9?0x37:0x30;print_c( d);
+            d=(unsigned int)c;d&=0xF;d+=d>9?0x37:0x30;print_c(d);
+            print_c(' ');
+            if(b%4==3)
+                print_c(' ');
+        }
+        for(b=0;b<16;b++) {
+            c=*((unsigned char*)(a+b));
+            print_c(c<32||c>=127?'.':c);
+        }
+        print_c('\r');
+        print_c('\n');
+    }
+    printf("- END -\n");
+}
+
 static void putcp(void* p,char c)
     {
     *(*((char**)p))++ = c;

@@ -1,19 +1,11 @@
 #include "arm/sysregs.h"
 #include "memory.h"
 
-.macro padded_string string, max
-    1:
-        .ascii "\string"
-    2:
-        .iflt \max - (2b - 1b)
-        .error "String too long"
-        .endif
+#include "../include/asm_macros.inc"
 
-        .ifgt \max - (2b - 1b)
-        .zero \max - (2b - 1b)
-        .endif
-.endm
-
+//---------------------------------------------------------------------------------------------------------------------
+// MAIN CODE HERE
+//---------------------------------------------------------------------------------------------------------------------
 .section ".text.boot"
 
 .globl _start
@@ -57,7 +49,7 @@ master:
     msr     spsr_el3, x2
     adr     x2, _switch_to_EL1_continue
     msr     elr_el3, x2
-    eret
+    eret    // jump to EL1
 
 
 switch_to_EL1:
@@ -90,8 +82,9 @@ switch_to_EL1:
     msr     sctlr_el1, x2
 
     // set up exception handlers - moved to irq.S
-    //ldr     x2, =_vectors_debugger
-    //msr     vbar_el1, x2
+    // I need to set this first, so after the MMU is enable the CPU will jump to fork_exit() and call schedule_tail, it then call kernel_main
+    ldr     x2, = vectors_debugger      // for debugger
+    msr     vbar_el1, x2
 
     // change execution level to EL1
     mov     x2, #0x3c4
@@ -103,10 +96,10 @@ switch_to_EL1:
     msr     elr_el1, xzr
     msr     far_el1, xzr
 
-    eret
+    eret    // jump to EL1
 
 _switch_to_EL1_continue:
-    mov     sp, x1
+    mov     sp, x1      // set stack to _start
 
 el1_entry:
 	//adr	x0, bss_begin
@@ -122,10 +115,80 @@ el1_entry:
     //cbnz    w2, 3b
 
 
-4:
-	mov	sp, #(2 * SECTION_SIZE)
-	bl	kernel_main
-	b 	proc_hang		// should never come here
+init_mmu:
+
+    // prepare virtual memory for main kernel.
+    // we are going to fill in the empty directories
+    bl 	__create_page_tables
+_after_pg_tlb:
+    // update stack pointer to use our virtual memory. Since
+    // kernel now use kernel address space, starting at VA_START, we just need to add into our stack pointer
+    // and make sure stack is right below LOW_MEMORY which is 4MB mark
+
+    mov	x0, #VA_START
+    add	sp, x0, #LOW_MEMORY     // for some reason sp is still at physical LOW_MEMORY
+
+    ldr	x0, =(TCR_VALUE)        // load Translation Control Register
+    msr	tcr_el1, x0
+
+    isb // disable interrupt
+
+    adrp	x0, pg_dir          // load our kernel selector to base of kernel directory
+    msr	ttbr1_el1, x0
 
 
+    ldr	x0, =(MAIR_VALUE)       // Load our MAIR value
+    msr	mair_el1, x0
 
+    // we need to load kernel entry point into x2 now. This is the absolute address of kernel_main
+    // we must do this before enabling MMU
+    ldr	x2, =kernel_main
+
+//    dsb ish
+    //isb
+
+    _crashed_point:
+//    ldr	x0, =(SCTLR_VALUE_MMU_ENABLED)  // enable MMU
+    mov x0, #1
+    msr	sctlr_el1, x0
+
+    // CODE WILL NEVER REACH HERE FOR SOME REASON. IT WILL JUMP TO ret_from_fork()
+    // BY SOME KIND OF INTERRUPTS THEN CONTINUE
+    isb
+
+    br x2
+
+//1:
+//    b 1b
+//    br x2                     // jump to kernel main
+//
+//jump_to_kernel:
+//    b kernel_main
+1:
+    b 1b
+
+__create_page_tables:
+    mov	x29, x30						// save return address
+
+    adrp	x0, pg_dir          // zero out our directories
+    mov	x1, #PG_DIR_SIZE        // it is 3 pages total in length
+    bl 	memzero
+
+    adrp	x0, pg_dir          // map our kernel address space
+    mov	x1, #VA_START
+    create_pgd_entry x0, x1, x6, x7 // table holds in x0, virtual address in x1, x2 and x3 are registers for temporary calculating
+
+    /* Mapping kernel and init stack. */
+    mov 	x1, xzr							// start mapping from physical offset 0
+    mov 	x2, #VA_START						// first virtual address
+    ldr	x3, =(VA_START + DEVICE_BASE - SECTION_SIZE)		// last virtual address
+    create_block_map x0, x1, x2, x3, MMU_FLAGS, x4      // block type, normal access, no cache
+
+    /* Mapping device memory*/
+    mov 	x1, #DEVICE_BASE					// start mapping from device base address
+    ldr 	x2, =(VA_START + DEVICE_BASE)		// first virtual address. TODO: change this to our peripheral address start
+    ldr	x3, =(VA_START + PHYS_MEMORY_SIZE - SECTION_SIZE)	// last virtual address
+    create_block_map x0, x1, x2, x3, MMU_DEVICE_FLAGS, x4
+
+    mov x30, x29    // restore return address
+    ret

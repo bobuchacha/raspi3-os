@@ -2,7 +2,6 @@
 <project version="4">
   <component name="VcsDirectoryMappings">
     <mapping directory="" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/_RPiOS" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/_raspi3-tutorial1" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/NewOS/samples-codes/mmu-map-address-simulator" vcs="Git" />
   </component>
 </project>

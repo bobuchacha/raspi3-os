@@ -22,21 +22,21 @@ get_int:
 .globl get16
 get16:
 get_short:
-	ldr w0,[x0], #16
+	ldr w0,[x0, #16]
 	ret
 
 .global put_short
 .globl put16
 put16:
 put_short:
-	str w1,[x0], #16
+	str w1,[x0, #16]
 	ret
 
 .globl get_char
 .globl get8
 get8:
 get_char:
-	ldr w0,[x0], #8
+	ldr w0,[x0, #8]
 	ret
 
 .global put_char

@@ -1,4 +1,6 @@
-#include "mini_uart.h"
+#include "uart0.h"
+
+#define uart_getc uart0_getc
 
 #define DISASSEMBLER 1
 
@@ -234,10 +236,12 @@ void dbg_main()
             for(i=0;i<31;i++) {
                 if(i && i%3==0) printf("\n");
                 if(i<10) printf(" ");
-                printf("x%d: %16x  ",i,dbg_regs[i]);
+                printf("x%d: %16X  ",i,dbg_regs[i]);
             }
             // some system registers
-            printf("elr_el1: %x  spsr_el1: %x\n  esr_el1: %x  far_el1: %x\nsctlr_el1: %x  tcr_el1: %x\n",
+            printf( "\n  ELR_EL1: %16x              SPSR_EL1: %16x" \
+                    "\n  ESR_EL1: %16x               FAR_EL1: %16x" \
+                    "\nSCTLR_EL1: %16x               TCR_EL1: %16x\n",
                 dbg_regs[31],dbg_regs[32],dbg_regs[33],dbg_regs[34],dbg_regs[35],dbg_regs[36]);
             continue;
         } else
@@ -274,7 +278,7 @@ void dbg_main()
                 // disassemble AArch64 bytecode
                 while(os<oe) {
                     // print out address and instruction bytecode
-                    printf("%8x: %8x",os,*((unsigned int*)os));
+                    printf("%8x:    %8x",os,*((unsigned int*)os));
 #if DISASSEMBLER
                     // disassemble and print out instruction mnemonic
                     os=disasm(os,str);
@@ -290,7 +294,7 @@ void dbg_main()
                 // for each 16 bytes, do
                 for(a=os;a<oe;a+=16) {
                     // print out address
-                    printf("%08x: ", a);
+                    printf("%08x:    ", a);
                     // hex representation
                     for(i=0;i<16;i++) {
                         printf("%02x%s ",*((unsigned char*)(a+i)),i%4==3?" ":"");

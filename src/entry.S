@@ -131,6 +131,10 @@ el1_irq:
 	kernel_entry 
 	bl	handle_irq
 	kernel_exit 
+el_dummy:
+    kernel_entry
+    bl	handle_irq
+    kernel_exit
 
 .globl err_hang
 err_hang: b err_hang
@@ -152,9 +156,11 @@ vectors_debugger:
     bl      dbg_decodeexc
     bl      dbg_main
     eret
+    //ventry el0_sync
 
     // IRQ
-    ventry	el1_irq					// IRQ EL1h
+//    ventry	el1_irq					// IRQ EL1h
+    ventry	el_dummy					// IRQ EL1h
 
     // FIQ
     .align  7
@@ -237,3 +243,15 @@ dbg_saveregs:
     mrs     x1, tcr_el1
     str     x1, [x0], #8
     ret
+/*
+el0_sync:
+    kernel_entry 0
+    mrs	x25, esr_el1				    // read the syndrome register
+    lsr	x24, x25, #ESR_ELx_EC_SHIFT		// exception class
+    cmp	x24, #ESR_ELx_EC_SVC64			// SVC in 64-bit state
+    b.eq	el0_svc
+    handle_invalid_entry 0, SYNC_ERROR
+*/
+sc_nr	.req	x25					// number of system calls
+scno	.req	x26					// syscall number
+stbl	.req	x27					// syscall table pointer
