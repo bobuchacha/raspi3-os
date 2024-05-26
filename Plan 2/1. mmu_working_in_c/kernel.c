@@ -5,6 +5,6 @@
 
 void kernel_main(){
     // mmu_init();
-    // asm volatile("___breakpoint:");
+    asm volatile("___breakpoint:");
     while(1);
 }

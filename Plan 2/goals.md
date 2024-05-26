@@ -1,0 +1,1 @@
+1. Able to print string from Assembly code

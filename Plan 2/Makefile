@@ -1,6 +1,7 @@
 #ARMGNU ?= /Applications/ArmGNUToolchain/12.3.Rel1/aarch64-none-elf/bin/aarch64-none-elf
+ARMGNU ?= /Applications/ArmGNUToolchain/13.2.Rel1/aarch64-none-elf/bin/aarch64-none-elf
 #ARMGNU ?= E:\Nextcloud\raspo3b-os/toolchain/Windows/arm-gnu-toolchain-13.2.Rel1-mingw-w64-i686-aarch64-none-elf/bin/aarch64-none-elf
-ARMGNU ?= aarch64-none-elf
+#ARMGNU ?= aarch64-none-elf
 QEMU ?= qemu-system-aarch64
 #QEMU = d:\qemu\qemu-system-aarch64.exe
 
@@ -9,7 +10,7 @@ SRC_DIR = src
 INCLUDE_DIR = include
 OBJS_DIR = build/objs
 
-COPS = -g -Wall -nostdlib -nostartfiles -ffreestanding -Iinclude -Isrc -mgeneral-regs-only
+COPS = -g -Wall -nostdlib -nostartfiles -ffreestanding -Iinclude -Isrc -Isrc/include -mgeneral-regs-only
 ASMOPS = -g -Iinclude
 
 all: kernel8.img
@@ -49,16 +50,16 @@ kernel8.img: $(SRC_DIR)/link.ld $(OBJ_FILES)
 	@$(ARMGNU)-ld -nostdlib -T $(SRC_DIR)/link.ld -o $(BUILD_DIR)/kernel8.elf  $(OBJ_FILES) -g
 	@$(ARMGNU)-objcopy $(BUILD_DIR)/kernel8.elf -O binary kernel8.img
 dump: all
-	@$(ARMGNU)-objdump --all-headers $(BUILD_DIR)/kernel8.elf >> kernel8.txt
+	@$(ARMGNU)-objdump --all-headers $(BUILD_DIR)/kernel8.elf
 run: all
 	@echo "Running: --------------------------------------------------------------------------------- "
-	@$(QEMU) -M raspi3b -kernel kernel8.img -serial stdio -display none -s
+	@$(QEMU) -M raspi3b -kernel kernel8.img  -serial null -serial stdio -s -display none
 debug: all
 	@echo "QEMU starting. Remember to start gdb------------------------------------------------------ "
-	@$(QEMU) -M raspi3b -kernel kernel8.img -serial stdio -display none -s -S
+	@$(QEMU) -M raspi3b -kernel kernel8.img -serial null -serial stdio -display none -s -S
 
 asm: all
 	@echo "Running: --------------------------------------------------------------------------------- "
 	@$(QEMU) -M raspi3b -kernel kernel8.img -serial null -d in_asm -monitor stdio -nographic -S -gdb tcp::1234
 gdb:
-	gdb -ex 'file build/kernel8.elf'  -ex 'set arch aarch64' -ex 'target remote localhost:1234' -ex 'layout split' -ex 'layout regs' -ex 'b _start' -ex 'b ___breakpoint' -q --nh
+	gdb -ex 'file build/kernel8.elf'  -ex 'set arch aarch64' -ex 'target remote localhost:1234' -ex 'layout split' -ex 'layout regs' -ex 'b _start' -ex 'b breakpoint' -q --nh

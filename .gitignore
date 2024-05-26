@@ -7,3 +7,7 @@
 /_raspberry-pi-os/
 /kernel8.S
 /kernel.txt
+*.o
+*.elf
+*.img
+*.d
