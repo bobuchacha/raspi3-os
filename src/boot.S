@@ -83,8 +83,8 @@ switch_to_EL1:
 
     // set up exception handlers - moved to irq.S
     // I need to set this first, so after the MMU is enable the CPU will jump to fork_exit() and call schedule_tail, it then call kernel_main
-    ldr     x2, = vectors_debugger      // for debugger
-    msr     vbar_el1, x2
+//    ldr     x2, = vectors_debugger      // for debugger
+//    msr     vbar_el1, x2
 
     // change execution level to EL1
     mov     x2, #0x3c4
@@ -120,7 +120,7 @@ init_mmu:
     // prepare virtual memory for main kernel.
     // we are going to fill in the empty directories
     bl 	__create_page_tables
-_after_pg_tlb:
+    _after_pg_tlb:
     // update stack pointer to use our virtual memory. Since
     // kernel now use kernel address space, starting at VA_START, we just need to add into our stack pointer
     // and make sure stack is right below LOW_MEMORY which is 4MB mark
@@ -144,11 +144,11 @@ _after_pg_tlb:
     // we must do this before enabling MMU
     ldr	x2, =kernel_main
 
-//    dsb ish
-    //isb
+    dsb ish
+    isb
 
     _crashed_point:
-//    ldr	x0, =(SCTLR_VALUE_MMU_ENABLED)  // enable MMU
+    ldr	x0, =(SCTLR_VALUE_MMU_ENABLED)  // enable MMU
     mov x0, #1
     msr	sctlr_el1, x0
 
