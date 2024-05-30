@@ -46,9 +46,11 @@ typedef struct __attribute((__packed__, aligned(16))) heap_segment{
 
 
 void init_memory_management();                      // memory.c
-
-
-
-
+void mem_dump_pagemap(int start, int count);        // dump a page map
+void * mem_alloc_page(void);                        // allocate a page in physical memory
+void mem_free_page(void * ptr);                     // free a page
+void * kmalloc(int bytes);                              // allocate a memory
+void * krealloc(void *ptr, unsigned int bytes);         // reallocate a memory
+void kfree(void *ptr);                                  // free a memory
 #endif
 #endif //RASPI3_OS_MEMORY_H

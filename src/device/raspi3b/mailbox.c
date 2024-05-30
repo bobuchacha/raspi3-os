@@ -63,7 +63,7 @@ void mailbox_send(MailMessage msg, int channel) {
 int mailbox_call(unsigned long data[], unsigned char channel)
 {
     // address of buffer, clear low 4 bit, add channel to low 4 bit
-    unsigned int r = (((unsigned int)(data)&~0xF) | (channel&0xF));
+    // unsigned int r = (((unsigned int)(data)&~0xF) | (channel&0xF));
     MailMessage msg;
     msg.data = ((unsigned int)(data)&~0xF);    // CLEAR LOW 4 BIT of data, shift right
 

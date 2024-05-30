@@ -12,10 +12,11 @@
 #define log(value, level) \
 	kprint("(" level ") %s (" __FILE__ ":%d) ", __func__, __LINE__); \
     kprint(value);
-#define log_fail(value) log(value, LOG_FAIL)
-#define log_test(value) log(value, LOG_TEST)
-#define log_info(value) log(value, LOG_INFO)
-#define log_warning(value) log(value, LOG_WARNING)
-#define log_error(value) log(value, LOG_ERROR)
+
+#define log_fail(value)     log(value, LOG_FAIL)
+#define log_test(value)     log(value, LOG_TEST)
+#define log_info(value)     log(value, LOG_INFO)
+#define log_warning(value)  log(value, LOG_WARNING)
+#define log_error(value)    log(value, LOG_ERROR)
 
 #endif

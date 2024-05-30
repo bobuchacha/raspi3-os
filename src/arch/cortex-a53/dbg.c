@@ -1,6 +1,7 @@
 #include "arch/cortex-a53/boot/uart1.h"
+#include "device/raspi3b/peripherals/uart0.h"
 
-#define uart_getc uart1_getc
+#define uart_getc uart0_getc
 
 #define DISASSEMBLER 1
 

@@ -3,6 +3,7 @@
 #include "printf.h"
 #include "log.h"
 #include "device/sd.h"
+#include "timer.h"
 
 #define MMIO_BASE PBASE
 #define EMMC_ARG2           ((volatile unsigned int*)(MMIO_BASE+0x00300000))

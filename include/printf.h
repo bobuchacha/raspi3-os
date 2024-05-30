@@ -105,5 +105,10 @@ void tfp_format(void* putp,void (*putf) (void*,char),char *fmt, va_list va);
 
 void kdump_size(void *ptr, int size);
 void kdump(void *ptr);
+void kprint(char *fmt, ...);
+void kdebug(char *fmt, ...);
+void kinfo(char *fmt, ...);
+void kerror(char *fmt, ...);
+void kpanic(char *fmt, ...);
 
 #endif

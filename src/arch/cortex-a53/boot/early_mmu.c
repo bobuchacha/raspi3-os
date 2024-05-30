@@ -93,9 +93,10 @@ void _mmu_map_kernel(void) {
     // point first PGD entry to the base of PUD
     ttbr0_pgd[0] = (unsigned long long)ttbr0_pud | PE_KERNEL_CODE | PT_TABLE_ENTRY;
     // point first PUD entry to our PMD
-    ttbr0_pud[0] = (unsigned long long)ttbr0_pmd | PE_KERNEL_CODE | PT_TABLE_ENTRY;
+    // ttbr0_pud[0] = (unsigned long long)ttbr0_pmd | PE_KERNEL_CODE | PT_TABLE_ENTRY;
+    ttbr0_pud[0] = (unsigned long long)0 | PE_KERNEL_CODE | PT_BLOCK_ENTRY;             // map first 1GB of memory to the low so kernel gets access to real physical memory
     // point first PMD entry to first 2MB memory
-    ttbr0_pmd[0] = (unsigned long long)0 | PE_KERNEL_CODE | PT_BLOCK_ENTRY;
+    //ttbr0_pmd[0] = (unsigned long long)0 | PE_KERNEL_CODE | PT_BLOCK_ENTRY;
     return;
 }
 
