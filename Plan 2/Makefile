@@ -1,7 +1,7 @@
 #ARMGNU ?= /Applications/ArmGNUToolchain/12.3.Rel1/aarch64-none-elf/bin/aarch64-none-elf
-ARMGNU ?= /Applications/ArmGNUToolchain/13.2.Rel1/aarch64-none-elf/bin/aarch64-none-elf
+#ARMGNU ?= /Applications/ArmGNUToolchain/13.2.Rel1/aarch64-none-elf/bin/aarch64-none-elf
 #ARMGNU ?= E:\Nextcloud\raspo3b-os/toolchain/Windows/arm-gnu-toolchain-13.2.Rel1-mingw-w64-i686-aarch64-none-elf/bin/aarch64-none-elf
-#ARMGNU ?= aarch64-none-elf
+ARMGNU ?= aarch64-none-elf
 QEMU ?= qemu-system-aarch64
 #QEMU = d:\qemu\qemu-system-aarch64.exe
 
@@ -51,12 +51,14 @@ kernel8.img: $(SRC_DIR)/link.ld $(OBJ_FILES)
 	@$(ARMGNU)-objcopy $(BUILD_DIR)/kernel8.elf -O binary kernel8.img
 dump: all
 	@$(ARMGNU)-objdump --all-headers $(BUILD_DIR)/kernel8.elf
+diasm: all
+	@$(ARMGNU)-objdump --all-headers $(BUILD_DIR)/kernel8.elf
 run: all
 	@echo "Running: --------------------------------------------------------------------------------- "
-	@$(QEMU) -M raspi3b -kernel kernel8.img  -serial null -serial stdio -s -display none
+	@$(QEMU) -M raspi3b -kernel kernel8.img  -serial stdio -s -display none
 debug: all
 	@echo "QEMU starting. Remember to start gdb------------------------------------------------------ "
-	@$(QEMU) -M raspi3b -kernel kernel8.img -serial null -serial stdio -display none -s -S
+	@$(QEMU) -M raspi3b -kernel kernel8.img -serial null -serial stdio -display none -s -S -d trace:bcm2835_systmr*
 
 asm: all
 	@echo "Running: --------------------------------------------------------------------------------- "

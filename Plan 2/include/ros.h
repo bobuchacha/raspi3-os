@@ -3,5 +3,15 @@
 
 typedef unsigned long long ULONG ;
 
+#define CONST       const
+
+typedef int             BOOL;                   // 	A Boolean variable (should be TRUE or FALSE).
+
+typedef enum {
+    TRUE = 1,
+    FALSE = 0
+} BOOLEAN;
+
 
 #endif
+

@@ -1,0 +1,22 @@
+{
+    "files.associations": {
+        "mair.h": "c",
+        "ros.h": "c",
+        "uart1.h": "c",
+        "pte.h": "c",
+        "bootcode.h": "c",
+        "tcr.h": "c",
+        "stdarg.h": "c",
+        "base.h": "c",
+        "mailbox.h": "c",
+        "raspi3b.h": "c",
+        "uart0.h": "c",
+        "gpio.h": "c",
+        "irq.h": "c",
+        "timer.h": "c",
+        "printf.h": "c",
+        "memory.h": "c",
+        "mini_uart.h": "c"
+    },
+    "C_Cpp.errorSquiggles": "enabled"
+}

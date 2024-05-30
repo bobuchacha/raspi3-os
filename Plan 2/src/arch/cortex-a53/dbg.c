@@ -1,6 +1,6 @@
-#include "uart0.h"
+#include "arch/cortex-a53/boot/uart1.h"
 
-#define uart_getc uart0_getc
+#define uart_getc uart1_getc
 
 #define DISASSEMBLER 1
 
@@ -10,18 +10,18 @@ unsigned long dbg_regs[37];
 char cmd[256], dbg_running=0;
 
 #if DISASSEMBLER
-/**
- * things needed by the disassembler
- */
-#include "printf.h"
-#undef NULL
-#define NULL ((void*)0)
-typedef unsigned long   uint64_t;
-typedef unsigned int    uint32_t;
-typedef unsigned short  uint16_t;
-typedef unsigned char   uint8_t;
-// include the Universal Disassembler Library
-#include "debugger/disasm.h"
+    /**
+     * things needed by the disassembler
+     */
+    #include "printf.h"
+    #undef NULL
+    #define NULL ((void*)0)
+    typedef unsigned long   uint64_t;
+    typedef unsigned int    uint32_t;
+    typedef unsigned short  uint16_t;
+    typedef unsigned char   uint8_t;
+    // include the Universal Disassembler Library
+    #include "arch/cortex-a53/disasm.h"
 #endif
 
 /**
@@ -81,8 +81,8 @@ void dbg_decodeexc(unsigned long type)
     // if the exception happened in the debugger, we stop to avoid infinite loop
     if(dbg_running) {
         printf("Exception in debugger!\n"
-               "  elr_el1: %x  spsr_el1: %x\n  esr_el1: %x  far_el1: %x\nsctlr_el1: %x  tcr_el1: %x\n",
-               dbg_regs[31],dbg_regs[32],dbg_regs[33],dbg_regs[34],dbg_regs[35],dbg_regs[36]);
+            "  elr_el1: %x  spsr_el1: %x\n  esr_el1: %x  far_el1: %x\nsctlr_el1: %x  tcr_el1: %x\n",
+            dbg_regs[31],dbg_regs[32],dbg_regs[33],dbg_regs[34],dbg_regs[35],dbg_regs[36]);
         while(1);
     }
 }
@@ -123,18 +123,18 @@ void dbg_getline()
                 cmdlast--;
             }
         } else
-            // Delete
+        // Delete
         if(c==1) {
             if(cmdidx<cmdlast) {
                 for(i=cmdidx;i<cmdlast;i++) cmd[i]=cmd[i+1];
                 cmdlast--;
             }
         } else
-            // cursor left
+        // cursor left
         if(c==2) {
             if(cmdidx>0) cmdidx--;
         } else
-            // cursor right
+        // cursor right
         if(c==3) {
             if(cmdidx<cmdlast) cmdidx++;
         } else {
@@ -200,7 +200,7 @@ unsigned long dbg_getoffs(int i)
  */
 void dbg_main()
 {
-    unsigned long os=0, oe=0, a;
+    unsigned long long os=0, oe=0, a;
     char c;
 #if DISASSEMBLER
     char str[64];
@@ -217,35 +217,35 @@ void dbg_main()
         if(cmd[0]==0 || cmd[0]=='?' || cmd[0]=='h') {
             // print help
             printf("Mini debugger commands:\n"
-                   "  ?/h\t\tthis help\n"
-                   "  r\t\tdump registers\n"
-                   "  x [os [oe]]\texamine memory from offset start (os) to offset end (oe)\n"
-                   "  i [os [oe]]\tdisassemble instruction from offset start to offset end\n"
-                   "  c\t\tcontinue execution\n");
+                "  ?/h\t\tthis help\n"
+                "  r\t\tdump registers\n"
+                "  x [os [oe]]\texamine memory from offset start (os) to offset end (oe)\n"
+                "  i [os [oe]]\tdisassemble instruction from offset start to offset end\n"
+                "  c\t\tcontinue execution\n");
             continue;
         } else
-            // continue execution
+        // continue execution
         if(cmd[0]=='c') {
             // move instruction pointer, skip over 'brk'
             asm volatile ("msr elr_el1, %0" : : "r" (dbg_regs[31]+4));
             break;
         } else
-            // dump registers
+        // dump registers
         if(cmd[0]=='r') {
             // general purpose registers x0-x30
             for(i=0;i<31;i++) {
                 if(i && i%3==0) printf("\n");
                 if(i<10) printf(" ");
-                printf("x%d: %16X  ",i,dbg_regs[i]);
+                printf("x%d: %16lx  ",i,dbg_regs[i]);
             }
             // some system registers
-            printf( "\n  ELR_EL1: %16x              SPSR_EL1: %16x" \
-                    "\n  ESR_EL1: %16x               FAR_EL1: %16x" \
-                    "\nSCTLR_EL1: %16x               TCR_EL1: %16x\n",
-                    dbg_regs[31],dbg_regs[32],dbg_regs[33],dbg_regs[34],dbg_regs[35],dbg_regs[36]);
+            printf( "\n\n  ELR_EL1: %16lx              SPSR_EL1: %16lx" \
+                    "\n  ESR_EL1: %16lx               FAR_EL1: %16lx" \
+                    "\nSCTLR_EL1: %16lx               TCR_EL1: %16lx\n",
+                dbg_regs[31],dbg_regs[32],dbg_regs[33],dbg_regs[34],dbg_regs[35],dbg_regs[36]);
             continue;
         } else
-            // examine or disassemble, commands with arguments
+        // examine or disassemble, commands with arguments
         if(cmd[0]=='x' || cmd[0]=='i') {
             i=1;
             // get first argument
@@ -278,11 +278,11 @@ void dbg_main()
                 // disassemble AArch64 bytecode
                 while(os<oe) {
                     // print out address and instruction bytecode
-                    printf("%8x:    %8x",os,*((unsigned int*)os));
+                    printf("%16lx:    %8x",os,*((unsigned int*)os));
 #if DISASSEMBLER
                     // disassemble and print out instruction mnemonic
                     os=disasm(os,str);
-                    printf("\t%s\n",str);
+                    printf("\t%s %lx\n",str);
 #else
                     os+=4;
                     printf("\n");
@@ -294,7 +294,7 @@ void dbg_main()
                 // for each 16 bytes, do
                 for(a=os;a<oe;a+=16) {
                     // print out address
-                    printf("%08x:    ", a);
+                    printf("%016lx:    ", a);
                     // hex representation
                     for(i=0;i<16;i++) {
                         printf("%02x%s ",*((unsigned char*)(a+i)),i%4==3?" ":"");

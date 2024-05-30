@@ -1,6 +1,6 @@
 ENTRY(_start)
 REAL_LOAD = 0x80000;
-VIRT_ADDR = 0xFFFFFFFF00000000 + REAL_LOAD;
+VIRT_ADDR = 0xFFFF000000000000;
 
 SECTIONS {
         /* LOW BOOT CODE */
@@ -46,6 +46,7 @@ SECTIONS {
                 bss_end = .;
         }
         _end = .;
+        PROVIDE(HEAP_START = .);
 }
 
 bss_size = (bss_end - bss_begin) >> 3;
