@@ -1,45 +1,39 @@
-#include "mini_uart.h"
-#include "uart0.h"
+//
+// Created by Thang Cao on 5/23/24.
+//
+#include "arch/cortex-a53/boot/uart1.h"
 #include "printf.h"
-#include "utils.h"
-#include "debugger/dbg.h"
-#include "timer.h"
-#include "irq.h"
-#include "sched.h"
-#include "fork.h"
-#include "kprint.h"
-#include "mailbox.h"
+#include "device/raspi3b.h"
+#include "irq.h"            // some code in device irq or arch irq
+#include "log.h"
 
-unsigned char * msg = "Welcome from Assembly";
+static unsigned char _putp[1024];
 
+void kernel_main(){
 
-
-void kernel_main(void)
-{
-	uart_init();
+    // initialize printf to use our uart1 for now
     uart0_init();
-
     init_printf(0, uart0_putc);
-    kinfo("kernel_main: Initializing IRQ...");
+    log_info("Initialize kernel...\n");
+
+    log_info("Initializing IRQ...\n");
     disable_irq();
     irq_vector_init();
 
-    kinfo("kernel_main: Initializing Timer...");
+    log_info("Initializing Timer...\n");
     timer_init();
 
-    kinfo("kernel_main: Enabling interrupt controllers & timer...");
+    log_info("Enabling interrupt controllers & timer...\n");
     enable_interrupt_controller();
     enable_irq();
+    
+    log_info("Enabling memory management...\n");
+    init_memory_management();
 
-    kinfo("kernel_main: Kernel is running at EL%d", get_el());
+    kinfo("kernel_main: Kernel is running at EL%d\n", get_el());
     kprint("\nWELCOME TO ROS\n");
 
+//    kdump(&kernel_main);
 
-    unsigned long *ptr = (unsigned long *)0xffff0000002d0000;
-    *ptr = 0xDEADCABDE;
-
-    printf("Address of X is %16x, value %x\n", (unsigned long)ptr, *ptr);
-    while (1){
-        schedule();
-    }
+    while(1);
 }

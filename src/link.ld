@@ -1,40 +1,52 @@
-SECTIONS
-{
-	. = 0xffff000000080000;
-	.text.boot : { *(.text.boot) }
+ENTRY(_start)
+REAL_LOAD = 0x80000;
+VIRT_ADDR = 0xFFFF000000000000;
 
-	. = ALIGN(0x00001000);
-	user_begin = .;
-    .text.user : { build/user* (.text) }
-    .rodata.user : { build/user* (.rodata) }
-    .data.user : { build/user* (.data) }
-    .bss.user : { build/user* (.bss) }
-    user_end = .;
+SECTIONS {
+        /* LOW BOOT CODE */
+        . = REAL_LOAD;
+        .text.boot : {KEEP(*(.text.boot)) *(.text.boot.c)}
+        .data.low : {KEEP(*(.data.low))}
+        boot_code_end = .;
 
+        /* RESERVE */
+        . = ALIGN(0x1000);
+	
+	/* reserve 3 page frame (4K each) for each table */
+        PROVIDE(ttbr0 = .);
+        PROVIDE(ttbr0_pgd = .);
+	ttbr0_pgd : { . += ((1 << 12)); }
+        PROVIDE(ttbr0_pud = .);
+	ttbr0_pud : { . += ((1 << 12)); }
+        PROVIDE(ttbr0_pmd = .);
+	ttbr0_pmd : { . += ((1 << 12)); }
 
-	.text : { *(.text .text.* .gnu.linkonce.t*) }
-	.rodata : { *(.rodata) }
-	. = ALIGN(4096);
-	.data : { *(.data) }
+        PROVIDE(ttbr1 = .);
+        PROVIDE(ttbr1_pgd = .);
+        ttbr1_pgd : { . += ((1 << 12)); }
+        PROVIDE(ttbr1_pud = .);
+	ttbr1_pud : { . += ((1 << 12)); }
+        PROVIDE(ttbr1_pmd = .);
+	ttbr1_pmd : { . += ((1 << 12)); }
 
-	bss_begin = .;
-	.bss (NOLOAD) : {
-            . = ALIGN(0x8);
-            bss_begin = .;
-            *(.bss .bss.*)
-            *(COMMON)
-            bss_end = .;
+        /* HIGH KERNEL C CODES */        
+        . = . + VIRT_ADDR;
+        /* . = ALIGN(0x1000); */
+        .text   : AT (ADDR (.text) - VIRT_ADDR) { *(.text) }
+        kernel_code_end = .;
+
+        .rodata : AT (ADDR (.rodata) - VIRT_ADDR) { *(.rodata) }
+
+        /* . = ALIGN(4096); */
+        PROVIDE(_data = .);
+        .data   : AT (ADDR (.data) - VIRT_ADDR) { *(.data) }
+        .bss	: AT (ADDR (.bss) - VIRT_ADDR) {
+                bss_begin = .;
+                *(.bss COMMON)
+                bss_end = .;
         }
-	bss_end = .;
-	. = ALIGN(0x00001000);
-	pg_dir = .;
-/*	 reserve 3 page frame (4K each) for each table */
-	.data.pgd : { . += ((1 << 12)); }
-	.data.pud : { . += ((1 << 12)); }
-	.data.pmd : { . += ((1 << 12)); }
-
-	_end = .;
-	/DISCARD/ : { *(.comment) *(.gnu*) *(.note*) *(.eh_frame*) }
+        _end = .;
+        PROVIDE(HEAP_START = .);
 }
 
-
+bss_size = (bss_end - bss_begin) >> 3;

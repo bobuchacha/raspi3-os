@@ -29,12 +29,14 @@ static void* stdout_putp;
 
 #ifdef PRINTF_LONG_SUPPORT
 
-static void uli2a(unsigned long int num, unsigned int base, int uc,char * bf)
+static void uli2a(unsigned long long num, unsigned long base, int uc,char * bf)
     {
-    int n=0;
-    unsigned int d=1;
-    while (num/d >= base)
+    register int n=0;
+    register unsigned long int d=1;
+    while (num/d >= base) {
         d*=base;
+    }
+        
     while (d!=0) {
         int dgt = num / d;
         num%=d;
@@ -45,6 +47,7 @@ static void uli2a(unsigned long int num, unsigned int base, int uc,char * bf)
             }
         }
     *bf=0;
+    
     }
 
 static void li2a (long num, char * bf)
@@ -281,8 +284,8 @@ void kdump_size(void *ptr, int size)
     unsigned char c;
 
     printf("\n--------------------------------- [DUMP HEX 0x%X + %d] ----------------------------------\n", ptr, size);
-    for(a=(unsigned long)ptr;a<(unsigned long)ptr+size;a+=16) {
-        printf("%16X:    ");
+    for(a=(unsigned long int)ptr;a<(unsigned long int)ptr+size;a+=16) {
+        printf("%16lX:    ");
         for(b=0;b<16;b++) {
             c=*((unsigned char*)(a+b));
             d=(unsigned int)c;d>>=4;d&=0xF;d+=d>9?0x37:0x30;print_c( d);

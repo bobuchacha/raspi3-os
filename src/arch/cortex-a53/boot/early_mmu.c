@@ -78,16 +78,18 @@ BOOTFUNC
 void _mmu_map_kernel(void) {
     register unsigned long i;
 
-    // map high memory
+    // map high memory - for c codes
     // point first PGD entry to the base of PUD
     ttbr1_pgd[0] = (unsigned long long)ttbr1_pud | PE_KERNEL_CODE | PT_TABLE_ENTRY;
     // point first PUD entry to our PMD
     ttbr1_pud[0] = (unsigned long long)ttbr1_pmd | PE_KERNEL_CODE | PT_TABLE_ENTRY;
-    // point first PMD entry to first 2MB memory
-    ttbr1_pmd[0] = (unsigned long long)0 | PE_KERNEL_CODE | PT_BLOCK_ENTRY;
 
+    // map first 16 MB to kernel
+    for (i = 0; i < 0x1000000; i += 0x200000) {
+        ttbr1_pmd[GET_PMD_ID(i)] = (unsigned long long)i | PE_KERNEL_CODE | PT_BLOCK_ENTRY;
+    }
 
-    // map low memory
+    // map low memory - for boot codes
     // point first PGD entry to the base of PUD
     ttbr0_pgd[0] = (unsigned long long)ttbr0_pud | PE_KERNEL_CODE | PT_TABLE_ENTRY;
     // point first PUD entry to our PMD
