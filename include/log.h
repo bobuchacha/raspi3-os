@@ -3,7 +3,7 @@
 
 #include "printf.h"
 
-#define LOG_ERROR "!"
+#define LOG_ERROR "E"
 #define LOG_WARNING "*"
 #define LOG_INFO "i"
 #define LOG_TEST "T"

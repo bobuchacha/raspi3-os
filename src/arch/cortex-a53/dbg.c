@@ -33,7 +33,7 @@ void dbg_decodeexc(unsigned long type)
     unsigned char cause=dbg_regs[33]>>26;
 
     // print out interruption type
-    switch(type) {
+    switch(type % 4) {
         case 0: printf("Synchronous"); break;
         case 1: printf("IRQ"); break;
         case 2: printf("FIQ"); break;

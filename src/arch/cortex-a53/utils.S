@@ -73,3 +73,8 @@ memcpy:
     subs    x2, x2, #8
     b.gt    memcpy
     ret
+
+.globl get_sp_el0
+get_sp_el0:
+	mrs x0, sp_el0
+	ret

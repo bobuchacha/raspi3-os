@@ -7,6 +7,9 @@
         "device.h": "c",
         "timer.h": "c",
         "log.h": "c",
-        "printf.h": "c"
+        "printf.h": "c",
+        "raspi3b.h": "c",
+        "uart1.h": "c",
+        "task.h": "c"
     }
 }

@@ -1,11 +1,12 @@
 
 #include "device/raspi3b.h"
+#include "device/sd.h"
 #include "printf.h"
 #include "log.h"
 #include "device/sd.h"
 #include "timer.h"
 
-#define MMIO_BASE PBASE
+#define MMIO_BASE           PBASE
 #define EMMC_ARG2           ((volatile unsigned int*)(MMIO_BASE+0x00300000))
 #define EMMC_BLKSIZECNT     ((volatile unsigned int*)(MMIO_BASE+0x00300004))
 #define EMMC_ARG1           ((volatile unsigned int*)(MMIO_BASE+0x00300008))

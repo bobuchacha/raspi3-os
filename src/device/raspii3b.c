@@ -5,6 +5,7 @@
 #include "timer.h"
 #include "log.h"
 #include "utils.h"
+#include "device/sd.h"
 
 #define _trace          log_info
 #define _trace_printf   printf
@@ -27,4 +28,8 @@ void device_init(){
     enable_interrupt_controller();
     enable_irq();
     
+    // initialize sd card
+    if (sd_init() != SD_OK) {
+        log_error("SD card initialization error!\n");
+    }
 }   
