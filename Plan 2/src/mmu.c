@@ -31,7 +31,7 @@ void mmu_init()
                   PT_PAGE |     // we have area in it mapped by pages
                   PT_AF |       // accessed flag
                   PT_USER |     // non-privileged
-                  PT_ISH |      // inner shareable
+                  PT_ISH |      // inb fbcnner shareable
                   PT_MEM;       // normal memory
 
     // identity L2 2M blocks
@@ -55,7 +55,7 @@ void mmu_init()
                         ((r<0x80||r>=data_page)? PT_RW|PT_NX : PT_RO); // different for code and data
 
     // TTBR1, kernel L1
-    paging[512+511]=(unsigned long)((unsigned char*)&_end+4*PAGESIZE) | // physical address
+    paging[512]=(unsigned long)((unsigned char*)&_end+4*PAGESIZE) | // physical address
                     PT_PAGE |     // we have area in it mapped by pages
                     PT_AF |       // accessed flag
                     PT_KERNEL |   // privileged
@@ -72,6 +72,13 @@ void mmu_init()
 
     // kernel L3
     paging[5*512]=(unsigned long)(MMIO_BASE+0x00201000) |   // physical address
+                  PT_PAGE |     // map 4k
+                  PT_AF |       // accessed flag
+                  PT_NX |       // no execute
+                  PT_KERNEL |   // privileged
+                  PT_OSH |      // outter shareable
+                  PT_DEV;       // device memory
+    paging[5*512 + 1]=(unsigned long)(0x0080000) |   // physical address
                   PT_PAGE |     // map 4k
                   PT_AF |       // accessed flag
                   PT_NX |       // no execute
