@@ -73,7 +73,7 @@ void mem_init_paging(atag_t * atags){
         printf("Size of heap struct %d\n", sizeof(heap_segment_t));
 
 
-                // Allocate space for all those pages' metadata.  Start this block just after the src image is finished
+        // Allocate space for all those pages' metadata.  Start this block just after the src image is finished
         page_array_len = sizeof(page_t) * num_pages;
         all_pages_array = (page_t *)&_end;
         memset((void *) all_pages_array, 0, page_array_len);

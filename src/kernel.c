@@ -1,45 +1,64 @@
-#include "mini_uart.h"
-#include "uart0.h"
+//
+// Created by Thang Cao on 5/23/24.
+//
+#include "arch/cortex-a53/boot/uart1.h"
 #include "printf.h"
-#include "utils.h"
-#include "debugger/dbg.h"
+#include "device.h"
+#include "irq.h"            // some code in device irq or arch irq
+#include "log.h"
+#include "task.h"
 #include "timer.h"
-#include "irq.h"
-#include "sched.h"
-#include "fork.h"
-#include "kprint.h"
-#include "mailbox.h"
 
-unsigned char * msg = "Welcome from Assembly";
+#define _trace          log_info
+#define _trace_printf   printf
 
+extern long get_sp_el0();
 
-
-void kernel_main(void)
+void process(register char *array)
 {
-	uart_init();
-    uart0_init();
+    kdebug("Current Task: %d. MY array is at 0x%lX", current_task->id, array);
+    
+    
+    asm volatile("svc #0");
 
-    init_printf(0, uart0_putc);
-    kinfo("kernel_main: Initializing IRQ...");
-    disable_irq();
-    irq_vector_init();
-
-    kinfo("kernel_main: Initializing Timer...");
-    timer_init();
-
-    kinfo("kernel_main: Enabling interrupt controllers & timer...");
-    enable_interrupt_controller();
-    enable_irq();
-
-    kinfo("kernel_main: Kernel is running at EL%d", get_el());
-    kprint("\nWELCOME TO ROS\n");
-
-
-    unsigned long *ptr = (unsigned long *)0xffff0000002d0000;
-    *ptr = 0xDEADCABDE;
-
-    printf("Address of X is %16x, value %x\n", (unsigned long)ptr, *ptr);
+    kdebug("MY array is at 0x%lX", array);
+    int i = 0;
+    // asm volatile("mov x8, 0xdead; svc #0xFFF3");
     while (1){
-        schedule();
+        i++;
+        uart0_puts(array);
+        if (i==10) {asm volatile("svc #0"); i = 0;}
+        wait_cycles(50000000);
+    }
+}
+
+
+void kernel_main(){
+    
+    // need to initialize device before output anything
+    device_init();
+
+    // init memory management
+    log_info("Enabling memory management...\n");
+    init_memory_management();
+
+    int res = copy_process((unsigned long)&process, (unsigned long)"12345\n", PRIORITY_MEDIUM);
+	if (res != 0) {
+		printf("error while starting process 1");
+		return;
+	}
+	res = copy_process((unsigned long)&process, (unsigned long)"abcde\n", PRIORITY_NORMAL);
+	if (res != 0) {
+		printf("error while starting process 2");
+		return;
+	}
+    
+   struct task_struct *p = tasks[0];
+
+   printf("Init task info: \n");
+   printf(" - State: %s\n", p->state == TASK_RUNNING ? "Running" : "Sleep");
+
+    while(1){
+        //  schedler_schedule();
     }
 }

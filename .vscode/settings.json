@@ -1,0 +1,15 @@
+{
+    "files.associations": {
+        "uart0.h": "c",
+        "ros.h": "c",
+        "irq.h": "c",
+        "memory.h": "c",
+        "device.h": "c",
+        "timer.h": "c",
+        "log.h": "c",
+        "printf.h": "c",
+        "raspi3b.h": "c",
+        "uart1.h": "c",
+        "task.h": "c"
+    }
+}
