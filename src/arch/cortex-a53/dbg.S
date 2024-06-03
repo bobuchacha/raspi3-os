@@ -1,6 +1,7 @@
 // save registers before calling debugger code in C
 .globl dbg_saveregs
 dbg_saveregs:
+
     str     x0, [sp, #-16]!     // push x0
     ldr     x0, =dbg_regs+8
     str     x1, [x0], #8        // dbg_regs[1]=x1

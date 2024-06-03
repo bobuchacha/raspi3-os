@@ -1,8 +1,36 @@
-.globl get_el
-get_el:
+#include "macros.S"
+
+FUNCTION get_el
 	mrs x0, CurrentEL
 	lsr x0, x0, #2
 	ret
+ENDFUNC
+
+.globl get_sp
+get_sp:
+	mov x0, sp
+	ret
+
+.globl popl
+popl:
+    POP x0
+    ret
+
+.globl pushl
+pushl:
+    PUSH x0
+    ret
+
+FUNCTION pop_pair
+    POPP x0, x1
+    ret
+ENDFUNC
+
+FUNCTION push_pair
+    PUSHP x0, x1
+    ret
+ENDFUNC
+
 
 .globl put32
 .globl put_int

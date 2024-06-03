@@ -6,6 +6,9 @@
 #include "log.h"
 #include "memory.h"
 
+#define _trace          log_info
+#define _trace_printf   printf
+
 static struct task_struct init_task = INIT_TASK;
 struct task_struct *current_task = &(init_task);
 struct task_struct *tasks[NR_TASKS] = {&(init_task), };
@@ -95,6 +98,7 @@ void schedler_switch_to(struct task_struct * next)
  * @param void
  **/
 void schedule_tail(void) {
+	_trace("Schedule tail called\n");
 	preempt_enable();
 }
 

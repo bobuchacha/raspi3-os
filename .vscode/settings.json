@@ -1,5 +1,6 @@
 {
     "files.associations": {
+        "*.cnf": "ini",
         "uart0.h": "c",
         "ros.h": "c",
         "irq.h": "c",
@@ -10,6 +11,8 @@
         "printf.h": "c",
         "raspi3b.h": "c",
         "uart1.h": "c",
-        "task.h": "c"
+        "task.h": "c",
+        "crtdefs.h": "c",
+        "sched.h": "c"
     }
 }
