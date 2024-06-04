@@ -82,3 +82,27 @@ void uart0_puts(char *s) {
         uart0_send(*s++);
     }
 }
+
+void uart0_hex(unsigned int d) {
+    unsigned int n;
+    int c;
+    for(c=28;c>=0;c-=4) {
+        // get highest tetrad
+        n=(d>>c)&0xF;
+        // 0-9 => '0'-'9', 10-15 => 'A'-'F'
+        n+=n>9?0x37:0x30;
+        uart0_send(n);
+    }
+}
+
+void uart0_lhex(unsigned long d) {
+    unsigned int n;
+    int c;
+    for(c=60;c>=0;c-=4) {
+        // get highest tetrad
+        n=(d>>c)&0xF;
+        // 0-9 => '0'-'9', 10-15 => 'A'-'F'
+        n+=n>9?0x37:0x30;
+        uart0_send(n);
+    }
+}

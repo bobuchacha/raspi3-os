@@ -1,4 +1,5 @@
 #include "memory.h"
+#include "../macros.S"
 
 //-----------------------------------
 // MACRO create a padded string
@@ -67,9 +68,11 @@ el2_entry:
 	mov     x0, #0x33FF
 	msr     cptr_el2, x0
 	msr     hstr_el2, xzr
-	mov     x0, #(3 << 20)
+	mov     x0, #(3 << 20)			// We enable FP / SIMD here to make sure that we can
+  									// access FPSR register later when saving the PState
 	msr     cpacr_el1, x0
-
+	isb
+ 
 	// enable AArch64 in EL1
 	mov     x0, #(1 << 31)              // AArch64
 	orr     x0, x0, #(1 << 1)           // SWIO hardwired on Pi3
@@ -138,3 +141,16 @@ clear_bss:
 test_string: 				.asciz "\n\r\n\rHello.\n\rHow are you?\n\rI am under the water.\n\rPlease help me.\n\r\n\r"
 err_unsupported_granule: 	.asciz "\n[!] Unsupported 4K Granule\n"
 msg_init_mmu:				.asciz "\n[i] Initializing MMU\n"
+
+VAR trace_1
+	.asciz "Trace 1\n"
+VAR trace_2
+ 	.asciz "Trace 2\n"
+VAR trace_3
+ 	.asciz "Trace 3\n"
+VAR trace_4 
+	.asciz "Trace 4\n"
+VAR trace_5
+	.asciz "Trace 5\n"
+VAR trace_6 
+	.asciz "Trace 6\n"

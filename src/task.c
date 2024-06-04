@@ -46,7 +46,10 @@ int copy_process(unsigned long clone_flags, unsigned long fn, unsigned long arg,
 
 	p->cpu_context.pc = (unsigned long)ret_from_fork;
 	p->cpu_context.sp = (unsigned long)childregs;
+	
 	int pid = ++nr_tasks;
+	p->id = pid;
+	_trace_printf("Number of numming task: %d\n", pid);
 	tasks[pid] = p;
 	preempt_enable();
 	return pid;
@@ -65,10 +68,10 @@ int move_to_user_mode(unsigned long pc)
 {
 	_trace("Current task ");
 	_trace_printf("%d\n", current_task->id);
-
+	
 	struct pt_regs *regs = task_pt_regs(current_task);
 	
-	_trace("Current task registers");
+	_trace("Current task registers ");
 	_trace_printf("0x%lX\n", regs);
 
 	// asm volatile("brk #00");

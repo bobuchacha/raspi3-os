@@ -7,4 +7,5 @@ void mem_dump_pagemap(int start, int count);     // paging.c: dump n entry of pa
 void init_memory_management(){
     mem_init_paging(&heap_start);
     mem_init_heap(heap_start);
+
 }

@@ -147,8 +147,8 @@ void * mem_alloc_page(void){
         // Get the address the physical page metadata refers to
         page_mem = (void *)((page - page_array) * PAGE_SIZE);
 
-        // _trace("Got a page ");
-        // _trace_printf("at %x\n", page_mem);
+        _trace("Got a page ");
+        _trace_printf("at %x\n", page_mem);
 
         // Zero out the page, big security flaw to not do this :)
         memzero((void *) page_mem, PAGE_SIZE);
@@ -168,3 +168,4 @@ void mem_free_page(void * ptr){
         page->flags.allocated = 0;
         append_page_list(&free_pages, page);
 }
+

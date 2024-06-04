@@ -25,16 +25,27 @@ SECTIONS {
         PROVIDE(ttbr1_pgd = .);
         ttbr1_pgd : { . += ((1 << 12)); }
         PROVIDE(ttbr1_pud = .);
-	ttbr1_pud : { . += ((1 << 12)); }
+	    ttbr1_pud : { . += ((1 << 12)); }
         PROVIDE(ttbr1_pmd = .);
-	ttbr1_pmd : { . += ((1 << 12)); }
+	    ttbr1_pmd : { . += ((1 << 12)); }
+
 
         /* HIGH KERNEL C CODES */        
         . = . + VIRT_ADDR;
-        /* . = ALIGN(0x1000); */
+
+        /* USER PROCESS, IT IS COMPILED AGAINST HIGHER ADDRESS SPACE */
+        . = ALIGN(0x1000);
+        user_begin = .;
+        .text.user : AT (ADDR (.text.user) - VIRT_ADDR) { build/objs/user* (.text) }
+        .rodata.user : AT (ADDR (.rodata.user) - VIRT_ADDR) { build/objs/user* (.rodata) }
+        .data.user : AT (ADDR (.data.user) - VIRT_ADDR) { build/objs/user* (.data) }
+        .bss.user : AT (ADDR (.bss.user) - VIRT_ADDR) { build/objs/user* (.bss) }
+        user_end = .;
+
+
+         . = ALIGN(0x1000);
         .text   : AT (ADDR (.text) - VIRT_ADDR) { *(.text) }
         kernel_code_end = .;
-
         .rodata : AT (ADDR (.rodata) - VIRT_ADDR) { *(.rodata) }
 
         /* . = ALIGN(4096); */
@@ -45,6 +56,7 @@ SECTIONS {
                 *(.bss COMMON)
                 bss_end = .;
         }
+
         _end = .;
         PROVIDE(HEAP_START = .);
 }

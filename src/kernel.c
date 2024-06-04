@@ -29,52 +29,23 @@ void process(register char *array)
     }
 }
 
-void user_process(){
-
-//    asm volatile("svc #0");
-    printf("This is from user process %d, running at EL%d\n\n", current_task->id, get_el());
-}
+extern unsigned long user_process;
 
 void kernel_process(){
+    unsigned long real_user_addess = (unsigned long)(&user_process) & 0xFFFFFFFF;
+
 	printf("Kernel process started. EL %d\r\n", get_el());
-    // asm volatile ("___breakpoint:");
-	int err = move_to_user_mode((unsigned long)&user_process);
-	// if (err < 0){
-	// 	printf("Error while moving process to user mode\n\r");
-	// } 
-    while (1);
+    kdebug("I got address of our user_process at 0x%lx\n\n", &user_process);
+    kdebug("In memory, our user_process is at 0x%lx\n\n", real_user_addess);
+
+    asm volatile ("___breakpoint:");
+	int err = move_to_user_mode(real_user_addess);
+	if (err < 0){
+		printf("Error while moving process to user mode\n\r");
+	} 
+    // // while (1);
 }
 
-
-extern long get_sp();
-extern void pushl(long);
-extern long popl();
-extern void push_pair(long, long);
-extern long pop_pair();
-
-void test_push_pop(){
-    kdebug("Current SP is 0x%lX", get_sp());
-    pushl(0x1234000056780000);
-    kdebug("SP after pushl 0x1234000056780000 is 0x%lX", get_sp());
-    pushl(0xDEADCABD12345678);
-    kdebug("SP after pushl 0xDEADCABD12345678 is 0x%lX", get_sp());
-    long i = popl();
-    kdebug("SP after popl is 0x%lX, value of the pop is 0x%lX", get_sp(), i);
-    i = popl();
-    kdebug("SP after popl is 0x%lX, value of the pop is 0x%lX", get_sp(), i);
-
-    printf("-------- PAIR --------- \n");
-    push_pair(0x1234123412341234, 0x5678567856785678);
-    kdebug("SP after push_pair is 0x%lX", get_sp());
-    i = pop_pair();
-    long x1;
-    asm volatile ("mov %0, x1" : "=r"(x1) ::);
-    kdebug("SP after pop_pair is 0x%lX, value of the pop is 0x%lX and 0x%lX", get_sp(), i, x1);
-
-    asm volatile("brk #0");
-
-    printf("OK");
-}
 
 void kernel_main(){
     
@@ -88,11 +59,11 @@ void kernel_main(){
     int res = copy_process(PF_KTHREAD, &kernel_process, 0, 0);
     if (!res) log_error("Can not start kernel process\n\n");
 
-    res = copy_process(PF_KTHREAD, &process, "Hello WOrld\n", 0);
-    if (!res) log_error("Can not start kernel process\n\n");
+    // res = copy_process(PF_KTHREAD, &process, "Hello WOrld\n", 0);
+    // if (!res) log_error("Can not start kernel process\n\n");
 
-    res = copy_process(PF_KTHREAD, &process, "Thang Cao\n", 0);
-    if (!res) log_error("Can not start kernel process\n\n");
+    // res = copy_process(PF_KTHREAD, &process, "Thang Cao\n", 0);
+    // if (!res) log_error("Can not start kernel process\n\n");
 
     while(1){
         //  schedler_schedule();

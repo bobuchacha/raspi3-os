@@ -19,4 +19,6 @@
 #define log_warning(value)  log(value, LOG_WARNING)
 #define log_error(value)    log(value, LOG_ERROR)
 
+#define _trace          log_info
+#define _trace_printf   printf
 #endif
