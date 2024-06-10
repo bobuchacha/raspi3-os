@@ -2,6 +2,7 @@
 #include "macros.S"
 
 FUNCTION cpu_switch_to 	            // x0 = prev task, x1 = next task
+
 	mov	x10, #THREAD_CPU_CONTEXT    // Where in the task struct the regs (or context start)
 	add	x8, x0, x10			        // cpu context into x8
 	mov	x9, sp				        // save current sp into x9 and restore later
@@ -10,8 +11,8 @@ FUNCTION cpu_switch_to 	            // x0 = prev task, x1 = next task
 	stp	x23, x24, [x8], #16
 	stp	x25, x26, [x8], #16
 	stp	x27, x28, [x8], #16
-	stp	x29, x9, [x8], #16
-	str	x30, [x8]
+	stp	x29, x9, [x8], #16			// store x29, sp
+	str	x30, [x8]					// store x30
 	
 	add	x8, x1, x10			        // now x8 is next task's regs. Load into sp reg
 	ldp	x19, x20, [x8], #16		    // restore callee-saved registers
@@ -24,44 +25,66 @@ FUNCTION cpu_switch_to 	            // x0 = prev task, x1 = next task
 	mov	sp, x9
 ENDF
 	
+
 FUNCTION ret_from_fork
+
+	// PRINTS "\nret_from_fork: Forking new process...\n\n"
+
 	bl	    schedule_tail
 	cbz 	x19, ret_to_user		// not a kernel thread
 	mov 	x0, x20
+	mov 	x1, x21
+	mov 	x2, x22
 	blr 	x19
+	/* thread exit here. Should we do some thing here? */
 ret_to_user:
-	PRINTS "\n\nReturning to user \n\n"
-	__breakpoint:
-	//bl      disable_irq
-	
-	ldp	x22, x23, [sp, #16 * 16]        // pc = x22, state = x23
-	ldp	x30, x21, [sp, #16 * 15]        // sp = x21
-
-	msr	sp_el0, x21
-	msr	elr_el1, x22			
-	msr	spsr_el1, x23
-
-
-	ldp	x0, x1, [sp, #16 * 0]
-	ldp	x2, x3, [sp, #16 * 1]
-	ldp	x4, x5, [sp, #16 * 2]
-	ldp	x6, x7, [sp, #16 * 3]
-	ldp	x8, x9, [sp, #16 * 4]
-	ldp	x10, x11, [sp, #16 * 5]
-	ldp	x12, x13, [sp, #16 * 6]
-	ldp	x14, x15, [sp, #16 * 7]
-	ldp	x16, x17, [sp, #16 * 8]
-	ldp	x18, x19, [sp, #16 * 9]
-	ldp	x20, x21, [sp, #16 * 10]
-	ldp	x22, x23, [sp, #16 * 11]
-	ldp	x24, x25, [sp, #16 * 12]
-	ldp	x26, x27, [sp, #16 * 13]
-	ldp	x28, x29, [sp, #16 * 14]
-	add	sp, sp, #S_FRAME_SIZE		
-	
-    // PRINTS "\n\n>>ASM: KERNEL_EXIT\n\n"
-    
-    // // PRINTS "\n>> ASM: KERNEL_EXIT CALLED\n"
-    // DUMP_REGISTERS
-	eret
+	// PRINTS "\nret_from_fork: Returning to user...\n\n"
+	bl      disable_irq
+	kernel_exit 0 
 ENDFUNC
+
+
+FUNCTION test_asm_prints
+	mov x0, #0xdead
+	mov x1, #0xcabe
+	PRINT_REG "sp" "<--- before storing\n"
+	PRINT_REG "x0" "<--- before storing\n"
+	PRINT_REG "x1" "<--- before storing\n\n----\n\n"
+	// stp 	x0, x1, [sp, #-16]!
+	PUSHP x0, x1
+
+	mov x0, #0x1234
+	mov x1, #0x5678
+
+	PRINT_REG "sp" "<--- after storing\n"
+	PRINT_REG "x0" "<--- after storing\n"
+	PRINT_REG "x1" "<--- after storing\n\n----\n\n"
+
+	// ldp 	x0, x1, [sp], #16
+	POPP x0, x1
+
+ 	PRINT_REG "sp" "<--- after loadp\n"	
+	PRINT_REG "x0" "<--- after pop\n"
+	PRINT_REG "x1" "<--- after pop\n"
+	
+ENDF
+
+
+FUNCTION test_uxtw
+	PUSHP x29, x30
+	mov x0, xzr
+	mov x1, xzr
+
+	movk x0, 0xFFFF, lsl #48
+	movk x0, 0xDEAD, lsl #32
+	movk x0, 0x1234, lsl #16
+	movk x0, 0x5678 //Implies lsl #0
+
+	PRINT_REG "x0" "<--- b4 storing\n"
+	PRINT_REG "x1" "<--- b4 storing\n-------------\n"
+	uxtw x1, w0		// <---- lo32 xo to work
+	PRINT_REG "x0" "<--- after storing\n"
+	PRINT_REG "x1" "<--- after storing\n-------------\n"
+
+	POPP x29, x30
+ENDF

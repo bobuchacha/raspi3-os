@@ -1,0 +1,2 @@
+/Users/thangcao/CLionProjects/raspi3-os/build/CMakeFiles/edit_cache.dir
+/Users/thangcao/CLionProjects/raspi3-os/build/CMakeFiles/rebuild_cache.dir

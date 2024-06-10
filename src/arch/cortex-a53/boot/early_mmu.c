@@ -2,6 +2,7 @@
 #include "arch/cortex-a53/mmu.h"
 #include "arch/cortex-a53/boot/bootcode.h"
 #include "arch/cortex-a53/boot/uart1.h"
+#include "device.h"
 
 #define GET_PGD_ID(addr) (addr >> 39 & 0x1FF)   // get bit 39-47 of a number
 #define GET_PUD_ID(addr) (addr >> 30 & 0x1FF)   // get bit 30-38 of an address
@@ -89,6 +90,12 @@ void _mmu_map_kernel(void) {
         ttbr1_pmd[GET_PMD_ID(i)] = (unsigned long long)i | PE_KERNEL_CODE | PT_BLOCK_ENTRY;
     }
 
+    // identity map normal memory from 16MB - DEVICE_BASE
+    // modify this to map another PMD if we have additional RAM
+    for (i = 0x1000000; i < DEVICE_BASE; i += 0x200000) {
+        ttbr1_pmd[GET_PMD_ID(i)] = (unsigned long long)i | PE_KERNEL_DATA | PT_BLOCK_ENTRY;
+    }
+
     // map low memory - for boot codes
     // point first PGD entry to the base of PUD
     ttbr0_pgd[0] = (unsigned long long)ttbr0_pud | PE_KERNEL_CODE | PT_TABLE_ENTRY;
@@ -96,7 +103,7 @@ void _mmu_map_kernel(void) {
     // ttbr0_pud[0] = (unsigned long long)ttbr0_pmd | PE_KERNEL_CODE | PT_TABLE_ENTRY;
     ttbr0_pud[0] = (unsigned long long)0 | PE_KERNEL_CODE | PT_BLOCK_ENTRY;             // map first 1GB of memory to the low so kernel gets access to real physical memory
     // point first PMD entry to first 2MB memory
-    //ttbr0_pmd[0] = (unsigned long long)0 | PE_KERNEL_CODE | PT_BLOCK_ENTRY;
+    // ttbr0_pmd[0] = (unsigned long long)0 | PE_KERNEL_CODE | PT_BLOCK_ENTRY;
     return;
 }
 
@@ -104,7 +111,7 @@ BOOTFUNC
 void _mmu_map_device(void) {
     register unsigned long i;
 
-    for (i=0x3f000000; i < 0x40000000; i+=0x200000) {
+    for (i=DEVICE_BASE; i < DEVICE_MEMORY_SIZE; i+=0x200000) {
         register unsigned int pmdi = GET_PMD_ID(i);
         ttbr0_pmd[pmdi] = (unsigned long long)i | PE_DEVICE | PT_BLOCK_ENTRY;
         ttbr1_pmd[pmdi] = (unsigned long long)i | PE_DEVICE | PT_BLOCK_ENTRY;

@@ -128,7 +128,8 @@ const char *entry_error_messages[] = {
 	"ERROR_INVALID_EL0_32",
 
 	"SYNC_ERROR",			// show this message
-	"SYSCALL_ERROR"
+	"SYSCALL_ERROR",
+  "DATA_ABORT_ERROR"
 };
 
 void enable_interrupt_controller()

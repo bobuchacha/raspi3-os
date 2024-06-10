@@ -106,3 +106,32 @@ memcpy:
 get_sp_el0:
 	mrs x0, sp_el0
 	ret
+
+.globl set_pgd
+set_pgd:
+// PRINT_REG "x0", "<-- restoring PGD \n\n\n"
+	msr	ttbr0_el1, x0
+	tlbi vmalle1is
+  	DSB ISH              // ensure completion of TLB invalidation
+	isb
+	ret
+
+.globl get_pgd
+get_pgd:
+	mrs	x0, ttbr0_el1
+	ret
+
+FUNCTION ttbr_lookup
+	at S1E1R, x0
+	mrs x0, par_el1;
+    ret
+
+
+FUNCTION bugged_dump_registers
+	DUMP_REGISTERS
+	ret
+
+FUNCTION dump_registers
+	
+	DUMP_REGISTERS
+	ret

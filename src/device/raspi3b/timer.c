@@ -2,7 +2,7 @@
 #include "printf.h"
 #include "device/raspi3b.h"
 
-const unsigned int _timer0_interval = 200000;
+const unsigned int _timer0_interval = 500000;
 static unsigned long int _timer0_current_val = 0;
 
 void timer_init ( void )

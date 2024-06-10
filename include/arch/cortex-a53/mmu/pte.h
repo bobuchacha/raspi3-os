@@ -34,13 +34,13 @@
 #define PE_DEVICE    (((pentry_t)MAIR_DEVICE_INDEX << 2) \
             | PE_KERNEL_RW | PE_PXN | PE_UXN | PE_OSH) \
             | PE_ACCESSED
-#define PE_KERNEL_DATA    (((pentry_t)MAIR_CACHEABLE_INDEX << 2) \
+#define PE_KERNEL_DATA    (((pentry_t)MAIR_NON_CACHEABLE_INDEX << 2) \
             | PE_KERNEL_RW | PE_PXN | PE_UXN | PE_ISH) \
             | PE_ACCESSED
 #define PE_KERNEL_CODE    (((pentry_t)MAIR_CACHEABLE_INDEX << 2) \
             | PE_KERNEL_RW | PE_UXN | PE_ISH) \
             | PE_ACCESSED
-#define PE_USER_DATA    (((pentry_t)MAIR_CACHEABLE_INDEX << 2) \
+#define PE_USER_DATA    (((pentry_t)MAIR_NON_CACHEABLE_INDEX << 2) \
             | PE_USER_RW | PE_PXN | PE_UXN | PE_ISH) \
             | PE_ACCESSED
 #define PE_USER_CODE    (((pentry_t)MAIR_CACHEABLE_INDEX << 2) \
@@ -61,5 +61,15 @@
 
 #define pte_get_phys(entry) (*entry & ~((((pentry_t)1 << 12) - 1) \
               | ((((pentry_t)1 << 6) - 1) << 53)))
+
+#define MM_PAGE_MASK		0xFFFFFFFFFFFFF000
+#define MM_PAGE_SHIFT	 	12
+#define MM_TABLE_SHIFT 		9
+#define MM_SECTION_SHIFT	(MM_PAGE_SHIFT + MM_TABLE_SHIFT)
+#define MM_PTRS_PER_TABLE	(1 << MM_TABLE_SHIFT)
+
+#define MM_PGD_SHIFT		MM_PAGE_SHIFT + 3*MM_TABLE_SHIFT
+#define MM_PUD_SHIFT		MM_PAGE_SHIFT + 2*MM_TABLE_SHIFT
+#define MM_PMD_SHIFT		MM_PAGE_SHIFT + MM_TABLE_SHIFT
 
 #endif

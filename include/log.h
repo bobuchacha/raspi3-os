@@ -10,8 +10,9 @@
 #define LOG_FAIL "F"
 
 #define log(value, level) \
-	kprint("(" level ") %s (" __FILE__ ":%d) ", __func__, __LINE__); \
+	kprint("(" level ") %s (" __FILE__ ":%d) | ", __func__, __LINE__); \
     kprint(value);
+
 
 #define log_fail(value)     log(value, LOG_FAIL)
 #define log_test(value)     log(value, LOG_TEST)
@@ -21,4 +22,11 @@
 
 #define _trace          log_info
 #define _trace_printf   printf
+#define _trace_p        printf
+
+#define _trace(...)   \
+	kprint("[L] %s (" __FILE__ ":%d) >> ", __func__, __LINE__); \
+    kprint(__VA_ARGS__); \
+    kprint("\n");
+
 #endif

@@ -12,40 +12,31 @@
 #define _trace          log_info
 #define _trace_printf   printf
 
+
+    
 extern long get_sp_el0();
 extern long get_el();
 
-void process(register char *array)
-{
-    kdebug("Current Task: %d. Running at EL%d\n", current_task->id, get_el());
-    
-    
-    int i = 0;
-    // asm volatile("mov x8, 0xdead; svc #0xFFF3");
-    while (1){
-        i++;
-        printf(array);
-        wait_cycles(50000000);
-    }
-}
+int create_user_process(unsigned long *program_addr, unsigned long program_size);
+ulong process_copy_thread(unsigned long flags, void *program_addr, void *arg);
 
-extern unsigned long user_process;
-
-void kernel_process(){
-    unsigned long real_user_addess = (unsigned long)(&user_process) & 0xFFFFFFFF;
-
-	printf("Kernel process started. EL %d\r\n", get_el());
-    kdebug("I got address of our user_process at 0x%lx\n\n", &user_process);
-    kdebug("In memory, our user_process is at 0x%lx\n\n", real_user_addess);
-
-    asm volatile ("___breakpoint:");
-	int err = move_to_user_mode(real_user_addess);
-	if (err < 0){
+void kernel_process1(ulong arg){
+    extern void user_begin, user_end;
+    int err = move_to_user_mode(&user_begin, &user_end-&user_begin);
+    if (err < 0){
 		printf("Error while moving process to user mode\n\r");
 	} 
-    // // while (1);
 }
 
+void kernel_process2(ulong arg){
+    int i = 0;
+    while(1){
+        kinfo("This is process %d - %d. My SP: 0x%lx\n\n\n",current_task->id, i++, current_task->cpu_context.sp);
+        // process_dump_task(current_task->id);
+        wait_msec(1000000);
+    }
+}
+extern unsigned long ret_from_fork();
 
 void kernel_main(){
     
@@ -56,16 +47,19 @@ void kernel_main(){
     log_info("Enabling memory management...\n");
     init_memory_management();
 
-    int res = copy_process(PF_KTHREAD, &kernel_process, 0, 0);
-    if (!res) log_error("Can not start kernel process\n\n");
+    extern void user_begin, user_end;
 
-    // res = copy_process(PF_KTHREAD, &process, "Hello WOrld\n", 0);
-    // if (!res) log_error("Can not start kernel process\n\n");
+    
 
-    // res = copy_process(PF_KTHREAD, &process, "Thang Cao\n", 0);
-    // if (!res) log_error("Can not start kernel process\n\n");
-
+    create_user_process(&user_begin, &user_end-&user_begin);
+//     create_user_process(&user_begin, &user_end-&user_begin);
+// create_user_process(&user_begin, &user_end-&user_begin);
+    
     while(1){
-        //  schedler_schedule();
+        // kinfo("Printing from thread %s. Yeilding...", current_task->name);
+        
+        // cleanup_zombie_processes();
+        // schedler_schedule();
+        // delay(1000000000);
     }
 }

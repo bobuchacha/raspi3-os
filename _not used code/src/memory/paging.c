@@ -145,9 +145,7 @@ void * mem_alloc_page(void){
         page->flags.allocated = 1;
 
         // Get the address the physical page metadata refers to
-        page_mem = (void *)((page - all_pages_array) * PAGE_SIZE);
-
-
+        page_mem = (void *)((page - all_pages_array) * PAGE_SIZE) + VA_START;
 
         // Zero out the page, big security flaw to not do this :)
         memset((void *) page_mem, 0, PAGE_SIZE);

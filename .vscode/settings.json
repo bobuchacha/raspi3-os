@@ -13,6 +13,21 @@
         "uart1.h": "c",
         "task.h": "c",
         "crtdefs.h": "c",
-        "sched.h": "c"
+        "sched.h": "c",
+        "mmu.h": "c",
+        "__bit_reference": "c",
+        "bitset": "c",
+        "__memory": "c",
+        "limits": "c",
+        "locale": "c",
+        "optional": "c",
+        "ratio": "c",
+        "tuple": "c",
+        "vector": "c",
+        "syscall.h": "c",
+        "cstdarg": "c",
+        "array": "c",
+        "type_traits": "c",
+        "variant": "c"
     }
 }

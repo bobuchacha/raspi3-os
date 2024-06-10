@@ -1,14 +1,15 @@
 #ifndef _TASK_H
 #define _TASK_H
 
-#define THREAD_CPU_CONTEXT			0 		// offset of cpu_context in task_struct 
+#define THREAD_CPU_CONTEXT			0 		// offset of cpu_context in task_struct
 
 #ifndef __ASSEMBLER__
 
 
-enum TASK_STATES {
-    TASK_RUNNING = 1
-};
+typedef enum TASK_STATES {
+    TASK_RUNNING = 1,
+    TASK_ZOMBIE = 0
+} TaskState;
 
 enum TASK_PRIORITY {
     PRIORITY_NORMAL = 1,
@@ -17,7 +18,7 @@ enum TASK_PRIORITY {
     PRIORITY_REAL_TIME = 4
 };
 
-struct cpu_context {
+typedef struct cpu_context {
     unsigned long x19;
     unsigned long x20;
     unsigned long x21;
@@ -29,28 +30,55 @@ struct cpu_context {
     unsigned long x27;
     unsigned long x28;
     unsigned long fp;       // x29
-    unsigned long sp;      
+    unsigned long sp;
     unsigned long pc;       // x30
-     
-};
 
-struct task_struct {
-    struct cpu_context cpu_context;
-    long id;
-    long state;
-    long counter;
-    long priority;
-    long preempt_count;
-    unsigned long stack;
-    unsigned long flags;
-};
+} CPUContext;
 
-struct pt_regs {
+#define MAX_PROCESS_PAGES			32
+
+/**
+ * metadata of a user page in our task memory management for easily clean up
+*/
+typedef struct user_page {
+	unsigned long phys_addr;
+	unsigned long virt_addr;
+} UserPage;
+
+typedef struct mm_struct {
+	unsigned long pgd;
+	int user_pages_count;
+	UserPage user_pages[MAX_PROCESS_PAGES];
+	int kernel_pages_count;
+	unsigned long kernel_pages[MAX_PROCESS_PAGES];
+} TaskMemory;
+
+/**
+ * a register used to initialize thecpu registers before KERNEL_EXIT is called.
+ * It should align with KERNEL_EXIT in the assembly code
+*/
+typedef struct pt_regs {
 	unsigned long regs[31];
 	unsigned long sp;
 	unsigned long pc;
 	unsigned long pstate;
-};
+} TaskRegisters;
+
+/**
+ * A structure of our task. include CPU Context and other information of the task
+*/
+typedef struct task_struct {
+    CPUContext cpu_context;
+    long id;
+    TaskState state;
+    long counter;
+    long priority;
+    long preempt_count;
+    unsigned long flags;
+    TaskMemory mm;
+    char* name;
+} Task;
+
 
 /*
  * THEAD CONFIG
@@ -91,7 +119,10 @@ int copy_process(unsigned long clone_flags, unsigned long fn, unsigned long arg,
 
 #define INIT_TASK \
 /*cpu_context*/	{ {0,0,0,0,0,0,0,0,0,0,0,0,0}, \
-/* state etc */	0,0,0,1, 0, 0, PF_KTHREAD \
+/* id */	0, \
+/* state */ TASK_RUNNING,0,1,0, PF_KTHREAD, \
+/* mm */    {0, 0, {0}, 0, {0}}, \
+/* name */ "KERNEL IDLE" \
 }   // this is our kernel task
 
 struct pt_regs * task_pt_regs(struct task_struct *tsk);

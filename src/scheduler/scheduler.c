@@ -6,9 +6,6 @@
 #include "log.h"
 #include "memory.h"
 
-#define _trace          log_info
-#define _trace_printf   printf
-
 static struct task_struct init_task = INIT_TASK;
 struct task_struct *current_task = &(init_task);
 struct task_struct *tasks[NR_TASKS] = {&(init_task), };
@@ -16,12 +13,16 @@ int  nr_tasks = 1;
 
 void preempt_disable(void)
 {
+	// _trace("Preempt disabled ");
 	current_task->preempt_count++;
+	// _trace_p("current [%d] preempt count: %d\n", current_task->id, current_task->preempt_count);
 }
 
 void preempt_enable(void)
 {
+	// _trace("Preempt enabled ");
 	current_task->preempt_count--;
+	// _trace_p("current [%d] preempt count: %d\n", current_task->id, current_task->preempt_count);
 }
 
 /**
@@ -29,6 +30,8 @@ void preempt_enable(void)
 */
 void _schedule(void)
 {
+	// _trace("scheduling...\n");
+	
 	preempt_disable();
 	
 	int next,c;
@@ -68,6 +71,7 @@ void _schedule(void)
 	}
 	
 	schedler_switch_to(tasks[next]);
+	// _trace("Switch completed!\n");
 	preempt_enable();
 	
 }
@@ -86,10 +90,16 @@ void schedler_schedule(void)
 */
 void schedler_switch_to(struct task_struct * next) 
 {
+	// _trace("Switching task from %d to %d",  current_task->id, next->id);
+
 	if (current_task == next) 
 		return;
 	struct task_struct * prev = current_task;
 	current_task = next;
+	set_pgd(next->mm.pgd);
+	// process_dump_task_struct(current_task);
+	// _trace("Switching to ");
+	// _trace_printf("next: 0x%lX from 0x%lX\n\n", next, prev);
 	cpu_switch_to(prev, next);
 }
 
@@ -98,7 +108,7 @@ void schedler_switch_to(struct task_struct * next)
  * @param void
  **/
 void schedule_tail(void) {
-	_trace("Schedule tail called\n");
+	// _trace("Schedule tail called\n");
 	preempt_enable();
 }
 

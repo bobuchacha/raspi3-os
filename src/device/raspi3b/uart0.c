@@ -102,7 +102,7 @@ void uart0_lhex(unsigned long d) {
         // get highest tetrad
         n=(d>>c)&0xF;
         // 0-9 => '0'-'9', 10-15 => 'A'-'F'
-        n+=n>9?0x37:0x30;
+        n+=n>9?0x57:0x30;
         uart0_send(n);
     }
 }

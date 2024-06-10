@@ -29,4 +29,8 @@ extern void memzero(void* ptr, int count);
  */
 extern void memcpy(void* dest, void* src, int count);
 
+
+extern void set_pgd(unsigned long);
+extern unsigned long get_pgd();
+
 #endif  /*_BOOT_H */

@@ -34,14 +34,13 @@ SECTIONS {
         . = . + VIRT_ADDR;
 
         /* USER PROCESS, IT IS COMPILED AGAINST HIGHER ADDRESS SPACE */
-        . = ALIGN(0x1000);
         user_begin = .;
+        .entry.user : AT (ADDR (.entry.user) - VIRT_ADDR) { build/objs/user* (.entrypoint) }
         .text.user : AT (ADDR (.text.user) - VIRT_ADDR) { build/objs/user* (.text) }
         .rodata.user : AT (ADDR (.rodata.user) - VIRT_ADDR) { build/objs/user* (.rodata) }
         .data.user : AT (ADDR (.data.user) - VIRT_ADDR) { build/objs/user* (.data) }
         .bss.user : AT (ADDR (.bss.user) - VIRT_ADDR) { build/objs/user* (.bss) }
         user_end = .;
-
 
          . = ALIGN(0x1000);
         .text   : AT (ADDR (.text) - VIRT_ADDR) { *(.text) }
@@ -62,3 +61,4 @@ SECTIONS {
 }
 
 bss_size = (bss_end - bss_begin) >> 3;
+virt_addr = VIRT_ADDR;

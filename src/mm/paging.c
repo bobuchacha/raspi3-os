@@ -4,10 +4,6 @@
 #include "log.h"
 #include "utils.h"
 
-
-#define _trace log_info
-#define _trace_printf printf
-
 static unsigned int         num_pages;
 static PAGE                 *page_array;
 struct PAGE_LIST            free_pages;
@@ -69,7 +65,7 @@ void mem_init_paging(unsigned long int *heap_start){
 
     _trace("Initialize paging. ");
     _trace_printf("MEMORY SIZE: %d MB, PAGE SIZE: %d KB, TOTAL PAGES: %d. ", mem_size / 1024 / 1024, PAGE_SIZE / 1024, num_pages);
-    _trace_printf("Size of heap struct %d\n", sizeof(HEAP_SEGMENT));
+    _trace_printf("Size of page struct %d\n", sizeof(PAGE));
 
     // Allocate space for all those pages' metadata.  Start this block just after the src image is finished
     page_array_len = sizeof(PAGE) * num_pages;
@@ -88,21 +84,21 @@ void mem_init_paging(unsigned long int *heap_start){
     kernel_pages = LOW_MEMORY_CEILING / PAGE_SIZE;
 
     for (i = 0; i < kernel_pages; i++) {
-        page_array[i].vaddr_mapped = (i * PAGE_SIZE);    // Identity map the src pages
+        page_array[i].phys_addr = (i * PAGE_SIZE);    // Identity map the src pages
         page_array[i].flags.allocated = 1;
         page_array[i].flags.kernel_page = 1;
     }
 
     // map the paging metadata
     for (; i < (kernel_pages + page_array_len / PAGE_SIZE); i++){
-        page_array[i].vaddr_mapped = (i * PAGE_SIZE);    // Identity map the src pages
+        page_array[i].phys_addr = (i * PAGE_SIZE);    // Identity map the src pages
         page_array[i].flags.allocated = 1;
         page_array[i].flags.kernel_page = 1;
     }
 
     // map the heap region
     for (; i < (kernel_pages + (page_array_len / PAGE_SIZE) + (KERNEL_HEAP_SIZE / PAGE_SIZE)); i++){
-        page_array[i].vaddr_mapped = (i * PAGE_SIZE);    // Identity map the src pages
+        page_array[i].phys_addr = (i * PAGE_SIZE);    // Identity map the src pages
         page_array[i].flags.allocated = 1;
         page_array[i].flags.kernel_page = 1;
     }
@@ -110,6 +106,7 @@ void mem_init_paging(unsigned long int *heap_start){
     // Map the rest of the pages as unallocated, and add them to the free list
     for(; i < num_pages; i++){
         page_array[i].flags.allocated = 0;
+        page_array[i].phys_addr = (i * PAGE_SIZE);    // Identity map the src pages
         append_page_list(&free_pages, &page_array[i]);
     }
 
@@ -123,11 +120,14 @@ void mem_init_paging(unsigned long int *heap_start){
  */
 void mem_dump_pagemap(int start, int count){
     printf("============================== [PAGE MAP DUMP] ==============================\n");
-    for (register int i = start; i < count; i++) {
-        if (i < count) printf(" - Page %d vaddr 0x%lX\n", i, page_array[i].vaddr_mapped);
+    for (register int i = start; i < (start+count); i++) {
+        if (i < (start+count)) printf(" - Page %d        Address: 0x%lX         %s\n", i, page_array[i].phys_addr, page_array[i].flags.allocated ? "Used" : "");
     }
 }
 
+/**
+ * allocate a free page, and return its physical address.
+*/
 void * mem_alloc_page(void){
         page_t * page;
         void * page_mem;
@@ -147,23 +147,27 @@ void * mem_alloc_page(void){
         // Get the address the physical page metadata refers to
         page_mem = (void *)((page - page_array) * PAGE_SIZE);
 
-        _trace("Got a page ");
-        _trace_printf("at %x\n", page_mem);
+        // _tracef("Got a page number %d at %lx",page-page_array, page_mem);
 
         // Zero out the page, big security flaw to not do this :)
-        memzero((void *) page_mem, PAGE_SIZE);
+        memzero((void *) page_mem + VA_START, PAGE_SIZE);                                  // Note: We are using physical address for this page
 
         // _trace("Located page ");
         // _trace_printf("at 0x%x, address 0x%x\n", page, page_mem);
         
-        return page_mem;
+        return page_mem;                                                        // physical address of the page
 }
 
+/**
+ * Free page
+*/
 void mem_free_page(void * ptr){
-        page_t * page;
 
-        // Get page metadata from the physical address
-        page = page_array + ((int)ptr / PAGE_SIZE);
+        unsigned long page_number = ((long)ptr & 0xFFFFFFFFFFFF) / PAGE_SIZE;
+        page_t *page = &page_array[page_number];
+
+        // _trace("Freeing 0x%lX", ptr);
+        // _trace_printf("page %lX at 0x%lX. Status: %s\n\n", page->phys_addr, ptr, page->flags.allocated ? "Used" : "");
         //Mark the page as free
         page->flags.allocated = 0;
         append_page_list(&free_pages, page);
