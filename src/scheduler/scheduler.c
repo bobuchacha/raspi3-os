@@ -5,6 +5,7 @@
 #include "irq.h"            // some code in device irq or arch irq
 #include "log.h"
 #include "memory.h"
+#include "utils.h"
 
 static struct task_struct init_task = INIT_TASK;
 struct task_struct *current_task = &(init_task);

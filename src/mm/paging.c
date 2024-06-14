@@ -64,20 +64,20 @@ void mem_init_paging(unsigned long int *heap_start){
     // we place paging right after LOW_MEMORY_CEILING
 
     _trace("Initialize paging. ");
-    _trace_printf("MEMORY SIZE: %d MB, PAGE SIZE: %d KB, TOTAL PAGES: %d. ", mem_size / 1024 / 1024, PAGE_SIZE / 1024, num_pages);
+    _trace_printf("     MEMORY SIZE: %d MB, PAGE SIZE: %d KB, TOTAL PAGES: %d. ", mem_size / 1024 / 1024, PAGE_SIZE / 1024, num_pages);
     _trace_printf("Size of page struct %d\n", sizeof(PAGE));
 
     // Allocate space for all those pages' metadata.  Start this block just after the src image is finished
     page_array_len = sizeof(PAGE) * num_pages;
     page_array = (PAGE *)VA_HIGH_MEMORY;
-    memzero((void *) page_array, page_array_len);
+    memzero((Address)page_array, page_array_len);
 
     // initialize the free page list
     free_pages.head = free_pages.tail = NULL;
     free_pages.size = 0;
 
     _trace("Page Array ");
-    _trace_printf("length %d bytes, starting at 0x%lX\n", page_array_len, page_array);
+    _trace_printf("     length %d bytes, starting at 0x%lX\n", page_array_len, page_array);
 
     // Iterate over all pages and mark them with the appropriate flags
     // Start with src pages, and the paging metadata
@@ -128,9 +128,9 @@ void mem_dump_pagemap(int start, int count){
 /**
  * allocate a free page, and return its physical address.
 */
-void * mem_alloc_page(void){
+Address mem_alloc_page(void){
         page_t * page;
-        void * page_mem;
+        Address page_mem;
 
         // _trace("Allocating new page...\n");
 
@@ -145,12 +145,12 @@ void * mem_alloc_page(void){
         page->flags.allocated = 1;
 
         // Get the address the physical page metadata refers to
-        page_mem = (void *)((page - page_array) * PAGE_SIZE);
+        page_mem = (Address)((page - page_array) * PAGE_SIZE);
 
         // _tracef("Got a page number %d at %lx",page-page_array, page_mem);
 
         // Zero out the page, big security flaw to not do this :)
-        memzero((void *) page_mem + VA_START, PAGE_SIZE);                                  // Note: We are using physical address for this page
+        memzero(page_mem + VA_START, PAGE_SIZE);                                  // Note: We are using physical address for this page
 
         // _trace("Located page ");
         // _trace_printf("at 0x%x, address 0x%x\n", page, page_mem);
@@ -161,9 +161,9 @@ void * mem_alloc_page(void){
 /**
  * Free page
 */
-void mem_free_page(void * ptr){
+void mem_free_page(Address ptr){
 
-        unsigned long page_number = ((long)ptr & 0xFFFFFFFFFFFF) / PAGE_SIZE;
+        unsigned long page_number = ((ULong)ptr & 0xFFFFFFFFFFFF) / PAGE_SIZE;
         page_t *page = &page_array[page_number];
 
         // _trace("Freeing 0x%lX", ptr);

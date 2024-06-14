@@ -9,24 +9,28 @@
 #define LOG_TEST "T"
 #define LOG_FAIL "F"
 
+#define EXPAND( x ) x
+
 #define log(value, level) \
 	kprint("(" level ") %s (" __FILE__ ":%d) | ", __func__, __LINE__); \
     kprint(value);
 
+#define _log(level, ...) \
+	kprint("(" level ") %s (" __FILE__ ":%d) | ", __func__, __LINE__); \
+    kprint(__VA_ARGS__);
 
-#define log_fail(value)     log(value, LOG_FAIL)
-#define log_test(value)     log(value, LOG_TEST)
-#define log_info(value)     log(value, LOG_INFO)
-#define log_warning(value)  log(value, LOG_WARNING)
-#define log_error(value)    log(value, LOG_ERROR)
 
-#define _trace          log_info
-#define _trace_printf   printf
-#define _trace_p        printf
+#define log_fail(...)       EXPAND(_log(LOG_FAIL, __VA_ARGS__))
+#define log_test(...)       EXPAND(_log(LOG_TEST, __VA_ARGS__))
+#define log_info(...)       EXPAND(_log(LOG_INFO, __VA_ARGS__))
+#define log_warning(...)    EXPAND(_log(LOG_WARNING, __VA_ARGS__))
+#define log_error(...)      EXPAND(_log(LOG_ERROR, __VA_ARGS__))
 
 #define _trace(...)   \
 	kprint("[L] %s (" __FILE__ ":%d) >> ", __func__, __LINE__); \
     kprint(__VA_ARGS__); \
     kprint("\n");
+#define _trace_printf   printf
+#define _trace_p        printf
 
 #endif

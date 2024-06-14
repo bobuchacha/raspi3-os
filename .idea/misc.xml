@@ -6,7 +6,19 @@
       <file path="$PROJECT_DIR$/_not used code/src" />
       <file path="$PROJECT_DIR$/include" />
       <file path="$PROJECT_DIR$/src" />
+      <file path="$PROJECT_DIR$/src/arch" />
+      <file path="$PROJECT_DIR$/src/device" />
+      <file path="$PROJECT_DIR$/src/filesystem" />
+      <file path="$PROJECT_DIR$/src/mm" />
+      <file path="$PROJECT_DIR$/src/scheduler" />
+      <file path="$PROJECT_DIR$/src/user" />
     </sourceRoots>
+    <libraryRoots>
+      <file path="$PROJECT_DIR$/include/arch" />
+      <file path="$PROJECT_DIR$/include/device" />
+      <file path="$PROJECT_DIR$/include/filesystem" />
+      <file path="$PROJECT_DIR$/include/user" />
+    </libraryRoots>
     <excludeRoots>
       <file path="$PROJECT_DIR$/_RPiOS" />
       <file path="$PROJECT_DIR$/_not used code" />

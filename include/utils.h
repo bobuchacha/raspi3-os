@@ -1,6 +1,8 @@
 #ifndef	_BOOT_H
 #define	_BOOT_H
 
+#include <ros.h>
+
 extern void delay ( unsigned long);             // delays certain clock cycle
 
 extern void put32 ( unsigned long, int );       // write an int to an address
@@ -19,7 +21,7 @@ extern int get_el ( void );             // get current Exception Level
  * @param ptr
  * @param count
  */
-extern void memzero(void* ptr, int count);
+extern void memzero(Address ptr, int count);
 
 /**
  * copy memory
@@ -27,10 +29,9 @@ extern void memzero(void* ptr, int count);
  * @param src
  * @param count
  */
-extern void memcpy(void* dest, void* src, int count);
+extern void memcpy(Address dest, Address src, int count);
 
-
-extern void set_pgd(unsigned long);
-extern unsigned long get_pgd();
+extern void set_pgd(Pointer);
+extern Pointer get_pgd();
 
 #endif  /*_BOOT_H */

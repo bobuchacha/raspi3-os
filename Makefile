@@ -7,10 +7,11 @@ QEMU ?= qemu-system-aarch64
 
 BUILD_DIR = build
 SRC_DIR = src
+USR_SRC_DIR = user
 INCLUDE_DIR = include
 OBJS_DIR = build/objs
 
-COPS = -g -Wall -nostdlib -nostartfiles -ffreestanding -Iinclude -Isrc -Isrc/include -mgeneral-regs-only
+COPS = -g -Werror -nostdlib -nostartfiles -ffreestanding -Iinclude -Isrc -Isrc/include -mgeneral-regs-only
 ASMOPS = -g -Iinclude
 
 all: kernel8.img
@@ -22,6 +23,10 @@ clean:
 	@rm $(BUILD_DIR)/kernel8.elf $(BUILD_DIR)/*.o $(BUILD_DIR)/*.img >/dev/null 2>/dev/null || true
 
 $(OBJS_DIR)/%_c.o: $(SRC_DIR)/%.c
+	@echo "-> $@..."
+	@mkdir -p $(@D)
+	@$(ARMGNU)-gcc $(COPS) -MMD -c $< -o $@
+$(OBJS_DIR)/%_cpp.o: $(SRC_DIR)/%.cpp
 	@echo "-> $@..."
 	@mkdir -p $(@D)
 	@$(ARMGNU)-gcc $(COPS) -MMD -c $< -o $@
@@ -38,12 +43,53 @@ font_sfn.o: $(BUILD_DIR)/screenfont/font.sfn
 
 #C_FILES = $(wildcard $(SRC_DIR)/*.c)
 C_FILES = $(shell find $(SRC_DIR) -type f -name '*.c')
+CPP_FILES = $(shell find $(SRC_DIR) -type f -name '*.cpp')
 #ASM_FILES = $(wildcard $(SRC_DIR)/*.S)
 ASM_FILES = $(shell find $(SRC_DIR) -type f -name '*.S')
 OBJ_FILES = $(C_FILES:$(SRC_DIR)/%.c=$(OBJS_DIR)/%_c.o)
+OBJ_FILES += $(CPP_FILES:$(SRC_DIR)/%.cpp=$(OBJS_DIR)/%_cpp.o)
 OBJ_FILES += $(ASM_FILES:$(SRC_DIR)/%.S=$(OBJS_DIR)/%_s.o)
 DEP_FILES = $(OBJ_FILES:%.o=%.d)
 -include $(DEP_FILES)
+
+
+#######################################################################################################
+USER_C_FILES = $(shell find $(USR_SRC_DIR) -type f -name '*.c')
+USER_ASM_FILES = $(shell find $(USR_SRC_DIR) -type f -name '*.S')
+USER_OBJ_FILES = $(USER_C_FILES:$(USR_SRC_DIR)/%.c=$(USER_OBJS_DIR)/%_c.o)
+USER_OBJ_FILES += $(USER_ASM_FILES:$(USR_SRC_DIR)/%.S=$(USER_OBJS_DIR)/%_s.o)
+USER_OBJS_DIR = build/user/objs
+
+$(USER_OBJS_DIR)/%_c.o: $(USR_SRC_DIR)/%.c
+	@echo "-> $@..."
+	@mkdir -p $(@D)
+	@$(ARMGNU)-gcc $(COPS) -MMD -c $< -o $@
+$(USER_OBJS_DIR)/%_s.o: $(USR_SRC_DIR)/%.S
+	@echo "-> $@..."
+	@$(ARMGNU)-gcc $(ASMOPS) -MMD -c $< -o $@
+user:  $(USR_SRC_DIR)/link.ld $(USER_OBJ_FILES)
+	@$(ARMGNU)-ld -nostdlib -T $(USR_SRC_DIR)/link.ld -o $(BUILD_DIR)/user.elf  $(USER_OBJ_FILES) -g
+#######################################################################################################
+
+f32.disk:
+	-rm f32.disk
+	dd if=/dev/zero of=f32.disk bs=1M count=64
+	mkfs.fat -F32 f32.disk -s 1
+
+mount_disk: f32.disk
+	mkdir -p fat32
+	sudo hdiutil attach -imagekey diskimage-class=CRawDiskImage -nomount f32.disk
+
+populate_disk: mount_disk
+	sudo cp *.c *.h fat32
+	sudo cp -R deps fat32/
+	sudo mkdir -p fat32/foo/bar/baz/boo/dep/doo/poo/goo/
+	sudo cp common.h fat32/foo/bar/baz/boo/dep/doo/poo/goo/tood.txt
+	sleep 1
+	sudo umount fat32
+	-@rm -Rf fat32
+
+#######################################################################################################
 
 
 kernel8.img: $(SRC_DIR)/link.ld $(OBJ_FILES)
@@ -55,7 +101,7 @@ diasm: all
 	@$(ARMGNU)-objdump --all-headers $(BUILD_DIR)/kernel8.elf
 run: all
 	@echo "Running: --------------------------------------------------------------------------------- "
-	@$(QEMU) -M raspi3b -kernel kernel8.img  -serial stdio -s -display none
+	@$(QEMU) -M raspi3b -kernel kernel8.img  -serial stdio -s -display none -drive file=fat32.img,if=sd,format=raw
 debug: all
 	@echo "QEMU starting. Remember to start gdb------------------------------------------------------ "
 	# @$(QEMU) -M raspi3b -kernel kernel8.img -serial null -serial stdio -display none -s -S -d trace:bcm2835_systmr*

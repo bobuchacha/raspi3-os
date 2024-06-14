@@ -1,6 +1,7 @@
 #include "utils.h"
 #include "printf.h"
 #include "device/raspi3b.h"
+#include "timer.h"
 
 const unsigned int _timer0_interval = 500000;
 static unsigned long int _timer0_current_val = 0;

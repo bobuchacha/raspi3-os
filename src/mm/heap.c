@@ -4,9 +4,6 @@
 #include "log.h"
 #include "utils.h"
 
-#define _trace          log_info
-#define _trace_printf   printf
-
 static HEAP_SEGMENT         *heap_segment_list_head;
 
 void mem_heap_dump(int count){
@@ -35,28 +32,28 @@ void mem_init_heap(unsigned long int heap_start){
     _trace_printf("starting at 0x%lX. Total Size: %d MB.\n", heap_start, KERNEL_HEAP_SIZE);
 
     heap_segment_list_head = (heap_segment_t *) heap_start;
-    memzero(heap_segment_list_head, sizeof(heap_segment_t));
+    memzero((Address)heap_segment_list_head, sizeof(heap_segment_t));
     heap_segment_list_head->segment_size = KERNEL_HEAP_SIZE;
 
 }
 
-void * krealloc(void *ptr, unsigned int bytes){
+Address krealloc(Address ptr, unsigned int bytes){
 
         kdebug("krealloc: Reallocating 0x%x to get new %ld bytes... ", ptr, bytes);
 
-        if(ptr == NULL) {
+        if(ptr == 0) {
                 kdebug("  -> Not allocated. Allocating new segment");
                 return kmalloc(bytes);
         }
-        heap_segment_t * header = ptr - sizeof(heap_segment_t);
-        void *newchunk = kmalloc(bytes);                        // allocate new chunk
-        if(newchunk == NULL) return NULL;                       // Don't know if this can actually happen
+        heap_segment_t * header = (Pointer)ptr - sizeof(heap_segment_t);
+        Address newchunk = kmalloc(bytes);                        // allocate new chunk
+        if(!newchunk) return 0;                                 // Don't know if this can actually happen
         memcpy(newchunk, ptr, header->segment_size);            // copy data from old chunk to new
         kfree(ptr);                                             // free old trunk
         return newchunk;                                        // return new trunk
 }
 
-void * kmalloc(int bytes) {
+Address kmalloc(int bytes) {
     heap_segment_t * curr, *best = NULL;
     int diff, best_diff = 0x7fffffff; // Max signed int
 
@@ -82,14 +79,14 @@ void * kmalloc(int bytes) {
     // There must be no free memory right now :(
     if (best == NULL){
         kerror("kmalloc: Heap not available for %d bytes", bytes);
-        return NULL;
+        return 0;
     }
 
     // If the best difference we could come up with was large, split up this segment into two.
     // Since our segment headers are rather large, the criterion for splitting the segment is that
     // when split, the segment not being requested should be twice a header size
     if (best_diff > (int)(2 * sizeof(heap_segment_t))) {
-        memzero(((void*)(best)) + bytes, sizeof(heap_segment_t));
+        memzero(((Address)(best)) + bytes, sizeof(heap_segment_t));
         curr = best->next;
         best->next = ((void*)(best)) + bytes;
         best->next->next = curr;
@@ -102,7 +99,7 @@ void * kmalloc(int bytes) {
     _trace_printf("%lx\n", best+1);
 
     best->is_allocated = 1;
-    return best + 1;    // after segment metadata
+    return (Address)(best + 1);    // after segment metadata
 }
 
 long int pointer_to_int(void* ptr){
@@ -110,14 +107,14 @@ long int pointer_to_int(void* ptr){
         return *u;
 }
 
-void kfree(void *ptr) {
+void kfree(Address ptr) {
         if (!ptr)
                 return;
 
         _trace("Free heap at address: ");
         _trace_printf("%lx\n", ptr);
 
-        heap_segment_t * seg = ptr - sizeof(heap_segment_t);
+        heap_segment_t * seg = (Pointer)ptr - sizeof(heap_segment_t);
         seg->is_allocated = 0;
 
         // try to coalesce segements to the left

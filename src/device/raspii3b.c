@@ -1,4 +1,4 @@
-#include "ros.h"
+#include <ros.h>
 #include "irq.h"
 #include "memory.h"
 #include "device.h"
@@ -7,8 +7,6 @@
 #include "utils.h"
 #include "device/sd.h"
 
-#define _trace          log_info
-#define _trace_printf   printf
 
 static unsigned char _putp[1024];
 
@@ -17,19 +15,21 @@ void device_init(){
     uart0_init();
     init_printf(_putp, uart0_putc);
 
-    log_info("Initializing IRQ...\n");
+    _trace("Initializing IRQ...\n");
     disable_irq();
     irq_vector_init();
 
-    log_info("Initializing Timer...\n");
+    _trace("Initializing Timer...\n");
     timer_init();
 
-    log_info("Enabling interrupt controllers & timer...\n");
+    _trace("Enabling interrupt controllers & timer...\n");
     enable_interrupt_controller();
     enable_irq();
-    
+
     // initialize sd card
+    _trace("Initialize SD Card");
     if (sd_init() != SD_OK) {
         log_error("SD card initialization error!\n");
     }
+
 }   

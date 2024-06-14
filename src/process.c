@@ -12,7 +12,6 @@ extern unsigned long user_process_pre_loader();
 
 void process_dump_task_struct(Task* task);
 void copy_virtual_memory(struct task_struct *p);
-ulong process_copy_thread(unsigned long flags, void *program_addr, void *arg);
 
 //mmu.c
 void process_map_page(Task *task, ulong pa, ulong va, ulong flags);
@@ -33,13 +32,13 @@ void process_unload(Task *task){
     // remove kernel pages
     for (int j = 0; j < task->mm.kernel_pages_count; j++) {
         // _trace("Freeing page 0x%lX", task->mm.kernel_pages[j]);
-        mem_free_page(task->mm.kernel_pages[j]);
+        mem_free_page((Address)task->mm.kernel_pages[j]);
     }
 
     // free user pages
     for (int j = 0; j < task->mm.user_pages_count; j++) {
         // _trace("Freeing user page 0x%lX", task->mm.user_pages[j].phys_addr);
-        mem_free_page(task->mm.user_pages[j].phys_addr);
+        mem_free_page((Address)task->mm.user_pages[j].phys_addr);
     }
 
 	preempt_enable();
@@ -64,13 +63,13 @@ void cleanup_zombie_processes(){
             // remove kernel pages
             for (int j = 0; j < t->mm.kernel_pages_count; j++) {
                 _trace("Freeing page 0x%lX", t->mm.kernel_pages[j]);
-                mem_free_page(t->mm.kernel_pages[j]);
+                mem_free_page((Address)t->mm.kernel_pages[j]);
             }
 
             // free user pages
             for (int j = 0; j < t->mm.user_pages_count; j++) {
                 _trace("Freeing user page 0x%lX", t->mm.user_pages[j].phys_addr);
-                mem_free_page(t->mm.user_pages[j].phys_addr);
+                mem_free_page((Address)t->mm.user_pages[j].phys_addr);
             }
 
             // unset task in the array
@@ -86,7 +85,7 @@ void cleanup_zombie_processes(){
  * x20 = program_addr
  * x21 = program_size
 */
-void user_process_loader(ulong *program_addr, ulong program_size){
+void user_process_loader(Address program_addr, ulong program_size){
     _trace("Loading user process at 0x%lX, size: %d bytes...", program_addr, program_size);
     preempt_disable();
     
@@ -102,10 +101,11 @@ void user_process_loader(ulong *program_addr, ulong program_size){
 
     // reserve memory for stack
     // only need to map 1 page. As the Data Abort handler will map more page as stack grows downward
-    void *s = mem_alloc_page();
+    Address s = mem_alloc_page();
     if (!s) return process_unload(task);
-    process_map_page(task, s, VA_USER_STACK - PAGE_SIZE, PE_USER_DATA);
-    task->mm.kernel_pages[++task->mm.kernel_pages_count] = s;
+
+    process_map_page(task, s, (Address)(VA_USER_STACK - PAGE_SIZE), PE_USER_DATA);
+    task->mm.kernel_pages[++task->mm.kernel_pages_count] = (Pointer)s;
 
     // prepare our task registers that ret_to_user will use. These info will be loaded by kernel_exit 0
     struct pt_regs *regs = task_pt_regs(task);
@@ -115,15 +115,15 @@ void user_process_loader(ulong *program_addr, ulong program_size){
 
     // reserve memory for code. And copy user code into its memory
     for (i = program_stack_pages;program_code_pages > 0; program_code_pages--, i++, j++) {
-        void *s = mem_alloc_page();
-        if (!s) return process_unload(task);
+        Address _segment = mem_alloc_page();
+        if (!_segment) return process_unload(task);
         
         code_offset = j * PAGE_SIZE;
         copy_length = (program_size - (j * PAGE_SIZE)) > PAGE_SIZE ? PAGE_SIZE : (program_size % PAGE_SIZE);
 
         // _trace("Allocating 1 page for the new process code...\n");
-        process_map_page(task, s, i * PAGE_SIZE, PE_USER_CODE);          
-        memcpy((void*)(s + VA_START), (void*)(program_addr + code_offset), copy_length);        
+        process_map_page(task, _segment, i * PAGE_SIZE, PE_USER_CODE);          
+        memcpy(_segment + VA_START, program_addr + code_offset, copy_length);        
     }
 
     // set pgd
@@ -137,11 +137,11 @@ void user_process_loader(ulong *program_addr, ulong program_size){
 /**
  * run user program
 */
-int create_user_process(unsigned long *program_addr, unsigned long program_size){
+int create_user_process(Address program_addr, ULong program_size){
     preempt_disable();
 	Task *new_task;
 
-	void *page = mem_alloc_page();
+	Address page = mem_alloc_page();
 	if (!page) return -1;
 
 	new_task = (struct task_struct *) (page + VA_START);
@@ -149,8 +149,8 @@ int create_user_process(unsigned long *program_addr, unsigned long program_size)
 
 	_trace("Forking new thread. Address: 0x%lx. SP: 0x%lX\n", (ulong)new_task, childregs);
 
-    new_task->cpu_context.x19 = &user_process_loader;
-    new_task->cpu_context.x20 = program_addr;
+    new_task->cpu_context.x19 = (ULong) &user_process_loader;
+    new_task->cpu_context.x20 = (ULong)program_addr;
     new_task->cpu_context.x21 = program_size;
     new_task->mm.pgd = get_pgd();               // user kenel pgd for now
 
@@ -177,11 +177,11 @@ int create_user_process(unsigned long *program_addr, unsigned long program_size)
 /**
  * fork current process and create a separate thread
 */
-ulong process_copy_thread(unsigned long flags, void *program_addr, void *arg){
+ulong process_copy_thread(Flags flags, Address program_addr, Pointer arg){
     preempt_disable();
 	Task *new_task;
 
-	void *page = mem_alloc_page();
+	Address page = mem_alloc_page();
 	if (!page) return -1;
 
 	new_task = (struct task_struct *) (page + VA_START);
@@ -193,8 +193,8 @@ ulong process_copy_thread(unsigned long flags, void *program_addr, void *arg){
 	// memzero((unsigned long)&p->cpu_context, sizeof(struct cpu_context));
 
 	if (flags & PF_KTHREAD) {
-		new_task->cpu_context.x19 = program_addr;
-		new_task->cpu_context.x20 = arg;
+		new_task->cpu_context.x19 = (ULong)program_addr;
+		new_task->cpu_context.x20 = (ULong)arg;
         new_task->mm.pgd = get_pgd();
 	} else {
         _trace("Copying new user thread");
@@ -213,8 +213,8 @@ ulong process_copy_thread(unsigned long flags, void *program_addr, void *arg){
 	new_task->counter = new_task->priority;
 	new_task->preempt_count = 1; //disable preemtion until schedule_tail
 
-	new_task->cpu_context.pc = (unsigned long)ret_from_fork;
-	new_task->cpu_context.sp = (unsigned long)childregs;    // new thread's SP is right below the reg struct
+	new_task->cpu_context.pc = (ULong)ret_from_fork;
+	new_task->cpu_context.sp = (ULong)childregs;    // new thread's SP is right below the reg struct
 	
 	int pid = nr_tasks++;
 	new_task->id = pid;
@@ -254,4 +254,8 @@ void dump_current_task(){
 }
 void print_current_task_id(){
     printf("==> CURRENT TASK ID: %d\n\n", current_task->id);
+}
+struct pt_regs *task_pt_regs(struct task_struct *tsk) {
+    unsigned long p = (unsigned long)tsk + THREAD_SIZE - sizeof(struct pt_regs);
+	return (struct pt_regs *)p;
 }

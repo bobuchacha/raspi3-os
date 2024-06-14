@@ -9,5 +9,6 @@ void wait_msec(unsigned int n);
 unsigned long get_system_timer();
 void wait_msec_st(unsigned int n);
 
-
+// in timer.c
+void timer_tick();      // callee when timer ticks
 #endif  /*_TIMER_H */

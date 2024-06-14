@@ -19,8 +19,8 @@ unsigned long sys_malloc(ulong x){
 	printf("0x%lX\n", x);
 }
 
-void sys_exit(){
-	exit_current_process();
+void sys_exit(ULong result){
+	exit_current_process(result);
 }
 
 int sys_get_param(int param){

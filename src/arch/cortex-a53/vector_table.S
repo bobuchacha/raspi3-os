@@ -6,7 +6,6 @@
 #define ESR_ELx_EC_SHIFT		26
 #define ESR_ELx_EC_SVC64		0x15
 #define ESR_ELx_EC_DABT_LOW		0x24
-#define S_FRAME_SIZE			16*17 		// size of all saved registers
 #define S_X0					0		// offset of x0 register in saved stack frame
 
 FUNCTION irq_vector_init

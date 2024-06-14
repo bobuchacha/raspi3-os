@@ -2,17 +2,18 @@
 // Created by Thang Cao on 5/18/24.
 //
 
+#include <ros.h>
 #include "device/raspi3b/mailbox.h"
 #include "device/raspi3b/peripherals/base.h"
 #include "printf.h"
 
 #define VIDEOCORE_MBOX  (PBASE+0x0000B880)
-#define MBOX_READ       ((MailMessage*)(VIDEOCORE_MBOX+0x0))
+#define MBOX_READ       ((UInt*)(VIDEOCORE_MBOX+0x0))
 #define MBOX_POLL       ((volatile unsigned int*)(VIDEOCORE_MBOX+0x10))
 #define MBOX_SENDER     ((volatile unsigned int*)(VIDEOCORE_MBOX+0x14))
-#define MBOX_STATUS     ((MailStatus*)(VIDEOCORE_MBOX+0x18))
+#define MBOX_STATUS     ((UInt*)(VIDEOCORE_MBOX+0x18))
 #define MBOX_CONFIG     ((volatile unsigned int*)(VIDEOCORE_MBOX+0x1C))
-#define MBOX_WRITE      ((MailMessage*)(VIDEOCORE_MBOX+0x20))
+#define MBOX_WRITE      ((UInt*)(VIDEOCORE_MBOX+0x20))
 
 #define MAIL0_ADDR (PBASE + 0xB880)
 #define MAIL1_ADDR (PBASE + 0xB8A0) // which is MBOX_WRITE
@@ -25,7 +26,7 @@
 /* a properly aligned buffer */
 volatile unsigned int __attribute((aligned(16))) mailbox_buffer[36];
 
-MailMessage mailbox_read(int channel) {
+UInt mailbox_read(Int channel) {
     MailStatus status;
     MailMessage response;
 
@@ -33,24 +34,23 @@ MailMessage mailbox_read(int channel) {
     do {
         // Make sure there is mail to recieve
         do {
-            status = *MBOX_STATUS;
+            status.status = *MBOX_STATUS;
         } while (status.is_empty);
 
         // Get the message
-        response = *MBOX_READ;
+        response.message = *MBOX_READ;
     } while (response.channel != channel);
 
-    return response;
+    return response.message;
 }
 
-void mailbox_send(MailMessage msg, int channel) {
+void mailbox_send(UInt msg, Int channel) {
     MailStatus status;
-    msg.channel = channel;
-
+    msg |= (channel & 0xF);     // add channel to low 4 bit
 
     // Make sure you can send mail
     do {
-        status = *MBOX_STATUS;
+        status.status = *MBOX_STATUS;
     } while (status.is_full);
 
     // send the message
@@ -60,18 +60,15 @@ void mailbox_send(MailMessage msg, int channel) {
 /**
  * Make a mailbox call. Returns 0 on failure, non-zero on success
  */
-int mailbox_call(unsigned long data[], unsigned char channel)
+int mailbox_call(UInt* data, unsigned char channel)
 {
-    // address of buffer, clear low 4 bit, add channel to low 4 bit
-    // unsigned int r = (((unsigned int)(data)&~0xF) | (channel&0xF));
-    MailMessage msg;
-    msg.data = ((unsigned int)(data)&~0xF);    // CLEAR LOW 4 BIT of data, shift right
 
     // send the request
-    mailbox_send(msg, channel);
+    mailbox_send(((ULong)data) & (0xFFFFFFF0), channel);
 
     // retrieve response
-    MailMessage ret = mailbox_read(channel);
+    MailMessage ret;
+    ret.message = mailbox_read(channel);
     return ret.data;
 
 }

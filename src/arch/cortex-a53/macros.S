@@ -47,28 +47,6 @@ ENDM
     add		sp, sp, #\bytes
 .endm
 
-.macro HANDLE_INVALID_ENTRY el type		// this handles invalid entry by calling our debugger
-	// mov x18, #0xFFFF000000000000
-    KERNEL_ENTRY el
-    
-    // add sp, sp, x18
-    bl      dump_registers
-
-    str     x30, [sp, #-16]!     // push x30. This is for debugger to return to the right address
-    bl      dbg_saveregs		// save registers before calling C code of debugger
-
-	mov		x0, #\type
-	mrs		x1, esr_el1
-	mrs		x2, elr_el1
-	bl		show_invalid_entry_message
-
-    bl      dbg_decodeexc
-    bl      dbg_main
-    // KERNEL_EXIT el
-	eret                            // this has to be called when returned from dbg_main because it increase the PC by 1 instruction. So kernel will get to the next instruction
-.endm
-
-
 .macro	VENTRY	label					// this macro creates a short code that jumps to label ò handler
 	.align	7
 	b		\label
@@ -207,11 +185,30 @@ ENDM
 .endm
 
 
+.macro HANDLE_INVALID_ENTRY el type		// this handles invalid entry by calling our debugger
+	// mov x18, #0xFFFF000000000000
+    KERNEL_ENTRY el
+    
+    // add sp, sp, x18
+    bl      dump_registers
 
+    str     x30, [sp, #-16]!     // push x30. This is for debugger to return to the right address
+    bl      dbg_saveregs		// save registers before calling C code of debugger
+
+	mov		x0, #\type
+	mrs		x1, esr_el1
+	mrs		x2, elr_el1
+	bl		show_invalid_entry_message
+
+    bl      dbg_decodeexc
+    bl      dbg_main
+    // KERNEL_EXIT el
+	eret                            // this has to be called when returned from dbg_main because it increase the PC by 1 instruction. So kernel will get to the next instruction
+.endm
 
 #define S_FRAME_SIZE 16*18
+
 .macro	KERNEL_ENTRY el
-    // PRINT_REG "    x0" "<== KERNEL_ENTRY\n"
     sub	sp, sp, #S_FRAME_SIZE
 	stp	x0, x1, [sp, #16 * 0]
 	stp	x2, x3, [sp, #16 * 1]
@@ -240,14 +237,6 @@ ENDM
 
 	stp	x30, x21, [sp, #16 * 15] 
 	stp	x22, x23, [sp, #16 * 16]
-
-    // mrs x24, TTBR0_EL1
-    // stp x24, xzr, [sp, #16 * 17]    // store TTBR0_EL1
-
-    // restore kernel TTBR0
-    // ldr x0, =ttbr0_pgd
-    // bl set_pgd
-
 .endm
 
 .macro KERNEL_EXIT el
@@ -260,9 +249,6 @@ ENDM
 
 	msr	elr_el1, x22			
 	msr	spsr_el1, x23
-// PRINT_REG x23 "<----- spsr_el1 before exit\n"
-// PRINT_REG x22 "<----- elr_el1 before exit\n"
-// PRINT_REG x21 "<----- process' SP before exit\n"
     
     ldp	x0, x1, [sp, #16 * 0]
 	ldp	x2, x3, [sp, #16 * 1]
@@ -281,7 +267,5 @@ ENDM
 	ldp	x28, x29, [sp, #16 * 14]
     add	sp, sp, #S_FRAME_SIZE		
 
-    // PRINT_REG "    x0" "<== KERNEL_EXIT\n"
-    // PRINT_REG "    x1" "<== KERNEL_EXIT\n"
 	eret
 .endm

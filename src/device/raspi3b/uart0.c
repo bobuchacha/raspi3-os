@@ -23,18 +23,18 @@ void uart0_init(){
     mbox[7] = 0;           // clear turbo
     mbox[8] = MBOX_TAG_LAST;
 
-    mailbox_call(mbox, MBOX_CH_PROP);
+    mailbox_call((UInt*)mbox, MBOX_CH_PROP);
 
     /* map UART0 to GPIO pins */
-    r=get32(GPFSEL1);
+    r=*GPFSEL1;
     r&=~((7<<12)|(7<<15)); // gpio14, gpio15
     r|=(4<<12)|(4<<15);    // alt0
-    put32(GPFSEL1,r);
-    put32(GPPUD, 0);            // enable pins 14 and 15
+    *GPFSEL1 = r;
+    *GPPUD = 0;            // enable pins 14 and 15
     r=150; while(r--) { asm volatile("nop"); }
-    put32(GPPUDCLK0, (1<<14)|(1<<15));
+    *GPPUDCLK0 = (1<<14)|(1<<15);
     r=150; while(r--) { asm volatile("nop"); }
-    put32(GPPUDCLK0, 0);        // flush GPIO setup
+    *GPPUDCLK0 = 0;        // flush GPIO setup
 
     // enable UART0
     *(int*)UART0_ICR = 0x7FF;    // clear interrupts

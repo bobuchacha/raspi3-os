@@ -12,9 +12,11 @@ typedef unsigned char     ubyte;        // 8 bit
 #define null            ((void*)0)
 
 typedef enum {
-    true  = 1,
+    true  = !0,
     false = 0
 } Bool;
+
+
 
 typedef unsigned long long Address;
 typedef unsigned long long Offset;
@@ -27,7 +29,12 @@ typedef unsigned short     UWord;
 typedef char               Byte;
 typedef unsigned char      UByte;
 typedef unsigned char*     Buffer;
+typedef unsigned int       Size;
+typedef void*              Pointer;
+typedef unsigned long long Flags;
 
-
+// include libs here
+#include "lib/string.h"
+#include "lib/util.h"
 #endif
 

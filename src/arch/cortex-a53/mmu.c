@@ -31,7 +31,7 @@
 #define MMU_PTE_FLAGS			(MM_TYPE_PAGE | (MT_NORMAL_NC << 2) | MM_ACCESS | MM_ACCESS_PERMISSION)	
 
 
-void _map_table_entry(ulong *pte, ulong va, ulong pa, ulong flags) {
+void _map_table_entry(TableEntry *pte, Address va, Address pa, Flags flags) {
 	unsigned long index = va >> MM_PAGE_SHIFT;
 	index = index & (MM_PTRS_PER_TABLE - 1);
 	// _tracef(">>>>>>>>>> Mapping PTE: VA: 0x%lX Index: %d\n", va, index);
@@ -40,15 +40,15 @@ void _map_table_entry(ulong *pte, ulong va, ulong pa, ulong flags) {
 	pte[index] = entry;
 }
 
-ulong _map_table(unsigned long *table, unsigned long shift, unsigned long va, int* is_table_new) {
+Address _map_table(TableEntry *table, ULong shift, Address va, Bool* is_table_new) {
 	// _tracef("mapping table 0x%x", table);
 	unsigned long index = va >> shift;
 	// _tracef(">>>>>>>>>> Mapping Directory: VA: 0x%lX >> %d Index: %d\n", va,shift, index);
 	index = index & (MM_PTRS_PER_TABLE - 1);
 	if (!table[index]){
-		*is_table_new = 1;
-		unsigned long next_level_table = mem_alloc_page();
-		unsigned long entry = next_level_table | PT_TABLE_ENTRY;
+		*is_table_new = true;
+		Address next_level_table = (Address)mem_alloc_page();
+		TableEntry entry = (ULong)next_level_table | PT_TABLE_ENTRY;
 		table[index] = entry;
 		return next_level_table;
 	} else {
@@ -60,43 +60,44 @@ ulong _map_table(unsigned long *table, unsigned long shift, unsigned long va, in
 /**
  * map physical address into process' virtual memory map
 */
-void process_map_page(Task *task, ulong pa, ulong va, ulong flags) {
-    unsigned long pgd;
+void process_map_page(Task *task, Address pa, Address va, Flags flags) {
+    Address pgd;
 	
     // _trace("Mapping process memory 0x%lX to 0x%lX\n", pa, va);
 
     // create PGD if task doesnt have it yet
     if (!task->mm.pgd) {
 		// _trace("Creating new page for PGD...\n");
-		task->mm.pgd = mem_alloc_page();
+		task->mm.pgd = (Pointer)mem_alloc_page();
 		task->mm.kernel_pages[++task->mm.kernel_pages_count] = task->mm.pgd;
 	}
-	pgd = task->mm.pgd;
+	pgd = (Address)task->mm.pgd;
     // kdebug("This PGD is at 0x%lX", pgd);
     // check pud
-	int is_table_new;
-	unsigned long pud = _map_table((unsigned long *)(pgd + VA_START), MM_PGD_SHIFT, va, &is_table_new);
+	Bool is_table_new;
+	
+	Address pud = _map_table((TableEntry*)(pgd + VA_START), MM_PGD_SHIFT, va, &is_table_new);
 	if (is_table_new) {
 		// _trace("Created new page for PUD...\n");
-		task->mm.kernel_pages[++task->mm.kernel_pages_count] = pud;
+		task->mm.kernel_pages[++task->mm.kernel_pages_count] = (Pointer)pud;
 	}
 
     // check pmd
-	unsigned long pmd = _map_table((unsigned long *)(pud + VA_START) , MM_PUD_SHIFT, va, &is_table_new);
+	Address pmd = _map_table((TableEntry *)(pud + VA_START) , MM_PUD_SHIFT, va, &is_table_new);
 	if (is_table_new) {
 		// _trace("Created new page for PMD...\n");
-		task->mm.kernel_pages[++task->mm.kernel_pages_count] = pmd;
+		task->mm.kernel_pages[++task->mm.kernel_pages_count] = (Pointer)pmd;
 	}
 
     // check for correspondent pte
-	unsigned long pte = _map_table((unsigned long *)(pmd + VA_START), MM_PMD_SHIFT, va, &is_table_new);
+	Address pte = _map_table((TableEntry *)(pmd + VA_START), MM_PMD_SHIFT, va, &is_table_new);
 	if (is_table_new) {
 		// _trace("Created new page for PTE...\n");
-		task->mm.kernel_pages[++task->mm.kernel_pages_count] = pte;
+		task->mm.kernel_pages[++task->mm.kernel_pages_count] = (Pointer)pte;
 	}
 
     // now we got all tables we need for specific va, let's map the 4K entry
-	_map_table_entry((unsigned long *)(pte + VA_START), va, pa, flags);
+	_map_table_entry((TableEntry *)(pte + VA_START), va, pa, flags);
 
 	UserPage p = {pa, va};
 	// _trace("Mapped 0x%lX to 0x%lX", pa, va);
@@ -107,12 +108,12 @@ unsigned long mem_handle_data_abort(ulong addr, ulong esr){
 	_trace("Called by process %d. Requested access to address 0x%lX\n", current_task->id, addr);
 	unsigned long dfs = (esr & 0b111111);
 	if ((dfs & 0b111100) == 0b100) {
-		unsigned long page = mem_alloc_page();
-		if (page == 0) {
+		Address page = mem_alloc_page();
+		if (!page) {
 			_trace("Page not allocated");
 			return -1;
 		}
-		process_map_page(current_task, page, addr & MM_PAGE_MASK, MMU_PTE_FLAGS);
+		process_map_page(current_task, page, (Address)addr & MM_PAGE_MASK, MMU_PTE_FLAGS);
 
 		return 0;
 	}

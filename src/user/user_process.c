@@ -1,5 +1,6 @@
 #include "printf.h"
 #include "syscall.h"
+#include "user/lib.h"
 
 #define ENTRYPOINT __attribute__((section(".entrypoint"))) void
 long main();
@@ -24,7 +25,7 @@ long main(){
       syscall(SYS_WRITE_NUMBER, "Hello World\n\n\n\n");
 
       char buff[1024];
-      fprint(&buff, "Hello Thang 0x%016lx.\n", 0x1234);
+      fprint((char*)&buff, "Hello Thang 0x%016lx.\n", 0x1234);
       syscall(SYS_WRITE_NUMBER, buff);
 
    return 0xDEAD;

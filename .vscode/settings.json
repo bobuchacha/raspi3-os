@@ -28,6 +28,13 @@
         "cstdarg": "c",
         "array": "c",
         "type_traits": "c",
-        "variant": "c"
+        "variant": "c",
+        "filesystem.h": "c",
+        "elf-loader.h": "c",
+        "elf-loader-config.h": "c",
+        "elf.h": "c",
+        "lib.h": "c",
+        "utils.h": "c",
+        "mailbox.h": "c"
     }
 }

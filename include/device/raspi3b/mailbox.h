@@ -5,6 +5,8 @@
 #ifndef RASPI3_OS_MAILBOX_H
 #define RASPI3_OS_MAILBOX_H
 
+#include <ros.h>
+
 /* channels */
 #define MBOX_CH_POWER   0
 #define MBOX_CH_FB      1
@@ -24,22 +26,29 @@
 
 #define MBOX_REQUEST    0
 
-typedef struct mail_message_t{
-    unsigned char channel: 4;
-    unsigned int data: 28;
+
+typedef union {
+    struct {
+        unsigned char channel: 4;
+        unsigned int data: 28;
+    };
+    int message;
 } MailMessage;
 
-typedef struct {
-    unsigned int reserved: 30;
-    unsigned char is_empty: 1;
-    unsigned char is_full:1;
+typedef union {
+    struct {
+        unsigned int reserved: 30;
+        unsigned char is_empty: 1;
+        unsigned char is_full:1;
+    };
+    int status;
 } MailStatus;
 
-MailMessage mailbox_read(int channel);
-void mailbox_send(MailMessage msg, int channel);
+UInt mailbox_read(Int channel);
+void mailbox_send(UInt msg, int channel);
 
 
 extern volatile unsigned int mailbox_buffer[36];
-int mailbox_call(unsigned long data[], unsigned char channel);
+int mailbox_call(UInt* data, unsigned char channel);
 int mbox_call(unsigned char ch);
 #endif //RASPI3_OS_MAILBOX_H

@@ -283,7 +283,7 @@ void kdump_size(void *ptr, int size)
     unsigned long d;
     unsigned char c;
 
-    printf("\n--------------------------------- [DUMP HEX 0x%X + %d] ----------------------------------\n", ptr, size);
+    printf("\n--------------------------------- [DUMP HEX 0x%lX + %d] ----------------------------------\n", ptr, size);
     for(a=(unsigned long int)ptr;a<(unsigned long int)ptr+size;a+=16) {
         printf("%16lX:    ");
         for(b=0;b<16;b++) {

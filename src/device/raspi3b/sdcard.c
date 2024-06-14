@@ -99,10 +99,7 @@
 #define ACMD41_ARG_HC       0x51ff8000
 
 unsigned long sd_scr[2], sd_ocr, sd_rca, sd_err, sd_hv;
-
-#define _trace log_info
-#define _trace_printf printf
-
+static Bool sd_initialized;
 /**
  * Wait for data or command ready
  */
@@ -332,8 +329,7 @@ int sd_clk(unsigned int f) {
         s = 0;
     }
 
-     _trace("divisor");
-    _trace_printf("%x, shift: %d\n", d, s);
+    // _trace("divisor %x, shift: %d\n", d, s);
     
 
     if (sd_hv > HOST_SPEC_V2) h = (d & 0x300) >> 2;
@@ -355,6 +351,8 @@ int sd_clk(unsigned int f) {
  * initialize EMMC to read SDHC card
  */
 int sd_init() {
+    if (sd_initialized == true) return SD_OK;
+
     long r, cnt, ccs = 0;
     // GPIO_CD
     r        = *GPFSEL4;
@@ -394,7 +392,7 @@ int sd_init() {
 
     sd_hv = (*EMMC_SLOTISR_VER & HOST_SPEC_NUM) >> HOST_SPEC_NUM_SHIFT;
     
-    _trace("EMMC: GPIO set up\n");
+    // _trace("EMMC: GPIO set up\n");
 
     // Reset the card.
     *EMMC_CONTROL0 = 0;
@@ -406,7 +404,7 @@ int sd_init() {
         return SD_ERROR;
     }
     
-    _trace("Reset OK\n");
+    // _trace("Reset OK\n");
     
     *EMMC_CONTROL1 |= C1_CLK_INTLEN | C1_TOUNIT_MAX;
     wait_msec(10);
@@ -427,13 +425,13 @@ int sd_init() {
         r = sd_cmd(CMD_SEND_OP_COND, ACMD41_ARG_HC);
         _trace("EMMC: CMD_SEND_OP_COND returned ");
         if (r & ACMD41_CMD_COMPLETE)
-            _trace_printf("COMPLETE ");
+            _trace_printf("     COMPLETE ");
         if (r & ACMD41_VOLTAGE)
-            _trace_printf("VOLTAGE ");
+            _trace_printf("     VOLTAGE ");
         if (r & ACMD41_CMD_CCS)
-            _trace_printf("CCS ");
+            _trace_printf("     CCS ");
         
-        _trace_printf("%lx\n", r);
+        _trace_printf("     %lx\n", r);
     
         if (sd_err != SD_TIMEOUT && sd_err != SD_OK) {
             log_error("\nEMMC ACMD41 returned error\n");
@@ -448,8 +446,8 @@ int sd_init() {
 
     sd_rca = sd_cmd(CMD_SEND_REL_ADDR, 0);
     
-    _trace("EMMC: CMD_SEND_REL_ADDR returned ");
-    _trace_printf("%lx\n", sd_rca);
+    // _trace("EMMC: CMD_SEND_REL_ADDR returned ");
+    // _trace_printf("%lx\n", sd_rca);
     
     if (sd_err) return sd_err;
 
@@ -479,15 +477,17 @@ int sd_init() {
         *EMMC_CONTROL0 |= C0_HCTL_DWITDH;
     }
     // add software flag
-    _trace("EMMC: supports ");
+    // _trace("EMMC: supports ");
 
     if (sd_scr[0] & SCR_SUPP_SET_BLKCNT)
-        _trace_printf("SET_BLKCNT ");
+        // _trace_printf("SET_BLKCNT ");
     if (ccs)
-        _trace_printf("CCS ");
-    _trace_printf("\n");
+        // _trace_printf("CCS ");
+    // _trace_printf("\n");
     
     sd_scr[0] &= ~SCR_SUPP_CCS;
     sd_scr[0] |= ccs;
+
+    sd_initialized = true;
     return SD_OK;
 }
