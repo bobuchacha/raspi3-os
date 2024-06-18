@@ -33,13 +33,5 @@ typedef unsigned int       Size;
 typedef void*              Pointer;
 typedef unsigned long long Flags;
 
-enum Status {
-    SUCCESS,
-    ERROR_INVAILD,
-};
-
-// include libs here
-#include "lib/string.h"
-#include "lib/util.h"
 #endif
 

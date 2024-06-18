@@ -21,6 +21,7 @@
     </libraryRoots>
     <excludeRoots>
       <file path="$PROJECT_DIR$/_RPiOS" />
+      <file path="$PROJECT_DIR$/_V3-not done" />
       <file path="$PROJECT_DIR$/_not used code" />
       <file path="$PROJECT_DIR$/_raspberry-pi-os" />
       <file path="$PROJECT_DIR$/_raspi3-tutorial1" />

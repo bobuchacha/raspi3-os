@@ -35,6 +35,8 @@
         "elf.h": "c",
         "lib.h": "c",
         "utils.h": "c",
-        "mailbox.h": "c"
+        "mailbox.h": "c",
+        "hal.h": "c",
+        "sd.h": "c"
     }
 }

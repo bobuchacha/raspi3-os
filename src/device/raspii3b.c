@@ -6,7 +6,7 @@
 #include "log.h"
 #include "utils.h"
 #include "device/sd.h"
-
+#include "../hal/hal.h"
 
 static unsigned char _putp[1024];
 
@@ -30,6 +30,13 @@ void device_init(){
     _trace("Initialize SD Card");
     if (sd_init() != SD_OK) {
         log_error("SD card initialization error!\n");
+    }
+    else{
+        BlockDeviceDriver sdcard_driver = {
+            .block_read = sd_block_read,
+            .block_write = sd_block_write
+        };
+        hal_block_register_device("sdcard", 0, &sdcard_driver);
     }
 
 }   

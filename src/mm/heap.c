@@ -57,8 +57,7 @@ Address kmalloc(int bytes) {
     heap_segment_t * curr, *best = NULL;
     int diff, best_diff = 0x7fffffff; // Max signed int
 
-    _trace("Allocating ");
-    _trace_printf("%ld bytes... \n", bytes);
+    _trace("Allocating %ld bytes...", bytes);
 
     // Add the header to the number of bytes we need and make the size 4 byte aligned
     bytes += sizeof(heap_segment_t);
@@ -95,8 +94,7 @@ Address kmalloc(int bytes) {
         best->segment_size = bytes;
     }
     
-    _trace("Allocated at address: ");
-    _trace_printf("%lx\n", best+1);
+    _trace("Allocated at address: 0%lx\n", best+1);
 
     best->is_allocated = 1;
     return (Address)(best + 1);    // after segment metadata
