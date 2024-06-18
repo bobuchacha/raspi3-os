@@ -42,6 +42,8 @@ struct test2 {
     int z: 24;
 };
 
+extern void mmu_init();
+
 void main(INT r0, INT r1, INT atags)
 {
     char *s="Writing through MMIO mapped in higher half!\r\n";
@@ -62,7 +64,16 @@ void main(INT r0, INT r1, INT atags)
     // set up serial console
     uart_init();
     terminal_init();
-    mem_init_paging((atag_t*)atags);
+mmu_init();
+    while(*s) {
+        /* wait until we can send */
+        do{asm volatile("nop");}while(*KERNEL_UART0_FR&0x20);
+        /* write the character to the buffer */
+        *KERNEL_UART0_DR=*s++;
+    }
+
+while(1);
+mem_init_paging((atag_t*)atags);
     terminal_printf("Welcome\n%s, %d\n\n\n", copyright, a);
 
     // init file system

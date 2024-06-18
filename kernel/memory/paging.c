@@ -68,10 +68,7 @@ void mem_init_paging(atag_t * atags){
         num_pages = mem_size / PAGE_SIZE;    
 
         printf("------------------------------------\n");
-        printf("TOTAL MEMORY SIZE 0x%x, total pages 0x%x, page size 0x%x\n", mem_size, num_pages, PAGE_SIZE);   
-
-        printf("Size of heap struct %d\n", sizeof(heap_segment_t));
-
+        printf("TOTAL MEMORY SIZE 0x%x, total pages 0x%x, page size 0x%x", mem_size, num_pages, PAGE_SIZE);
 
                 // Allocate space for all those pages' metadata.  Start this block just after the kernel image is finished
         page_array_len = sizeof(page_t) * num_pages;
@@ -80,7 +77,7 @@ void mem_init_paging(atag_t * atags){
         free_pages.head = free_pages.tail = (void *)0; 
         free_pages.size = 0;
 
-        printf("Page Array Length: 0x%x starting at 0x%x\n", page_array_len, all_pages_array);
+        kdebug("mem_init_paging: Page Array Length: 0x%x starting at 0x%x", page_array_len, all_pages_array);
 
         // Iterate over all pages and mark them with the appropriate flags
         // Start with kernel pages, and the paging metadata
@@ -118,11 +115,11 @@ void mem_init_paging(atag_t * atags){
         heap_init(page_array_end);
 
         // initialize the virtual memory
-        init_vmm();
+        //init_vmm();
 }
 
 static void heap_init(INT heap_start) {
-        printf("Heap intialized at 0x%d. Total size: %d KB. Size of heap segment is %d\n", heap_start, KERNEL_HEAP_SIZE / 1024, sizeof(heap_segment_t));
+        kdebug("heap_init: Heap intialized at 0x%d. Total size: %d KB. Size of heap segment is %d\n", heap_start, KERNEL_HEAP_SIZE / 1024, sizeof(heap_segment_t));
     heap_segment_list_head = (heap_segment_t *) heap_start;
     bzero(heap_segment_list_head, sizeof(heap_segment_t));
     heap_segment_list_head->segment_size = KERNEL_HEAP_SIZE;

@@ -28,7 +28,7 @@ OUT_FOLDER = out
 SRCS = $(shell find kernel -type f -name '*.c') #$(wildcard *.c)
 OBJS = $(addprefix $(OBJ_FOLDER)/, $(SRCS:.c=.o))
 INC_FLAGS=-Ikernel -Iinclude
-CFLAGS = -Werror -O2 -ffreestanding -nostdinc -nostdlib -nostartfiles -mstrict-align $(INC_FLAGS)
+CFLAGS = -Wall -O2 -ffreestanding -nostdinc -nostdlib -nostartfiles -mstrict-align $(INC_FLAGS)
 
 #TOOLCHAIN = /Applications/ArmGNUToolchain/12.3.rel1/aarch64-none-elf/bin/aarch64-none-elf
 TOOLCHAIN = /Applications/ArmGNUToolchain/13.2.Rel1/aarch64-none-elf/bin/aarch64-none-elf
