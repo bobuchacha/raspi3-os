@@ -18,9 +18,11 @@ void hal_block_init(void) {
 
 int hal_disk_read(int id, int begin, int count, void* buf) {
 	if (id >= HAL_BLOCK_MAX) {
+		log_error("Invalid block device ID %d!", id);
 		return ERROR_INVAILD;
 	}
 	if (!hal_block_map[id].driver) {
+		log_error("Invalid block device driver. Device %d, 0x%lx!", id, hal_block_map[id].driver);
 		return ERROR_INVAILD;
 	}
 	return hal_block_map[id].driver->block_read(hal_block_map[id].private, begin, count, buf);
@@ -30,7 +32,7 @@ int hal_disk_read(int id, int begin, int count, void* buf) {
 static void hal_block_probe_partition(int block_id) {
 	
     _trace("Probing partition on block device id: %d", block_id);
-	if (hal_disk_read(block_id, 1, 1, (void*)sector_buffer) < 0) {
+	if (hal_disk_read(block_id, 1, 1, (void*)sector_buffer) == ERROR_INVAILD) {
 		kpanic("disk read error");
 	}
     printf("First Long of buffer: 0x%lX\n", ((ULong*)(sector_buffer))[0]);
@@ -49,16 +51,32 @@ static void hal_block_probe_partition(int block_id) {
 
     
 void hal_block_register_device(const char* name, void* private, const struct BlockDeviceDriver* driver) {
-	_trace("Adding %s block device", name);
+	_trace("Adding %s block device, driver: 0x%lX", name, driver);
     for (int i = 0; i < HAL_BLOCK_MAX; i++) {
 		if (!hal_block_map[i].driver) {
-			_trace("[hal] Block device %s added\n", name);
+			_trace("[hal] Block device %s added into slot %d\n", name, i);
 			hal_block_map[i].private = private;
-			hal_block_probe_partition(i);
 			hal_block_map[i].driver = driver;
+			hal_block_probe_partition(i);
 			// hal_block_cache_init(i);
 			return;
 		}
 	}
 	kpanic("too many block devices");
+}
+
+
+struct HalPartitionMap* hal_partition_map_insert(enum HalPartitionFilesystemType fs,
+                                                 unsigned int dev, unsigned int begin,
+                                                 unsigned int size) {
+    for (int i = 0; i < HAL_PARTITION_MAX; i++) {
+        if (hal_partition_map[i].fs_type == HAL_PARTITION_TYPE_NONE) {
+            hal_partition_map[i].fs_type = fs;
+            hal_partition_map[i].dev = dev;
+            hal_partition_map[i].begin = begin;
+            hal_partition_map[i].size = size;
+            return &hal_partition_map[i];
+        }
+    }
+    return 0;
 }

@@ -10,6 +10,7 @@
 #include "../include/timer.h"
 #include "../include/memory.h"
 #include "hal/hal.h"
+#include "filesystem/filesystem.h"
 
 void kernel_load_user_elf(){
     _trace("Starting process\n");
@@ -24,7 +25,7 @@ void kernel_load_user_elf(){
 void do_test();
 
 void kernel_main(){
-    hal_init();    
+    hal_init();        
     
     // need to initialize device before output anything
     device_init();
@@ -32,6 +33,9 @@ void kernel_main(){
     // init memory management
     log_info("Enabling memory management...\n");
     init_memory_management();
+
+    // init file system
+    filesystem_init();
 
     // test
     do_test();

@@ -37,6 +37,7 @@
         "utils.h": "c",
         "mailbox.h": "c",
         "hal.h": "c",
-        "sd.h": "c"
+        "sd.h": "c",
+        "vfs.h": "c"
     }
 }

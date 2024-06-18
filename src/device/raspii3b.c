@@ -36,6 +36,7 @@ void device_init(){
             .block_read = sd_block_read,
             .block_write = sd_block_write
         };
+        _trace("Address of block sd device driver 0x%lx, 0x%lx, 0x%lx", &sdcard_driver, sdcard_driver.block_read, sdcard_driver.block_write);
         hal_block_register_device("sdcard", 0, &sdcard_driver);
     }
 
