@@ -41,3 +41,16 @@ void vfs_init(void) {
 		kpanic("root filesystem not found");
 	}
 }
+
+void vfs_mount_table_dump(){
+	kprint("\n\n====================== MOUNT TABLE DUMP ========================\n\n");
+	for (int i = 0;i < VFS_MOUNT_TABLE_MAX; i++){
+		struct VfsMountTableEntry p = vfs_mount_table[i];
+		// if (!p.fs_driver) continue;
+		kprint("Mount Point: %d\n", i);
+		kprint(" - driver: 0x%lX\n", p.fs_driver);
+		kprint(" - private: 0x%lX\n", p.private);
+
+	}
+	kprint("\n================================================================\n\n");
+}

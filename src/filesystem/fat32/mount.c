@@ -19,7 +19,6 @@ int fat32_mount(int partition_id, void** private) {
 		kpanic("Mounting a non-FAT32 filesystem. %s", bootsect->fstype);
 	}
 
-
 	char label[12];
 	strncpy(label, bootsect->volume_label, 12);
 	label[11] = '\0';
@@ -33,9 +32,7 @@ int fat32_mount(int partition_id, void** private) {
 	priv->gid = 0;
 	*private = priv;	// set private information of the partition
 
-	_trace("Mounted successfully");
-
-	
+	_trace("Mounted successfully. Param: 0x%lX", priv);
 	return 0;
 }
 
@@ -53,7 +50,6 @@ void fat32_set_default_attr(void* private, unsigned int uid, unsigned int gid, u
 	priv->gid = gid;
 	priv->mode = mode;
 }
-
 
 
 

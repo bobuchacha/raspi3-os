@@ -35,8 +35,18 @@ int hal_disk_read(int id, int begin, int count, void* buf) {
 
 void hal_partition_dump(){
 	kprint("\n\n====================== DUMP PARITION MAP ========================\n\n");
-	for (int i = 0;)
-	kprint("================================================================\n\n");
+	for (int i = 0;i < HAL_PARTITION_MAX; i++){
+		HalPartitionMap p = hal_partition_map[i];
+		if (p.fs_type == HAL_PARTITION_TYPE_NONE) continue;
+		kprint("Partition: %d\n", i);
+		kprint(" - begin: 0x%lX\n", p.begin);
+		kprint(" - size: 0x%lX\n", p.size);
+		kprint(" - file system: %d\n", p.fs_type);
+		kprint(" - device ID: %d\n", p.dev);
+		kprint(" - params: 0x%lX\n", hal_block_map[p.dev].private);
+
+	}
+	kprint("\n================================================================\n\n");
 }
 
 int hal_partition_read(int id, int begin, int count, void* buf) {
