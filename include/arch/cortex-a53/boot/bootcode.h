@@ -1,0 +1,1 @@
+#define BOOTFUNC __attribute__((section(".text.boot.c")))
