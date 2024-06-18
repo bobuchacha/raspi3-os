@@ -9,7 +9,11 @@
 #include "../hal/hal.h"
 
 static unsigned char _putp[1024];
-
+const BlockDeviceDriver sdcard_driver = {
+            .block_read = &sd_block_read,
+            .block_write = &sd_block_write
+        };
+        
 void device_init(){
     // initialize printf to use our uart1 for now
     uart0_init();
@@ -32,10 +36,7 @@ void device_init(){
         log_error("SD card initialization error!\n");
     }
     else{
-        BlockDeviceDriver sdcard_driver = {
-            .block_read = sd_block_read,
-            .block_write = sd_block_write
-        };
+        
         _trace("Address of block sd device driver 0x%lx, 0x%lx, 0x%lx", &sdcard_driver, sdcard_driver.block_read, sdcard_driver.block_write);
         hal_block_register_device("sdcard", 0, &sdcard_driver);
     }

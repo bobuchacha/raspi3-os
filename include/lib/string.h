@@ -31,6 +31,7 @@ int strlen(const char *s);
  * 	respectively, to be less than, to match, or be greater than @a s2.
  */
 int strcmp(const char *s1, const char *s2);
+int strncmp(const char *s1, const char *s2, int length);
 
 /**
  * Copies the string pointed to by @a src, including the terminating null
@@ -40,6 +41,7 @@ int strcmp(const char *s1, const char *s2);
  * @return A pointer to the destination string @a dest.
  */
 char *strcpy(char *dest, const char *src);
+char *strncpy(char *dest, const char *src, int length);
 
 /**
  * Appends the @a src string to the @a dest string, overwriting the

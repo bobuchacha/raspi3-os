@@ -53,7 +53,9 @@ void mbr_probe_partition(int block_id) {
 		kerror("Implement non partition sdcard here");
 
 		//TODO: implements here
-		hal_partition_map_insert(HAL_PARTITION_TYPE_FAT32, block_id, 0, 0xFFFFFFFF);
 		
+		if (!hal_partition_map_insert(HAL_PARTITION_TYPE_FAT32, block_id, 0, 0xFFFFFFFF)) {
+			kpanic("Can not add primary parition");
+		}
 	}
 }

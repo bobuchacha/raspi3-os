@@ -35,8 +35,18 @@ typedef unsigned long long Flags;
 
 enum Status {
     SUCCESS,
-    ERROR_INVAILD,
+    ERROR_INVAILD = -1,
+    ERROR_NOT_EXIST = -2,
+    ERROR_EXIST = -3,
+    ERROR_NOT_FILE = -4,
+    ERROR_NOT_DIRECTORY = -5,
+    ERROR_READ_FAIL = -6,
+    ERROR_OUT_OF_SPACE = -7,
+    ERROR_WRITE_FAIL = -8,
+    ERROR_NO_PERM = -9,
 };
+
+
 
 // include libs here
 #include "lib/string.h"

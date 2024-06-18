@@ -2,6 +2,7 @@
 #include "lib/string.h"
 #include "filesystem.h"
 #include "vfs/vfs.h"
+#include "fat32/fat32.h"
 
 const struct FilesystemDriver* filesystem_fat32_driver;
 

@@ -25,9 +25,64 @@ int hal_disk_read(int id, int begin, int count, void* buf) {
 		log_error("Invalid block device driver. Device %d, 0x%lx!", id, hal_block_map[id].driver);
 		return ERROR_INVAILD;
 	}
+	if (!hal_block_map[id].driver || !hal_block_map[id].driver->block_read){
+		kpanic("Block Driver of device %d at address 0x%lX is invalid.", hal_block_map[id].driver);
+	}
+	
+	_trace("Reading disk %d. Driver address 0x%lX. Read Address 0x%lX", id, hal_block_map[id].driver, hal_block_map[id].driver->block_read);
 	return hal_block_map[id].driver->block_read(hal_block_map[id].private, begin, count, buf);
 }
 
+void hal_partition_dump(){
+	kprint("\n\n====================== DUMP PARITION MAP ========================\n\n");
+	for (int i = 0;)
+	kprint("================================================================\n\n");
+}
+
+int hal_partition_read(int id, int begin, int count, void* buf) {
+	if (id >= HAL_PARTITION_MAX) {
+		return -1;
+	}
+	if (hal_partition_map[id].fs_type == HAL_PARTITION_TYPE_NONE) {
+		return -1;
+	}
+	return hal_block_read(hal_partition_map[id].dev, hal_partition_map[id].begin + begin, count,
+						  buf);
+}
+
+
+int hal_block_read(int id, int begin, int count, void* buf) {
+	_trace("Reading %d, from %d, count: %d to 0x%lX\n", id, begin, count, buf);
+	return hal_disk_read(id, begin, count, buf);
+	if (count > 1) {
+		return hal_disk_read(id, begin, count, buf);
+	}
+
+	// struct BlockDevice* blk = &hal_block_map[id];
+	// // acquire(&blk->cache_lock);
+	// for (int i = 0; i < HAL_BLOCK_CACHE_MAX; i++) {
+	// 	if (blk->cache[i].buf && blk->cache[i].lba == begin) {
+	// 		memmove(buf, blk->cache[i].buf, 512);
+	// 		// release(&blk->cache_lock);
+	// 		return 0;
+	// 	}
+	// }
+
+	// if (!blk->cache[blk->cache_next].buf) {
+	// 	blk->cache[blk->cache_next].buf = kmalloc(512);
+	// }
+	// blk->cache[blk->cache_next].lba = begin;
+	// // release(&blk->cache_lock);
+	// hal_disk_read(id, begin, count, blk->cache[blk->cache_next].buf);
+	// // acquire(&blk->cache_lock);
+	// memmove(buf, blk->cache[blk->cache_next].buf, 512);
+	// blk->cache_next++;
+	// if (blk->cache_next >= HAL_BLOCK_CACHE_MAX) {
+	// 	blk->cache_next = 0;
+	// }
+	// // release(&blk->cache_lock);
+	// return 0;
+}
 
 static void hal_block_probe_partition(int block_id) {
 	
