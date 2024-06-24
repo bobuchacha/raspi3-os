@@ -47,6 +47,12 @@
         "string_view": "cpp",
         "fat32.h": "c",
         "fat32-struct.h": "c",
-        "util.h": "c"
+        "util.h": "c",
+        "param.h": "c",
+        "__hash_table": "c",
+        "cstring": "c",
+        "__string": "c",
+        "atomic": "c",
+        "memory": "c"
     }
 }

@@ -61,6 +61,7 @@ int vfs_fd_seek(struct FileDesc* fd, unsigned int off, enum FileSeekMode mode);
 // dir.c
 int vfs_dir_open(struct FileDesc* fd, const char* dirname);
 int vfs_dir_read(struct FileDesc* fd, char* buffer);
+int vfs_dir_read_ex(struct FileDesc* fd, struct DirectoryEntry * entry);
 int vfs_dir_close(struct FileDesc* fd);
 
 // path.c

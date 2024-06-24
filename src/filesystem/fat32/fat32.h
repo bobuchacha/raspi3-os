@@ -2,6 +2,7 @@
 #define _FAT32_FAT32_H
 
 #include "../vfs/vfs.h"
+#include "fat32-struct.h"
 
 #define SECTORSIZE 512
 
@@ -33,6 +34,8 @@ int fat32_mkdir(void* private, struct VfsPath path);
 int fat32_file_remove(void* private, struct VfsPath path);
 int fat32_update_size(void* private, struct VfsPath path, unsigned int size);
 int fat32_file_create(void* private, struct VfsPath path);
+int fat32_dir_read_ex(void* private, struct DirectoryEntry* vfs_dir_entry, unsigned int cluster, unsigned int entry);
+UWord *fat32_get_long_name(struct FAT32LFNEntry lfn_entries[], int count, UWord *target);
 
 // fat.c
 unsigned int fat32_fat_read(struct FAT32Private* priv, unsigned int current);

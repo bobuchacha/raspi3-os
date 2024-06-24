@@ -24,6 +24,7 @@ void mbr_probe_partition(int block_id) {
 	if (hal_disk_read(block_id, 0, 1, bootsect) < 0) {
 		kpanic("disk read error");
 	}
+
 	for (int j = 0; j < 4; j++) {
 		struct MBREntry* entry = (void*)bootsect + 0x1be + j * 0x10;
 		enum HalPartitionFilesystemType fs;

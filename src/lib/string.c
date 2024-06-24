@@ -43,7 +43,7 @@ int strcmp(const char *s1, const char *s2) {
     return *(const unsigned char *) s1 - *(const unsigned char *) s2;
 }
 int strncmp(const char *s1, const char *s2, int len) {
-    while ((--len > 0) && (*(s1++) == *(s2++))) {
+    while ((*s1 != '\0') && (--len > 0) && (*(s1++) == *(s2++))) {
         // s1++;
         // s2++;
     }
@@ -121,6 +121,55 @@ void strrev(char *s) {
         s[i] = s[j];
         s[j] = tmp;
     }
+}
+
+void* memmove(void* dst, const void* src, unsigned int n) {
+	const char* s;
+	char* d;
+
+	s = src;
+	d = dst;
+	if (s < d && s + n > d) {
+		s += n;
+		d += n;
+		while (n-- > 0)
+			*--d = *--s;
+	} else
+		while (n-- > 0)
+			*d++ = *s++;
+
+	return dst;
+}
+
+// Like strncpy but guaranteed to NUL-terminate.
+char* safestrcpy(char* s, const char* t, int n) {
+	char* os;
+
+	os = s;
+	if (n <= 0)
+		return os;
+	while (--n > 0 && (*s++ = *t++) != 0)
+		;
+	*s = 0;
+	return os;
+}
+
+volatile void* memmove_volatile(volatile void* dst, const volatile void* src, unsigned int n) {
+	const volatile char* s;
+	volatile char* d;
+
+	s = src;
+	d = dst;
+	if (s < d && s + n > d) {
+		s += n;
+		d += n;
+		while (n-- > 0)
+			*--d = *--s;
+	} else
+		while (n-- > 0)
+			*d++ = *s++;
+
+	return dst;
 }
 
 void bzero(void *b, int length) {

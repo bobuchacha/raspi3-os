@@ -1,7 +1,7 @@
-#ARMGNU ?= /Applications/ArmGNUToolchain/12.3.Rel1/aarch64-none-elf/bin/aarch64-none-elf
+ARMGNU ?= /Applications/ArmGNUToolchain/12.3.Rel1/aarch64-none-elf/bin/aarch64-none-elf
 #ARMGNU ?= /Applications/ArmGNUToolchain/13.2.Rel1/aarch64-none-elf/bin/aarch64-none-elf
 #ARMGNU ?= E:\Nextcloud\raspo3b-os/toolchain/Windows/arm-gnu-toolchain-13.2.Rel1-mingw-w64-i686-aarch64-none-elf/bin/aarch64-none-elf
-ARMGNU ?= aarch64-none-elf
+#ARMGNU ?= aarch64-none-elf
 QEMU ?= qemu-system-aarch64
 # QEMU = d:\qemu\qemu-system-aarch64.exe
 
@@ -74,12 +74,11 @@ user:  $(USR_SRC_DIR)/link.ld $(USER_OBJ_FILES)
 f32.disk:
 	-rm f32.disk
 	dd if=/dev/zero of=f32.disk bs=1M count=64
-	mkfs.fat -F32 f32.disk -s 1
-
-mount_disk: f32.disk
-	mkdir -p fat32
 	sudo hdiutil attach -imagekey diskimage-class=CRawDiskImage -nomount f32.disk
-
+	sudo newfs_msdos -F 32 -O ROS -S 512 -c 1 -n 2 -v ROSROOT /dev/disk2
+	sudo hdiutil detach /dev/disk2
+f32.empty:
+	rm f32.disk&& cp f32.empty.disk f32.disk
 populate_disk: mount_disk
 	sudo cp *.c *.h fat32
 	sudo cp -R deps fat32/
@@ -101,7 +100,7 @@ diasm: all
 	@$(ARMGNU)-objdump --all-headers $(BUILD_DIR)/kernel8.elf
 run: all
 	@echo "Running: --------------------------------------------------------------------------------- "
-	@$(QEMU) -M raspi3b -kernel kernel8.img  -serial stdio -s -display none -drive file=fat32.img,if=sd,format=raw
+	@$(QEMU) -M raspi3b -kernel kernel8.img  -serial stdio -s -display none -drive file=f32.disk,if=sd,format=raw
 debug: all
 	@echo "QEMU starting. Remember to start gdb------------------------------------------------------ "
 	# @$(QEMU) -M raspi3b -kernel kernel8.img -serial null -serial stdio -display none -s -S -d trace:bcm2835_systmr*

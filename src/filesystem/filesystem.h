@@ -1,10 +1,65 @@
 #ifndef _FILESYSTEM_H
 #define _FILESYSTEM_H
 
+#include <ros.h>
+
 struct VfsPath {
 	int parts;
 	char* pathbuf;
 };
+
+struct DirectoryEntry {
+	unsigned short long_name[255];
+	UByte attr;
+	UByte create_time_millis;
+	
+	union {
+		struct {
+			UWord second : 5;
+			UWord minute : 6;
+			UWord hour : 5;
+		} create_time;
+		UWord create_time_u16;
+	};
+
+	union {
+		struct {
+			UWord day : 5;
+			UWord month : 4;
+			UWord year : 7;
+		} create_date;
+		UWord create_date_u16;
+	};
+
+	union{
+		struct {
+			UWord day : 5;
+			UWord month : 4;
+			UWord year : 7;
+		} access_date;
+		UWord access_date_u16;
+	};
+	
+	union{
+		struct {
+			UWord second : 5;
+			UWord minute : 6;
+			UWord hour : 5;
+		} write_time;
+		UWord write_time_u16;
+	};
+
+	union{
+		struct {
+			UWord day : 5;
+			UWord month : 4;
+			UWord year : 7;
+		} write_date;
+		UWord write_date_u16;
+	};
+	UInt size;
+};
+
 
 struct FilesystemDriver {
 	const char* name;
@@ -18,6 +73,7 @@ struct FilesystemDriver {
 	// directory
 	int (*dir_first_file)(void* private, unsigned int cluster);
 	int (*dir_read)(void* private, char* buf, unsigned int cluster, unsigned int entry);
+	int (*dir_read_ex)(void* private, struct DirectoryEntry* vfs_dir_entry, unsigned int cluster, unsigned int entry);
 	
     // file
 	int (*open)(void* private, struct VfsPath path);

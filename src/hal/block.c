@@ -29,7 +29,7 @@ int hal_disk_read(int id, int begin, int count, void* buf) {
 		kpanic("Block Driver of device %d at address 0x%lX is invalid.", hal_block_map[id].driver);
 	}
 	
-	_trace("Reading disk %d. Driver address 0x%lX. Read Address 0x%lX", id, hal_block_map[id].driver, hal_block_map[id].driver->block_read);
+	// _trace("Reading disk %d. Driver address 0x%lX. Read Address 0x%lX", id, hal_block_map[id].driver, hal_block_map[id].driver->block_read);
 	return hal_block_map[id].driver->block_read(hal_block_map[id].private, begin, count, buf);
 }
 
@@ -62,7 +62,7 @@ int hal_partition_read(int id, int begin, int count, void* buf) {
 
 
 int hal_block_read(int id, int begin, int count, void* buf) {
-	_trace("Reading %d, from %d, count: %d to 0x%lX\n", id, begin, count, buf);
+	// _trace("Reading %d, from %d, count: %d to 0x%lX\n", id, begin, count, buf);
 	return hal_disk_read(id, begin, count, buf);
 	if (count > 1) {
 		return hal_disk_read(id, begin, count, buf);
@@ -96,12 +96,12 @@ int hal_block_read(int id, int begin, int count, void* buf) {
 
 static void hal_block_probe_partition(int block_id) {
 	
-    _trace("Probing partition on block device id: %d", block_id);
+//     _trace("Probing partition on block device id: %d", block_id);
 	if (hal_disk_read(block_id, 1, 1, (void*)sector_buffer) == ERROR_INVAILD) {
 		kpanic("disk read error");
 	}
-    printf("First Long of buffer: 0x%lX\n", ((ULong*)(sector_buffer))[0]);
-    kdump(sector_buffer);
+//     printf("First Long of buffer: 0x%lX\n", ((ULong*)(sector_buffer))[0]);
+//     kdump(sector_buffer);
 	if (((ULong*)(sector_buffer))[0] == 0x5452415020494645) { // EFI PART
 		// GPT
 		log_info("[hal] GPT partition table on block %d\n", block_id);
@@ -116,10 +116,10 @@ static void hal_block_probe_partition(int block_id) {
 
     
 void hal_block_register_device(const char* name, void* private, const struct BlockDeviceDriver* driver) {
-	_trace("Adding %s block device, driver: 0x%lX", name, driver);
+	// _trace("Adding %s block device, driver: 0x%lX", name, driver);
     for (int i = 0; i < HAL_BLOCK_MAX; i++) {
 		if (!hal_block_map[i].driver) {
-			_trace("[hal] Block device %s added into slot %d\n", name, i);
+			// _trace("[hal] Block device %s added into slot %d\n", name, i);
 			hal_block_map[i].private = private;
 			hal_block_map[i].driver = driver;
 			hal_block_probe_partition(i);
@@ -144,4 +144,53 @@ struct HalPartitionMap* hal_partition_map_insert(enum HalPartitionFilesystemType
         }
     }
     return 0;
+}
+
+int hal_partition_write(int id, int begin, int count, const void* buf) {
+	if (id >= HAL_PARTITION_MAX) {
+		return -1;
+	}
+	if (hal_partition_map[id].fs_type == HAL_PARTITION_TYPE_NONE) {
+		return -1;
+	}
+	return hal_block_write(hal_partition_map[id].dev, hal_partition_map[id].begin + begin, count,
+						   buf);
+}
+
+int hal_disk_write(int id, int begin, int count, const void* buf) {
+	if (id >= HAL_BLOCK_MAX) {
+		return -1;
+	}
+	if (!hal_block_map[id].driver) {
+		return ERROR_INVAILD;
+	}
+
+	return hal_block_map[id].driver->block_write(hal_block_map[id].private, begin, count, buf);
+}
+
+int hal_block_write(int id, int begin, int count, const void* buf) {
+
+	return hal_disk_write(id, begin, count, buf);
+
+	
+	// if (count > 1) {
+	// 	for (int i = 0; i < HAL_BLOCK_CACHE_MAX; i++) {
+	// 		if (hal_block_map[id].cache[i].buf) {
+	// 			kfree(hal_block_map[id].cache[i].buf);
+	// 		}
+	// 	}
+	// 	hal_disk_write(id, begin, count, buf);
+	// }
+
+	// struct BlockDevice* blk = &hal_block_map[id];
+	// acquire(&blk->cache_lock);
+	// for (int i = 0; i < HAL_BLOCK_CACHE_MAX; i++) {
+	// 	if (blk->cache[i].buf && blk->cache[i].lba == begin) {
+	// 		memmove(blk->cache[i].buf, buf, 512);
+	// 		release(&blk->cache_lock);
+	// 		return hal_disk_write(id, begin, count, blk->cache[i].buf);
+	// 	}
+	// }
+	// release(&blk->cache_lock);
+	return hal_disk_write(id, begin, count, buf);
 }

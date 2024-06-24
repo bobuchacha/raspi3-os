@@ -20,4 +20,14 @@ void do_test(){
     Address dst = kmalloc(100);
     memcpy(dst, (Address)src, 16);
     printf("This is the final: %s\n", dst);
+
+    log_test("Testing Unicode");
+    UWord utf16[512];
+    UByte *utf8 = "Cao Đức Thắng thiệt là tuyệt vời";
+    utf8_to_utf16(utf8, 512, utf16, 512);
+    kdump_size(utf16, 96);
+    // convert back to utf8
+    UByte utf8_2[512];
+    utf16_to_utf8(utf16, 512, utf8_2, 512);
+    kprint("        => Result after sound conversion: %s\n", utf8_2);
 }
