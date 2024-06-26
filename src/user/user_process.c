@@ -10,6 +10,7 @@ long main();
 */
 ENTRYPOINT _entrypoint(){
    call_sys_exit(main());
+   while(1);
 }
 
 static int counter;
