@@ -8,7 +8,8 @@ long main();
 /**
  * this has to be first of this file
 */
-ENTRYPOINT _entrypoint(){
+ENTRYPOINT
+_entrypoint(){
    call_sys_exit(main());
    while(1);
 }
@@ -16,8 +17,8 @@ ENTRYPOINT _entrypoint(){
 static int counter;
 
 long main(){       
-   
-		int *ptr = (int*)0x6100;
+
+        int *ptr = (int*)0x6100;
       *ptr = 0xDEADACBE;
       call_sys_write("Here is my number: ");
       call_sys_malloc(*ptr);
@@ -30,7 +31,8 @@ long main(){
       syscall(SYS_WRITE_NUMBER, buff);
 
    return 0xDEAD;
-	
+	return 0xDEAD;
+while(1);
 }
 
 

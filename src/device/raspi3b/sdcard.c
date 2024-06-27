@@ -491,3 +491,10 @@ int sd_init() {
     sd_initialized = true;
     return SD_OK;
 }
+
+int sd_block_read(void* private, unsigned int begin, int count, void* buf){
+    return sd_readblock(begin, (unsigned char*)buf, count);
+}
+int sd_block_write(void* private, unsigned int begin, int count, const void* buf){
+    return sd_writeblock((unsigned char*)buf, begin, count);
+}

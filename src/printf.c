@@ -19,7 +19,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 */
 
-#include "printf.h"
+#include "../include/printf.h"
 
 typedef void (*putcf) (void*,char);
 static putcf stdout_putf;
@@ -127,6 +127,7 @@ static void putchw(void* putp,putcf putf,int n, char z, char* bf)
     while ((ch= *bf++))
         putf(putp,ch);
     }
+
 
 void tfp_format(void* putp,putcf putf,char *fmt, va_list va)
     {

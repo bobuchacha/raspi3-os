@@ -1,10 +1,10 @@
-#include "ros.h"
-#include "device.h"
+#include "../include/ros.h"
+#include "../include/device.h"
 #include "memory.h"
-#include "printf.h"
-#include "log.h"
-#include "task.h"
-#include "utils.h"
+#include "../include/printf.h"
+#include "../include/log.h"
+#include "../include/task.h"
+#include "../include/utils.h"
 
 // entry.S
 extern unsigned long ret_from_fork();
@@ -95,7 +95,7 @@ void user_process_loader(Address program_addr, ulong program_size){
         program_stack_pages = VA_USER_STACK / PAGE_SIZE;
     int i, code_offset, copy_length, j;
 
-    task->mm.kernel_pages[0] = task;
+    task->mm.kernel_pages[0] = (Address)task;
     task->flags = 0;
     task->mm.pgd = 0;           // get away with kernel PGD
 
@@ -105,7 +105,7 @@ void user_process_loader(Address program_addr, ulong program_size){
     if (!s) return process_unload(task);
 
     process_map_page(task, s, (Address)(VA_USER_STACK - PAGE_SIZE), PE_USER_DATA);
-    task->mm.kernel_pages[++task->mm.kernel_pages_count] = (Pointer)s;
+    task->mm.kernel_pages[++task->mm.kernel_pages_count] = s;
 
     // prepare our task registers that ret_to_user will use. These info will be loaded by kernel_exit 0
     struct pt_regs *regs = task_pt_regs(task);
@@ -121,16 +121,18 @@ void user_process_loader(Address program_addr, ulong program_size){
         code_offset = j * PAGE_SIZE;
         copy_length = (program_size - (j * PAGE_SIZE)) > PAGE_SIZE ? PAGE_SIZE : (program_size % PAGE_SIZE);
 
-        // _trace("Allocating 1 page for the new process code...\n");
-        process_map_page(task, _segment, i * PAGE_SIZE, PE_USER_CODE);          
+         _trace("Allocating 1 page for the new process code...");
+        process_map_page(task, _segment, i * PAGE_SIZE, PE_USER_CODE);
+
+        _trace("Copying %d bytes from 0x%lX to  0x%lX for user code...", copy_length, program_addr + code_offset, _segment + VA_START);
         memcpy(_segment + VA_START, program_addr + code_offset, copy_length);        
     }
 
     // set pgd
     set_pgd(task->mm.pgd);
     preempt_enable();
-    // _trace("User process loaded. process id: %d. Switching to user mode...", current_task->id);
-    // while(1);
+     _trace("User process loaded. process id: %d. Switching to user mode...", current_task->id);
+//     while(1);
 
 }
 

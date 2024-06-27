@@ -1,7 +1,7 @@
 #ifndef	_BOOT_H
 #define	_BOOT_H
 
-#include <ros.h>
+#include "ros.h"
 
 extern void delay ( unsigned long);             // delays certain clock cycle
 
@@ -31,7 +31,7 @@ extern void memzero(Address ptr, int count);
  */
 extern void memcpy(Address dest, Address src, int count);
 
-extern void set_pgd(Pointer);
-extern Pointer get_pgd();
+extern void set_pgd(Address);
+extern Address get_pgd();
 
 #endif  /*_BOOT_H */

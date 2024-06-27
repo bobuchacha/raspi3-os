@@ -12,13 +12,12 @@
 #define EXPAND( x ) x
 
 #define log(value, level) \
-	kprint("(" level ") %s (" __FILE__ ":%d) | ", __func__, __LINE__); \
+	kprint("\n(" level ") %s (" __FILE__ ":%d) | ", __func__, __LINE__); \
     kprint(value);
 
 #define _log(level, ...) \
-	kprint("(" level ") %s (" __FILE__ ":%d) | ", __func__, __LINE__); \
+	kprint("\n(" level ") %s (" __FILE__ ":%d) | ", __func__, __LINE__); \
     kprint(__VA_ARGS__);
-
 
 #define log_fail(...)       EXPAND(_log(LOG_FAIL, __VA_ARGS__))
 #define log_test(...)       EXPAND(_log(LOG_TEST, __VA_ARGS__))
@@ -27,7 +26,7 @@
 #define log_error(...)      EXPAND(_log(LOG_ERROR, __VA_ARGS__))
 
 #define _trace(...)   \
-	kprint("[L] %s (" __FILE__ ":%d) >> ", __func__, __LINE__); \
+	kprint("\n[L] %s (" __FILE__ ":%d) >> ", __func__, __LINE__); \
     kprint(__VA_ARGS__); \
     kprint("\n");
 #define _trace_printf   printf

@@ -68,10 +68,10 @@ void process_map_page(Task *task, Address pa, Address va, Flags flags) {
     // create PGD if task doesnt have it yet
     if (!task->mm.pgd) {
 		// _trace("Creating new page for PGD...\n");
-		task->mm.pgd = (Pointer)mem_alloc_page();
+		task->mm.pgd = mem_alloc_page();
 		task->mm.kernel_pages[++task->mm.kernel_pages_count] = task->mm.pgd;
 	}
-	pgd = (Address)task->mm.pgd;
+	pgd = task->mm.pgd;
     // kdebug("This PGD is at 0x%lX", pgd);
     // check pud
 	Bool is_table_new;
@@ -79,28 +79,28 @@ void process_map_page(Task *task, Address pa, Address va, Flags flags) {
 	Address pud = _map_table((TableEntry*)(pgd + VA_START), MM_PGD_SHIFT, va, &is_table_new);
 	if (is_table_new) {
 		// _trace("Created new page for PUD...\n");
-		task->mm.kernel_pages[++task->mm.kernel_pages_count] = (Pointer)pud;
+		task->mm.kernel_pages[++task->mm.kernel_pages_count] = pud;
 	}
 
     // check pmd
 	Address pmd = _map_table((TableEntry *)(pud + VA_START) , MM_PUD_SHIFT, va, &is_table_new);
 	if (is_table_new) {
 		// _trace("Created new page for PMD...\n");
-		task->mm.kernel_pages[++task->mm.kernel_pages_count] = (Pointer)pmd;
+		task->mm.kernel_pages[++task->mm.kernel_pages_count] = pmd;
 	}
 
     // check for correspondent pte
 	Address pte = _map_table((TableEntry *)(pmd + VA_START), MM_PMD_SHIFT, va, &is_table_new);
 	if (is_table_new) {
 		// _trace("Created new page for PTE...\n");
-		task->mm.kernel_pages[++task->mm.kernel_pages_count] = (Pointer)pte;
+		task->mm.kernel_pages[++task->mm.kernel_pages_count] = pte;
 	}
 
     // now we got all tables we need for specific va, let's map the 4K entry
 	_map_table_entry((TableEntry *)(pte + VA_START), va, pa, flags);
 
 	UserPage p = {pa, va};
-	// _trace("Mapped 0x%lX to 0x%lX", pa, va);
+	 _trace("Mapped 0x%lX to 0x%lX", pa, va);
 	task->mm.user_pages[task->mm.user_pages_count++] = p;
 }
 

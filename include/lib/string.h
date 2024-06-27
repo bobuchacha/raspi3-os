@@ -31,6 +31,7 @@ int strlen(const char *s);
  * 	respectively, to be less than, to match, or be greater than @a s2.
  */
 int strcmp(const char *s1, const char *s2);
+int strncmp(const char *s1, const char *s2, int length);
 
 /**
  * Copies the string pointed to by @a src, including the terminating null
@@ -40,6 +41,7 @@ int strcmp(const char *s1, const char *s2);
  * @return A pointer to the destination string @a dest.
  */
 char *strcpy(char *dest, const char *src);
+char *strncpy(char *dest, const char *src, int length);
 
 /**
  * Appends the @a src string to the @a dest string, overwriting the
@@ -76,5 +78,13 @@ char * itos(unsigned int myint, char buffer[], int bufflen);
 
 char * strtok(char *s, char *delim);
 char *strncpy(char *dest, const char *src, int length);
-
+volatile void* memmove_volatile(volatile void* dst, const volatile void* src, unsigned int n) ;
+void* memmove(void* dst, const void* src, unsigned int n);
+char* safestrcpy(char* s, const char* t, int n);
+//-------------------------------------- utf8.c -----------------------------------
+long int utf16_to_utf8(const UWord *u16_str, int u16_str_len, UByte *u8_str, int u8_str_size); // convert utf16 to utf8
+int str_from_utf16(UWord *u16_str, int length, UByte **target);	// convert to utf8 string from utf16 with pre allocated memory
+void print_utf16(UWord *utf16, int length);
+void bytes_to_utf16(unsigned char *bytes, int length, UWord* utf16);
+void utf8_to_utf16(UByte* const utf8_str, int utf8_str_size, UWord* utf16_str_output, int utf16_str_output_size);
 #endif

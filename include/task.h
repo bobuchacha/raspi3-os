@@ -5,7 +5,7 @@
 
 #ifndef __ASSEMBLER__
 
-#include <ros.h>
+#include "ros.h"
 
 typedef enum TASK_STATES {
     TASK_RUNNING = 1,
@@ -47,11 +47,11 @@ typedef struct user_page {
 } UserPage;
 
 typedef struct mm_struct {
-    Pointer       pgd;
+    Address       pgd;
     int           user_pages_count;
     UserPage      user_pages[MAX_PROCESS_PAGES];
     int           kernel_pages_count;
-    Pointer       kernel_pages[MAX_PROCESS_PAGES];
+    Address       kernel_pages[MAX_PROCESS_PAGES];
 } TaskMemory;
 
 /**

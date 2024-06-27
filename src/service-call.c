@@ -1,10 +1,10 @@
-#include "arch/cortex-a53/boot/uart1.h"
-#include "printf.h"
-#include "device.h"
-#include "irq.h"            // some code in device irq or arch irq
-#include "log.h"
-#include "task.h"
-#include "timer.h"
+#include "../include/arch/cortex-a53/boot/uart1.h"
+#include "../include/printf.h"
+#include "../include/device.h"
+#include "../include/irq.h"            // some code in device irq or arch irq
+#include "../include/log.h"
+#include "../include/task.h"
+#include "../include/timer.h"
 
 void sys_write(char * buf){
 	printf("Process %d: %s", current_task->id, buf);

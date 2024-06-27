@@ -1,5 +1,5 @@
-#include "printf.h"
-#include "task.h"
+#include "../include/printf.h"
+#include "../include/task.h"
 extern void dump_registers();
 /**
  * this is our own timer handler
