@@ -55,7 +55,8 @@ struct HalPartitionMap* hal_partition_map_insert(enum HalPartitionFilesystemType
                                                  unsigned int dev, unsigned int begin,
                                                  unsigned int size);
 
-void hal_block_init(void);
+void hal_block_init(void);      // stage1 initialization - without memory management
+void hal_block_init_2(void);    // stage 2 initialization - with memory management
 void hal_block_register_device(const char* name, void* private,
                                const struct BlockDeviceDriver* driver);
 int hal_block_read(int id, int begin, int count, void* buf);

@@ -1,9 +1,10 @@
 #ARMGNU ?= /Applications/ArmGNUToolchain/12.3.Rel1/aarch64-none-elf/bin/aarch64-none-elf
 #ARMGNU ?= /Applications/ArmGNUToolchain/13.2.Rel1/aarch64-none-elf/bin/aarch64-none-elf
 #ARMGNU ?= E:\Nextcloud\raspo3b-os/toolchain/Windows/arm-gnu-toolchain-13.2.Rel1-mingw-w64-i686-aarch64-none-elf/bin/aarch64-none-elf
-ARMGNU ?= aarch64-none-elf
-QEMU ?= qemu-system-aarch64
-# QEMU = d:\qemu\qemu-system-aarch64.exe
+ARMGNU ?= C:\Users\bobuc\Nextcloud\raspo3b-os/toolchain/Windows/arm-gnu-toolchain-13.2.Rel1-mingw-w64-i686-aarch64-none-elf/bin/aarch64-none-elf
+#ARMGNU ?= aarch64-none-elf
+#QEMU ?= qemu-system-aarch64
+ QEMU = c:\qemu\qemu-system-aarch64.exe
 
 BUILD_DIR = build
 SRC_DIR = src

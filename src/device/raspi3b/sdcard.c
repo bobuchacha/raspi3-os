@@ -192,11 +192,7 @@ int sd_cmd(unsigned int code, unsigned int arg) {
 int sd_readblock(unsigned int lba, unsigned char *buffer, unsigned int num) {
     int r, c = 0, d;
     if (num < 1) num = 1;
-//    uart_puts("sd_readblock lba ");
-//    uart_hex(lba);
-//    uart_puts(" num ");
-//    uart_hex(num);
-//    uart_puts("\n");
+
     if (sd_status(SR_DAT_INHIBIT)) {
         sd_err = SD_TIMEOUT;
         return 0;
@@ -493,6 +489,7 @@ int sd_init() {
 }
 
 int sd_block_read(void* private, unsigned int begin, int count, void* buf){
+    asm volatile("brk #0");
     return sd_readblock(begin, (unsigned char*)buf, count);
 }
 int sd_block_write(void* private, unsigned int begin, int count, const void* buf){
