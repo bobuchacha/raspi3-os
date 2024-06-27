@@ -1,6 +1,6 @@
-#ifndef STRING_H
-#define STRING_H
-
+#ifndef KERNEL_LIB_H
+#define KERNEL_LIB_H
+#include <ros.h>
 /**
  * Fills the first @a n bytes of the memory area pointed to by @a s
  * 	with the constant byte @a c.
@@ -66,21 +66,22 @@ void strrev(char *s);
 void bzero(void *b, int length);
 
 
-int k_toupper(int c);
-
+int k_toupper(int c);						// convert character to upper
 int k_tolower(int c);
-
 int coerce_int(char *s, unsigned int *val);
-
 unsigned char hex_char(unsigned char byte);
-
 char * itos(unsigned int myint, char buffer[], int bufflen);
-
 char * strtok(char *s, char *delim);
 char *strncpy(char *dest, const char *src, int length);
 volatile void* memmove_volatile(volatile void* dst, const volatile void* src, unsigned int n) ;
 void* memmove(void* dst, const void* src, unsigned int n);
 char* safestrcpy(char* s, const char* t, int n);
+
+
+//-------------------------------------- util.c -----------------------------------
+unsigned int readi16(unsigned char *buff, unsigned int offset); // read 16 bit integer from a pointer into an int
+unsigned int readi32(unsigned char *buff, unsigned int offset); // read 32 bit integer in memory into an int
+
 //-------------------------------------- utf8.c -----------------------------------
 long int utf16_to_utf8(const UWord *u16_str, int u16_str_len, UByte *u8_str, int u8_str_size); // convert utf16 to utf8
 int str_from_utf16(UWord *u16_str, int length, UByte **target);	// convert to utf8 string from utf16 with pre allocated memory

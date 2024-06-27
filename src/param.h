@@ -10,6 +10,7 @@
 #define HAL_BLOCK_MAX       8           // maximum storage device supported by our kernel
 #define HAL_PARTITION_MAX   8           // maximum partition supoprted
 
+#define VFS_NAME_LENGTH_MAX 128	// max file name length
 
 
 #endif //RASPI3_OS_PARAM_H

@@ -37,6 +37,22 @@
         "utils.h": "c",
         "mailbox.h": "c",
         "hal.h": "c",
-        "sd.h": "c"
+        "sd.h": "c",
+        "vfs.h": "c",
+        "string.h": "c",
+        "typeinfo": "c",
+        "__split_buffer": "cpp",
+        "initializer_list": "cpp",
+        "string": "cpp",
+        "string_view": "cpp",
+        "fat32.h": "c",
+        "fat32-struct.h": "c",
+        "util.h": "c",
+        "param.h": "c",
+        "__hash_table": "c",
+        "cstring": "c",
+        "__string": "c",
+        "atomic": "c",
+        "memory": "c"
     }
 }
