@@ -9,7 +9,7 @@
 #include "../hal/hal.h"
 
 static unsigned char _putp[1024];
-const BlockDeviceDriver sdcard_driver = {
+const static BlockDeviceDriver sdcard_driver = {
             .block_read = &sd_block_read,
             .block_write = &sd_block_write
         };

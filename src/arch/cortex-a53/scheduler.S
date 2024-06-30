@@ -37,6 +37,12 @@ FUNCTION ret_from_fork
 	mov 	x2, x22
 	blr 	x19
 	/* thread exit here. Should we do some thing here? */
+	
+	//mov 	x0, xzr
+	//bl 	exit_current_process
+
+	//PRINTS "\n\n===============\nTHREAD ENDED. SHOULD IMPLEMENT SOMETHING TO END THE THREAD. THREAD RUN INTO LOOP NOW\n===============\n\n"
+	//b .
 ret_to_user:
 	// PRINTS "\nret_from_fork: Returning to user...\n\n"
 	bl      disable_irq

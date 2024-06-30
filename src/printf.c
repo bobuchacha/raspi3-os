@@ -262,7 +262,7 @@ void kpanic(char *fmt, ...) {
     tfp_format(stdout_putp,stdout_putf,fmt,va);
     printf("\n");
     va_end(va);
-    asm volatile("brk #0"); // call debugger
+    asm volatile("brk #0xFF"); // call debugger
 }
 
 void print_c(unsigned char c){

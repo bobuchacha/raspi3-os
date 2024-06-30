@@ -74,23 +74,22 @@ static int fat32_dir_search(struct FAT32Private* priv, unsigned int cluster, con
 		}
 		
 		unsigned short name_u16[255];
+		UByte *name_u8 = null;
 		
 		if (lfn_entry_count) {
 			fat32_get_long_name(lfn_entries, lfn_entry_count, name_u16);
+			str_from_utf16(name_u16, 255, &name_u8);
 		}else{
-			unsigned char buff[12];
-			buff[12] = '\0';
-			fat32_get_full_name(&dir, buff);
-			bytes_to_utf16(buff, 12, name_u16);
+			name_u8 = (UByte*)kmalloc(12);
+			fat32_get_full_name(&dir, name_u8);
 		}
-
-		UByte *name_u8;
-		str_from_utf16(name_u16, 255, &name_u8);
+		
 		if (strcmp(name, name_u8) == 0) {
 			memmove(dir_dest, &dir, sizeof(struct FAT32DirEntry));
 			kfree((Address)name_u8);
 			return i / 32;
 		}
+		kfree((Address)name_u8);
 	}
 	return ERROR_NOT_EXIST;
 }

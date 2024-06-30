@@ -489,7 +489,7 @@ int sd_init() {
 }
 
 int sd_block_read(void* private, unsigned int begin, int count, void* buf){
-    asm volatile("brk #0");
+    // asm volatile("brk #0");
     return sd_readblock(begin, (unsigned char*)buf, count);
 }
 int sd_block_write(void* private, unsigned int begin, int count, const void* buf){

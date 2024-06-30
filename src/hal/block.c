@@ -26,6 +26,7 @@ int hal_disk_read(int id, int begin, int count, void* buf) {
 		return ERROR_INVAILD;
 	}
 	if (!hal_block_map[id].driver || !hal_block_map[id].driver->block_read){
+		log_error("Disk read error");
 		kpanic("Block Driver of device %d at address 0x%lX is invalid.", hal_block_map[id].driver);
 	}
 	
@@ -98,6 +99,7 @@ static void hal_block_probe_partition(int block_id) {
 	
 //     _trace("Probing partition on block device id: %d", block_id);
 	if (hal_disk_read(block_id, 1, 1, (void*)sector_buffer) == ERROR_INVAILD) {
+		log_error("Disk read error");
 		kpanic("disk read error");
 	}
 //     printf("First Long of buffer: 0x%lX\n", ((ULong*)(sector_buffer))[0]);

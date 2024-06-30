@@ -18,7 +18,7 @@ typedef struct FileDesc {
 	unsigned int size; // current file size
 					   // below are not used in read-only files
 	struct VfsPath path; // for update file size,not used for read-only file
-} FILE;
+} FileDesc, *PFileDesc, *FILE;
 
 enum OpenMode {
 	O_READ = 1,

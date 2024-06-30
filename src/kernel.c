@@ -14,6 +14,13 @@
 #include "filesystem/vfs/vfs.h"
 #include "elf.h"
 
+// file.c
+void file_close(PFileDesc f);
+Buffer file_read(PFileDesc f, int position, int length);
+PFileDesc file_open(char* path, int mode);
+
+extern int file_last_status;
+
 void ls(unsigned char *path){
     struct FileDesc dir;
     struct DirectoryEntry dirent;
@@ -40,6 +47,17 @@ void ls(unsigned char *path){
 }
 void kernel_load_user_elf(){
     ls("/");
+
+    _trace("Reading file deadbeef.txt");
+    PFileDesc f = file_open("/bar.txt", O_READ);
+    if (!f) {
+        log_error("Error opening file. Error %d", file_last_status);
+        return;
+    }
+    Buffer content = file_read(f, 0, f->size);
+    kdump_size(content, f->size);
+
+
     // _trace("Starting process\n");
 
     // _trace("Opening file\n");    
@@ -143,9 +161,8 @@ void kernel_load_user_elf(){
 		// 	return -1;
 		// }
 	// }
+    
 
-
-   while(1);
 }
 
 void do_test();
