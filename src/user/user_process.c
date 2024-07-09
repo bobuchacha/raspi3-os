@@ -10,6 +10,8 @@ long main();
 */
 ENTRYPOINT
 _entrypoint(){
+   call_sys_write("Here is my number: ");
+   asm volatile("brk #0xFF");
    call_sys_exit(main());
    while(1);
 }
@@ -18,7 +20,7 @@ static int counter;
 
 long main(){       
 
-        int *ptr = (int*)0x6100;
+      int *ptr = (int*)0x6100;
       *ptr = 0xDEADACBE;
       call_sys_write("Here is my number: ");
       call_sys_malloc(*ptr);

@@ -48,14 +48,14 @@ void ls(unsigned char *path){
 void kernel_load_user_elf(){
     ls("/");
 
-    _trace("Reading file deadbeef.txt");
-    PFileDesc f = file_open("/bar.txt", O_READ);
-    if (!f) {
-        log_error("Error opening file. Error %d", file_last_status);
-        return;
-    }
-    Buffer content = file_read(f, 0, f->size);
-    kdump_size(content, f->size);
+    // _trace("Reading file deadbeef.txt");
+    // PFileDesc f = file_open("/num.txt", O_READ);
+    // if (!f) {
+    //     log_error("Error opening file. Error %d", file_last_status);
+    //     return;
+    // }
+    // Buffer content = file_read(f, 0, f->size);
+    // kdump_size(content, f->size);
 
 
     // _trace("Starting process\n");
@@ -161,6 +161,10 @@ void kernel_load_user_elf(){
 		// 	return -1;
 		// }
 	// }
+    while (1)
+    {
+        /* code */
+    }
     
 
 }
@@ -190,7 +194,7 @@ void kernel_main(){
 //    create_user_process((Address)(&user_begin), &user_end-&user_begin);
 
     while(1){
-         kinfo("Printing from thread %s. Yeilding...", current_task->name);
+        //  kinfo("Printing from thread %s. Yeilding...", current_task->name);
         
         // cleanup_zombie_processes();
         schedler_schedule();

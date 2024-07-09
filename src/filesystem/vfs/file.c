@@ -5,8 +5,10 @@
 #include "log.h"
 #include "../../hal/hal.h"
 #include "memory.h"
+#include "common/assert.h"
 
 int vfs_fd_open(struct FileDesc* fd, const char* filename, int mode) {
+
 	memset(fd, 0, sizeof(struct FileDesc));
 	struct VfsPath filepath;
 	filepath.pathbuf = (char*)kmalloc(4096);
@@ -16,7 +18,9 @@ int vfs_fd_open(struct FileDesc* fd, const char* filename, int mode) {
 	}
 	struct VfsPath path;
 	int fs_id = vfs_path_to_fs(filepath, &path);
-
+	
+	ASSERT(vfs_mount_table[fs_id].fs_driver, "VFS File System ID %d has incorrect driver", fs_id);
+	
 	int fblock = vfs_mount_table[fs_id].fs_driver->open(vfs_mount_table[fs_id].private, path);
 	if (fblock < 0) {
 		if (mode & O_CREATE) {

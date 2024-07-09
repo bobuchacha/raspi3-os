@@ -42,14 +42,16 @@ int strcmp(const char *s1, const char *s2) {
     /* Return the ASCII difference after convert. char* to unsigned char* */
     return *(const unsigned char *) s1 - *(const unsigned char *) s2;
 }
-int strncmp(const char *s1, const char *s2, int len) {
-    while ((*s1 != '\0') && (--len > 0) && (*(s1++) == *(s2++))) {
-        // s1++;
-        // s2++;
-    }
-
-    /* Return the ASCII difference after convert. char* to unsigned char* */
-    return *(const unsigned char *) s1 - *(const unsigned char *) s2;
+int strncmp(register const char *s1,register  const char *s2,register int len) {
+    if (len == 0)
+		return (0);
+	do {
+		if (*s1 != *s2++)
+			return (*(unsigned char *)s1 - *(unsigned char *)--s2);
+		if (*s1++ == 0)
+			break;
+	} while (--len != 0);
+	return (0);
 }
 
 char *strcpy(char *dest, const char *src) {

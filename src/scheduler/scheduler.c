@@ -12,6 +12,10 @@ struct task_struct *current_task = &(init_task);
 struct task_struct *tasks[NR_TASKS] = {&(init_task), };
 int  nr_tasks = 1;
 
+// void print_current_task_id(){
+// 	printf("Current Task: %d (%s)", current_task->id, current_task->name);
+// }
+
 void preempt_disable(void)
 {
 	// _trace("Preempt disabled ");

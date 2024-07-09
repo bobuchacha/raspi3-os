@@ -27,8 +27,8 @@ ENDF
 	
 
 FUNCTION ret_from_fork
-
-	// PRINTS "\nret_from_fork: Forking new process...\n\n"
+	bl print_current_task_id
+	PRINTS "ret_from_fork: Forking new process...\n\n"
 
 	bl	    schedule_tail
 	cbz 	x19, ret_to_user		// not a kernel thread
@@ -38,13 +38,14 @@ FUNCTION ret_from_fork
 	blr 	x19
 	/* thread exit here. Should we do some thing here? */
 	
-	//mov 	x0, xzr
-	//bl 	exit_current_process
+	// mov 	x0, xzr
+	// bl 	exit_current_process
 
-	//PRINTS "\n\n===============\nTHREAD ENDED. SHOULD IMPLEMENT SOMETHING TO END THE THREAD. THREAD RUN INTO LOOP NOW\n===============\n\n"
-	//b .
+	// PRINTS "\n\n===============\nTHREAD ENDED. SHOULD IMPLEMENT SOMETHING TO END THE THREAD. THREAD RUN INTO LOOP NOW\n===============\n\n"
+	// b .
 ret_to_user:
-	// PRINTS "\nret_from_fork: Returning to user...\n\n"
+	bl print_current_task_id
+	PRINTS "ret_from_fork: Returning to user...\n\n"
 	bl      disable_irq
 	kernel_exit 0 
 ENDFUNC

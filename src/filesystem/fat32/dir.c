@@ -110,6 +110,7 @@ static int fat32_path_search(struct FAT32Private* priv, struct VfsPath path,
 }
 
 int fat32_open(void* private, struct VfsPath path) {
+	
 	struct FAT32Private* priv = private;
 	if (path.parts == 0) {
 		return priv->boot_sector->root_cluster;

@@ -22,7 +22,7 @@ int fat32_mount(int partition_id, void** private) {
 	char label[12];
 	strncpy(label, bootsect->volume_label, 12);
 	label[11] = '\0';
-	_trace("Mounting: %s\n", label);
+	_trace("Mounting parition %d: %s\n", partition_id, label);
 
 	struct FAT32Private* priv = (struct FAT32Private*)kmalloc(sizeof(struct FAT32Private));
 	priv->partition_id = partition_id;
