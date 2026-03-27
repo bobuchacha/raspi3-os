@@ -579,6 +579,8 @@ static int shell_spawn_program(const char* path, const char* name_arg, const cha
     char buffer[256];
     long pid;
 
+    app_log_trace("shell", "spawning program '%s' with name_arg='%s' and args_arg='%s'", path, name_arg ? name_arg : "<null>", args_arg ? args_arg : "<null>");
+
     if (name_arg && name_arg[0] != '\0') {
         shell_strncpy(name, name_arg, sizeof(name));
         name[sizeof(name) - 1] = '\0';
@@ -587,7 +589,9 @@ static int shell_spawn_program(const char* path, const char* name_arg, const cha
         shell_default_name(path, name, sizeof(name));
     }
 
+    app_log_trace("shell", "resolved spawn name '%s'", name);
     pid = user_kernel_spawn_with_args(path, name, args_arg);
+    app_log_trace("shell", "spawned program '%s' with pid=%ld", path, pid);
     if (pid < 0) {
         return -1;
     }
@@ -601,6 +605,29 @@ static int shell_spawn_program(const char* path, const char* name_arg, const cha
         shell_print_key_value("args", args_arg);
     }
     return 0;
+}
+
+static int shell_file_exists(const char* path) {
+    char probe;
+    long status;
+
+    if (!path || path[0] == '\0') {
+        return 0;
+    }
+
+    // Probe the candidate path before spawning so invalid commands do not create transient tasks.
+    status = user_kernel_read_file(path, 0, &probe, 1);
+    return status >= 0;
+}
+
+static int shell_try_spawn_candidate(const char* path, const char* name_arg, const char* args_arg) {
+    app_log_trace("shell", "trying candidate path '%s'", path);
+    if (!shell_file_exists(path)) {
+        return 0;
+    }
+
+    // Spawn only after the candidate path is confirmed to be a readable file.
+    return shell_spawn_program(path, name_arg, args_arg) == 0 ? 1 : -1;
 }
 
 static int shell_search_path_index(const ShellState* state, const char* path) {
@@ -687,7 +714,10 @@ static int shell_parse_launch_options(char* tokens[], int token_count, int* next
 static int shell_try_spawn_target(ShellState* state, const char* input, const char* name_arg, const char* args_arg) {
     char candidate[SHELL_PATH_MAX];
     char with_ext[SHELL_PATH_MAX];
+    int result;
     int index;
+
+    app_log_trace("shell", "searching for external command '%s'", input);
 
     if (!input || input[0] == '\0') {
         return -1;
@@ -699,11 +729,19 @@ static int shell_try_spawn_target(ShellState* state, const char* input, const ch
             shell_strncpy(with_ext, candidate, sizeof(with_ext));
             with_ext[sizeof(with_ext) - 1] = '\0';
             shell_strcat(with_ext, ".exe");
-            if (shell_spawn_program(with_ext, name_arg, args_arg) == 0) {
+            result = shell_try_spawn_candidate(with_ext, name_arg, args_arg);
+            if (result > 0) {
                 return 0;
             }
+            if (result < 0) {
+                return -2;
+            }
         }
-        return shell_spawn_program(candidate, name_arg, args_arg);
+        result = shell_try_spawn_candidate(candidate, name_arg, args_arg);
+        if (result > 0) {
+            return 0;
+        }
+        return result < 0 ? -2 : -1;
     }
 
     for (index = 0; index < state->search_path_count; index++) {
@@ -717,12 +755,20 @@ static int shell_try_spawn_target(ShellState* state, const char* input, const ch
             shell_strncpy(with_ext, candidate, sizeof(with_ext));
             with_ext[sizeof(with_ext) - 1] = '\0';
             shell_strcat(with_ext, ".exe");
-            if (shell_spawn_program(with_ext, name_arg, args_arg) == 0) {
+            result = shell_try_spawn_candidate(with_ext, name_arg, args_arg);
+            if (result > 0) {
                 return 0;
             }
+            if (result < 0) {
+                return -2;
+            }
         }
-        if (shell_spawn_program(candidate, name_arg, args_arg) == 0) {
+        result = shell_try_spawn_candidate(candidate, name_arg, args_arg);
+        if (result > 0) {
             return 0;
+        }
+        if (result < 0) {
+            return -2;
         }
     }
 
@@ -1017,8 +1063,12 @@ static void shell_command_run(ShellState* state, const char* full_args) {
         shell_join_tokens(args, sizeof(args), tokens, next_index, count);
     }
 
-    if (shell_try_spawn_target(state, path_arg, name_arg, args) != 0) {
+    next_index = shell_try_spawn_target(state, path_arg, name_arg, args);
+    if (next_index == -1) {
         shell_print_error("run", "program not found");
+    }
+    else if (next_index != 0) {
+        shell_print_error("run", "failed to start program");
     }
 }
 
@@ -1047,13 +1097,19 @@ static void shell_command_ps(void) {
             continue;
         }
         if (info.state == 1) {
-            state = "RUN";
+            state = "READY";
         }
         else if (info.state == 2) {
+            state = "RUN";
+        }
+        else if (info.state == 3) {
             state = "SLEEP";
         }
+        else if (info.state == 4) {
+            state = "BLOCK";
+        }
         else if (info.state == 0) {
-            state = "ZOMBIE";
+            state = "ZOMB";
         }
 
         shell_write("  ");
@@ -1215,6 +1271,8 @@ static int shell_try_external_command(ShellState* state, const char* command, co
     int next_index;
     int used_separator;
 
+    app_log_trace("shell", "attempting to spawn external command '%s'", command);
+
     if (full_args && full_args[0] != '\0') {
         shell_copy_line(buffer, full_args, sizeof(buffer));
         count = shell_tokenize(buffer, tokens, SHELL_TOKEN_MAX);
@@ -1240,6 +1298,7 @@ static void shell_execute(ShellState* state, const char* line) {
     char* command;
     char* arg0;
     char* full_args;
+    int external_status;
 
     shell_copy_line(command_line, line, sizeof(command_line));
     shell_copy_line(original_line, line, sizeof(original_line));
@@ -1257,14 +1316,21 @@ static void shell_execute(ShellState* state, const char* line) {
         return;
     }
 
-    if (shell_try_external_command(state, command, full_args) == 0) {
+    external_status = shell_try_external_command(state, command, full_args);
+    if (external_status == 0) {
         return;
     }
 
-    shell_write("shell: unknown command '");
+    if (external_status == -1) {
+        shell_write("shell: invalid command '");
+        shell_write(command);
+        shell_write_line("'");
+        return;
+    }
+
+    shell_write("shell: failed to start '");
     shell_write(command);
     shell_write_line("'");
-    shell_write_line("Try 'help' to list commands.");
 }
 
 long main(void) {

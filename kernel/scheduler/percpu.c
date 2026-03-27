@@ -149,6 +149,7 @@ void percpu_init_secondary(unsigned int cpu_index) {
     t->cpu_affinity = cpu_index;
     t->preempt_count = 0;
     t->flags = PF_KTHREAD;
+    t->process = processes[0];
     t->kernel_stack_page = 0;
     t->mm.pgd = get_pgd();
     t->name = (Buffer)"KERNEL IDLE";

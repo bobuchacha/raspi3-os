@@ -1,13 +1,18 @@
 #include "ros.h"
+#include "boot-handoff.h"
 #include "printf.h"
 #include "log.h"
 #include "secondary.h"
 #include "percpu.h"
 #include "irq.h"
+#include "memory.h"
 
-// Assembly helpers bridge from higher-half C code to low-memory boot symbols.
-extern void secondary_program_boot_entry(unsigned int cpu_index);
-extern void secondary_publish_boot_entries(void);
+typedef void (*secondary_program_boot_entry_fn_t)(unsigned int cpu_index);
+typedef void (*secondary_publish_boot_entries_fn_t)(void);
+
+static RosBootHandoff* secondary_boot_handoff(void) {
+    return (RosBootHandoff*)mem_phys_to_virt((PhysAddr)ROS_BOOT_HANDOFF_PHYS_ADDR);
+}
 
 /**
  * wake_secondary_cores
@@ -27,17 +32,34 @@ extern void secondary_publish_boot_entries(void);
  */
 void wake_secondary_cores(void) {
     unsigned int cpu;
+    RosBootHandoff* handoff = secondary_boot_handoff();
+    secondary_program_boot_entry_fn_t program_boot_entry;
+    secondary_publish_boot_entries_fn_t publish_boot_entries;
 
     _trace("Waking secondary cores...\n");
+
+    if (!ros_boot_handoff_is_valid(handoff)) {
+        log_error("Secondary core wake skipped: boot handoff is unavailable");
+        return;
+    }
+
+    if (!handoff->secondary_program_boot_entry_fn || !handoff->secondary_publish_boot_entries_fn) {
+        log_error("Secondary core wake skipped: loader did not publish SMP wake helpers");
+        return;
+    }
+
+    handoff->secondary_entry_point = (ULong)secondary_start;
+    program_boot_entry = (secondary_program_boot_entry_fn_t)handoff->secondary_program_boot_entry_fn;
+    publish_boot_entries = (secondary_publish_boot_entries_fn_t)handoff->secondary_publish_boot_entries_fn;
 
     // Fill entries for CPU indices 1..3. Index 0 is primary and already running.
     for (cpu = 1; cpu < 4; ++cpu) {
         _trace("Setting secondary release target for CPU %u\n", cpu);
-        secondary_program_boot_entry(cpu); // set this CPU's low-memory boot entry
+        program_boot_entry(cpu); // set this CPU's low-memory boot entry
     }
 
     // Publish spin-table writes and wake the parked secondary cores.
-    secondary_publish_boot_entries(); // ensure visibility, then send SEV
+    publish_boot_entries(); // ensure visibility, then send SEV
 }
 
 
@@ -81,6 +103,7 @@ void secondary_start(void) {
 
     // Bind this CPU's current task slot to its private idle task.
     current_task = percpu_idle_task(cpu);
+    current_task_ids[cpu] = current_task ? (int)current_task->id : -1;
     current_task->counter = current_task->priority;
 
     // Allow the secondary to participate in scheduling, but only for tasks

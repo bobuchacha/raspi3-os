@@ -66,6 +66,8 @@ extern "C"
 
     typedef struct UserTaskInfo {
         long id;
+        long thread_id;
+        long parent_process_id;
         long state;
         long counter;
         long priority;

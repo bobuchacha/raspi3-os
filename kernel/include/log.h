@@ -110,7 +110,7 @@ static inline const char* log_color_reset(void) {
         console_lock();       \
         _log_prefix(level);   \
         kprint(__VA_ARGS__);  \
-        kprint("%s", log_color_reset()); \
+        kprint("%s\n", log_color_reset()); \
         if (LOG_ERROR_DUMP_STACK && (level) == LOG_ERROR) { \
             dump_stack(); \
         } \

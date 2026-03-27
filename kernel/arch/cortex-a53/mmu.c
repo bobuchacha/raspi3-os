@@ -99,7 +99,7 @@ static int process_resolve_user_ptr(Task* task, Address va, UByte** ptr, ULong* 
 	MmuWalkResult walk;
 	ULong offset;
 
-	if (!task || !ptr || !bytes_left_in_page) {
+	if (!ptr || !bytes_left_in_page) {
 		return -1;
 	}
 	if (process_walk_page(task, va & MM_PAGE_MASK, &walk) != 0) {
@@ -279,24 +279,30 @@ int process_map_shared_page(Task* task, Address pa, Address va, Flags flags) {
 
 int process_walk_page(Task* task, Address va, MmuWalkResult* result) {
 	Address page_va = va & MM_PAGE_MASK;
+	Address pgd_addr;
 	TableEntry* pgd;
 	TableEntry* pud;
 	TableEntry* pmd;
 	TableEntry* pte;
 
-	if (!task || !result || !task->mm.pgd) {
+	if (!result) {
+		return -1;
+	}
+
+	pgd_addr = task ? task->mm.pgd : get_pgd();
+	if (!pgd_addr) {
 		return -1;
 	}
 
 	memzero((Address)result, sizeof(*result));
 	result->virt_addr = page_va;
-	result->pgd = task->mm.pgd;
+	result->pgd = pgd_addr;
 	result->pgd_index = (page_va >> MM_PGD_SHIFT) & (MM_PTRS_PER_TABLE - 1);
 	result->pud_index = (page_va >> MM_PUD_SHIFT) & (MM_PTRS_PER_TABLE - 1);
 	result->pmd_index = (page_va >> MM_PMD_SHIFT) & (MM_PTRS_PER_TABLE - 1);
 	result->pte_index = (page_va >> MM_PAGE_SHIFT) & (MM_PTRS_PER_TABLE - 1);
 
-	pgd = (TableEntry*)(task->mm.pgd + VA_START);
+	pgd = (TableEntry*)(pgd_addr + VA_START);
 	if (!pgd[result->pgd_index]) {
 		return -1;
 	}
@@ -331,7 +337,7 @@ int process_copy_from_user(Task* task, Address va, void* buffer, ULong len) {
 	UByte* dst = (UByte*)buffer;
 	ULong remaining = len;
 
-	if (!task || (!buffer && len != 0)) {
+	if (!buffer && len != 0) {
 		return -1;
 	}
 
@@ -360,7 +366,7 @@ int process_copy_to_user(Task* task, Address va, const void* buffer, ULong len) 
 	const UByte* src = (const UByte*)buffer;
 	ULong remaining = len;
 
-	if (!task || (!buffer && len != 0)) {
+	if (!buffer && len != 0) {
 		return -1;
 	}
 

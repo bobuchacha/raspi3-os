@@ -2,6 +2,7 @@
 
 #include "device/raspi3b.h"
 #include "device/sd.h"
+#include "boot-handoff.h"
 #include "printf.h"
 #include "log.h"
 #include "device/sd.h"
@@ -101,6 +102,23 @@
 
 unsigned long sd_scr[2], sd_ocr, sd_rca, sd_err, sd_hv;
 static Bool sd_initialized;
+
+int sd_try_import_handoff(const RosBootHandoff* handoff) {
+    if (!ros_boot_handoff_is_valid(handoff) || !(handoff->flags & ROS_BOOT_HANDOFF_FLAG_SD_READY)) {
+        return SD_ERROR;
+    }
+
+    sd_scr[0] = handoff->sd_scr[0];
+    sd_scr[1] = handoff->sd_scr[1];
+    sd_ocr = handoff->sd_ocr;
+    sd_rca = handoff->sd_rca;
+    sd_err = handoff->sd_err;
+    sd_hv = handoff->sd_hv;
+    sd_initialized = true;
+    *EMMC_INT_EN = 0xffffffff;
+    *EMMC_INT_MASK = 0xffffffff;
+    return SD_OK;
+}
 /**
  * Wait for data or command ready
  */

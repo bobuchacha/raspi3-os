@@ -87,10 +87,17 @@ typedef struct {
 static void task_set_user_name(Task* task, const char* name) {
     const char* source = (name && name[0] != '\0') ? name : "user";
     _trace("Setting task %d name to '%s'", task->id, source);
-    // Copy the chosen visible name into the task buffer; expects space for the truncated string and affects task identity shown elsewhere.
-    strncpy(task->user_name, source, sizeof(task->user_name) - 1);
-    task->user_name[sizeof(task->user_name) - 1] = '\0';
-    task->name = (Buffer)task->user_name;
+    if (task->process) {
+        strncpy(task->process->name, source, sizeof(task->process->name) - 1);
+        task->process->name[sizeof(task->process->name) - 1] = '\0';
+        task->name = (Buffer)task->process->name;
+        task->thread_name[0] = '\0';
+    }
+    else {
+        strncpy(task->thread_name, source, sizeof(task->thread_name) - 1);
+        task->thread_name[sizeof(task->thread_name) - 1] = '\0';
+        task->name = (Buffer)task->thread_name;
+    }
 }
 
 /**
@@ -116,8 +123,142 @@ static ULong exec_align_up(ULong value, ULong align) {
     return (value + align - 1U) & ~(align - 1U);
 }
 
+/**
+ * Read one cache-line size from CTR_EL0 and convert it to bytes.
+ *
+ * Args:
+ *   shift: Bit position of the cache-line field inside CTR_EL0.
+ *
+ * Returns:
+ *   Cache line size in bytes, or `0` if the field reports zero.
+ */
+static ULong exec_cache_line_bytes(unsigned int shift) {
+    ULong ctr_el0;
+    ULong line_words;
+
+    asm volatile("mrs %0, ctr_el0" : "=r"(ctr_el0));
+    line_words = (ctr_el0 >> shift) & 0xFUL;
+    return 4UL << line_words;
+}
+
 static Bool exec_is_power_of_two(ULong value) {
     return value != 0 && (value & (value - 1U)) == 0;
+}
+
+static Bool exec_ranges_overlap(Address start_a, Address end_a, Address start_b, Address end_b) {
+    return start_a < end_b && start_b < end_a;
+}
+
+static Bool exec_segment_contains_entry(const UserExeSegment* segment, Address entry_point) {
+    if (!segment || segment->memory_size == 0) {
+        return false;
+    }
+    if (!(segment->flags & USER_EXE_SEGMENT_EXEC)) {
+        return false;
+    }
+
+    return entry_point >= segment->virtual_address &&
+        entry_point < segment->virtual_address + segment->memory_size;
+}
+
+static int exec_clamp_page_count(int count) {
+    if (count < 0) {
+        return 0;
+    }
+    if (count > MAX_PROCESS_PAGES) {
+        return MAX_PROCESS_PAGES;
+    }
+    return count;
+}
+
+static Address exec_normalize_page(Address page) {
+    Address normalized = (Address)(page & MM_PAGE_MASK);
+
+    if (normalized == 0) {
+        return 0;
+    }
+    if (mem_is_kernel_virt_addr((VirtAddr)normalized)) {
+        PhysAddr phys = mem_virt_to_phys((VirtAddr)normalized);
+
+        if (mem_is_valid_phys_page(phys)) {
+            return (Address)phys;
+        }
+    }
+    if (!mem_is_valid_phys_page((PhysAddr)normalized)) {
+        return 0;
+    }
+
+    return normalized;
+}
+
+/*
+ * Initialize a temporary task image used to stage a new executable before it
+ * replaces the live task mappings.
+ */
+static void exec_init_staged_task(Task* staged_task, const Task* live_task) {
+    Address task_page = 0;
+    Address stack_page = 0;
+
+    memzero((Address)staged_task, sizeof(*staged_task));
+    if (!live_task) {
+        return;
+    }
+
+    staged_task->id = live_task->id;
+    staged_task->kernel_stack_page = live_task->kernel_stack_page;
+    staged_task->mm.heap_next = USER_HEAP_BASE;
+    staged_task->mm.dll_local_next = USER_SHARED_LIBRARY_LOCAL_BASE;
+
+    if (live_task->mm.kernel_pages_count > 0) {
+        task_page = (Address)(live_task->mm.kernel_pages[0] & MM_PAGE_MASK);
+        if (task_page != 0) {
+            staged_task->mm.kernel_pages[staged_task->mm.kernel_pages_count++] = task_page;
+        }
+    }
+
+    stack_page = (Address)(live_task->kernel_stack_page & MM_PAGE_MASK);
+    if (stack_page != 0 && (staged_task->mm.kernel_pages_count == 0 || staged_task->mm.kernel_pages[staged_task->mm.kernel_pages_count - 1] != stack_page)) {
+        staged_task->mm.kernel_pages[staged_task->mm.kernel_pages_count++] = stack_page;
+    }
+}
+
+/*
+ * Release one staged task memory image through the existing cleanup path
+ * without mutating the live task descriptor.
+ */
+static void exec_release_task_image(const Task* live_task, const TaskMemory* mm, Address kernel_stack_page) {
+    Address task_page;
+    Address stack_page;
+    int user_page_count;
+    int kernel_page_count;
+
+    if (!live_task || !mm) {
+        return;
+    }
+
+    task_page = exec_normalize_page(mm->kernel_pages_count > 0 ? mm->kernel_pages[0] : 0);
+    stack_page = exec_normalize_page(kernel_stack_page);
+    user_page_count = exec_clamp_page_count(mm->user_pages_count);
+    kernel_page_count = exec_clamp_page_count(mm->kernel_pages_count);
+
+    // Release staged or replaced user pages tracked by the temporary image.
+    for (int index = 0; index < user_page_count; index++) {
+        Address page = exec_normalize_page(mm->user_pages[index].phys_addr);
+
+        if (page != 0) {
+            mem_free_page(page);                                 // drop one tracked user-page reference
+        }
+    }
+
+    // Release temporary page-table pages while keeping the live task and stack pages.
+    for (int index = 0; index < kernel_page_count; index++) {
+        Address page = exec_normalize_page(mm->kernel_pages[index]);
+
+        if (page == 0 || page == task_page || page == stack_page) {
+            continue;
+        }
+        mem_free_page(page);                                     // release one transient page-table page
+    }
 }
 
 static Bool shared_library_has_flat_magic(const char magic[8]) {
@@ -201,7 +342,10 @@ static int exec_map_segment_range(Task* task, Address start_va, Address end_va, 
         }
 
         // Insert the new user mapping into the task page tables; affects the task address space contents immediately.
-        process_map_page(task, page, page_va, flags);
+        if (process_map_page(task, page, page_va, flags) != 0) {
+            mem_free_page(page);                                 // return the page if task mapping/bookkeeping fails
+            return -1;
+        }
     }
 
     return 0;
@@ -251,6 +395,98 @@ static void exec_trace_entry_point(Task* task, const char* path, Address entry_p
         path,
         walk.phys_addr + (entry_point & (PAGE_SIZE - 1)),
         entry_point);
+}
+
+/**
+ * Synchronize the instruction cache for one executable segment.
+ *
+ * Args:
+ *   task: Task that owns the freshly loaded segment pages.
+ *   segment: Executable segment that was just copied into memory.
+ *
+ * Returns:
+ *   Nothing. Missing mappings are ignored because segment loading already
+ *   validated them.
+ */
+static void exec_sync_segment_icache(Task* task, const UserExeSegment* segment) {
+    ULong dcache_line;
+    ULong icache_line;
+    Address segment_start;
+    Address segment_end;
+
+    if (!task || !segment || !(segment->flags & USER_EXE_SEGMENT_EXEC) || segment->memory_size == 0) {
+        return;
+    }
+
+    segment_start = segment->virtual_address;
+    segment_end = segment->virtual_address + segment->memory_size;
+    if (segment_end <= segment_start) {
+        return;
+    }
+
+    dcache_line = exec_cache_line_bytes(16);
+    icache_line = exec_cache_line_bytes(0);
+    if (dcache_line == 0) {
+        dcache_line = 64;
+    }
+    if (icache_line == 0) {
+        icache_line = 64;
+    }
+
+    // Push all executable bytes out through the kernel alias before EL0 fetches them.
+    for (Address page_va = segment_start & MM_PAGE_MASK; page_va < segment_end; page_va += PAGE_SIZE) {
+        Address page_pa = exec_find_mapped_page(task, page_va);
+        Address copy_start;
+        Address copy_end;
+
+        if (!page_pa) {
+            continue;
+        }
+
+        copy_start = page_pa + VA_START;
+        if (page_va == (segment_start & MM_PAGE_MASK)) {
+            copy_start += segment_start - page_va;
+        }
+
+        copy_end = (page_pa + VA_START) + PAGE_SIZE;
+        if (page_va + PAGE_SIZE > segment_end) {
+            copy_end = (page_pa + VA_START) + (segment_end - page_va);
+        }
+
+        for (Address va = copy_start & ~(dcache_line - 1UL); va < copy_end; va += dcache_line) {
+            asm volatile("dc cvau, %0" :: "r"(va) : "memory");   // clean freshly written code to PoU
+        }
+    }
+    asm volatile("dsb ish" ::: "memory");
+
+    // Invalidate instruction-cache lines that overlap the executable bytes.
+    for (Address page_va = segment_start & MM_PAGE_MASK; page_va < segment_end; page_va += PAGE_SIZE) {
+        Address page_pa = exec_find_mapped_page(task, page_va);
+        Address copy_start;
+        Address copy_end;
+
+        if (!page_pa) {
+            continue;
+        }
+
+        copy_start = page_pa + VA_START;
+        if (page_va == (segment_start & MM_PAGE_MASK)) {
+            copy_start += segment_start - page_va;
+        }
+
+        copy_end = (page_pa + VA_START) + PAGE_SIZE;
+        if (page_va + PAGE_SIZE > segment_end) {
+            copy_end = (page_pa + VA_START) + (segment_end - page_va);
+        }
+
+        for (Address va = copy_start & ~(icache_line - 1UL); va < copy_end; va += icache_line) {
+            asm volatile("ic ivau, %0" :: "r"(va) : "memory");   // invalidate old instructions for this range
+        }
+    }
+    asm volatile(
+        "dsb ish\n"
+        "isb\n"
+        ::: "memory");
 }
 
 /**
@@ -333,7 +569,9 @@ static int exec_load_segment(Task* task, struct FileDesc* fd, const UserExeSegme
  * Returns:
  *   `0` when the header is structurally valid, or `-1` when any field is inconsistent.
  */
-static int exec_validate_header(const UserExeHeader* header) {
+static int exec_validate_header(const UserExeHeader* header, ULong file_size) {
+    Bool entry_covered = false;
+
     // Verify the packed header signature first; expects the loader format magic and rejects unrelated files.
     if (strncmp(header->magic, USER_EXE_MAGIC, 8) != 0) {
         return -1;
@@ -350,12 +588,31 @@ static int exec_validate_header(const UserExeHeader* header) {
     if (header->segment_count == 0 || header->segment_count > USER_EXE_MAX_SEGMENTS) {
         return -1;
     }
+    if (header->image_size == 0) {
+        return -1;
+    }
+    if (header->entry_point < header->image_base || header->entry_point >= header->image_base + header->image_size) {
+        return -1;
+    }
 
     for (UInt index = 0; index < header->segment_count; index++) {
         const UserExeSegment* segment = &header->segments[index];
+        Address segment_start = segment->virtual_address;
+        Address segment_end = segment->virtual_address + segment->memory_size;
 
         if (segment->file_size > segment->memory_size) {
             return -1;
+        }
+        if (segment->memory_size != 0 && segment_end < segment_start) {
+            return -1;
+        }
+        if (segment->file_size != 0) {
+            if (segment->file_offset < header->header_size || segment->file_offset + segment->file_size < segment->file_offset) {
+                return -1;
+            }
+            if (segment->file_offset + segment->file_size > file_size) {
+                return -1;
+            }
         }
         if (segment->memory_size == 0) {
             continue;
@@ -363,6 +620,41 @@ static int exec_validate_header(const UserExeHeader* header) {
         if (segment->virtual_address < VA_USER_START) {
             return -1;
         }
+        if (segment->alignment != 0 && (!exec_is_power_of_two(segment->alignment) || (segment->virtual_address & (segment->alignment - 1U)) != 0)) {
+            return -1;
+        }
+        if (segment_start < header->image_base || segment_end > header->image_base + header->image_size) {
+            return -1;
+        }
+        if ((segment->flags & (USER_EXE_SEGMENT_READ | USER_EXE_SEGMENT_WRITE | USER_EXE_SEGMENT_EXEC)) == 0) {
+            return -1;
+        }
+        if (exec_segment_contains_entry(segment, header->entry_point)) {
+            entry_covered = true;
+        }
+    }
+
+    for (UInt left = 0; left < header->segment_count; left++) {
+        const UserExeSegment* a = &header->segments[left];
+
+        if (a->memory_size == 0) {
+            continue;
+        }
+
+        for (UInt right = left + 1; right < header->segment_count; right++) {
+            const UserExeSegment* b = &header->segments[right];
+
+            if (b->memory_size == 0) {
+                continue;
+            }
+            if (exec_ranges_overlap(a->virtual_address, a->virtual_address + a->memory_size, b->virtual_address, b->virtual_address + b->memory_size)) {
+                return -1;
+            }
+        }
+    }
+
+    if (!entry_covered) {
+        return -1;
     }
 
     return 0;
@@ -843,6 +1135,7 @@ UInt user_shared_library_snapshot(UserSharedLibraryInfo* infos, UInt max_infos) 
         }
 
         if (infos && count < max_infos) {
+            memzero((Address)&infos[count], sizeof(infos[count]));
             infos[count].used = true;
             strncpy(infos[count].path, library->path, sizeof(infos[count].path) - 1);
             infos[count].path[sizeof(infos[count].path) - 1] = '\0';
@@ -914,12 +1207,26 @@ Address load_user_shared_library_export(const char* path, const char* export_nam
  *   Nothing. The slot is reset to the unused state.
  */
 static void shared_library_release(SharedLibrary* library) {
+    Address reserved_end = 0;
+
+    if (!library) {
+        return;
+    }
+
+    if (library->base_va != 0 && library->image_size != 0) {
+        reserved_end = library->base_va + library->image_size;
+    }
+
     // Return every allocated page from a failed partial load so the global allocator and cache stay consistent.
     for (UInt index = 0; index < library->page_count; index++) {
         if (library->pages[index].phys_addr) {
             // Free the backing page owned by this cache entry; affects system page availability.
             mem_free_page(library->pages[index].phys_addr);
         }
+    }
+
+    if (reserved_end != 0 && shared_library_next_va == reserved_end) {
+        shared_library_next_va = library->base_va;               // roll back the last failed VA reservation
     }
 
     // Erase the slot metadata so later lookups treat it as unused; affects global shared library bookkeeping.
@@ -1145,34 +1452,42 @@ static void exec_spawned_program(Pointer arg) {
     (void)arg;
 
     // Snapshot the pending executable path before exec mutates task memory; affects which image the child will load.
-    strncpy(path_copy, current_task->user_program_path, sizeof(path_copy) - 1);
+    strncpy(path_copy, current_process ? current_process->program_path : "", sizeof(path_copy) - 1);
     path_copy[sizeof(path_copy) - 1] = '\0';
     // Snapshot the requested user-visible name so it survives later task metadata updates.
-    strncpy(name_copy, current_task->user_name, sizeof(name_copy) - 1);
+    strncpy(name_copy, current_process ? current_process->name : "", sizeof(name_copy) - 1);
     name_copy[sizeof(name_copy) - 1] = '\0';
     // Preserve the raw launch-argument string so the exec path does not discard shell-provided metadata.
-    strncpy(args_copy, current_task->user_launch_args, sizeof(args_copy) - 1);
+    strncpy(args_copy, current_process ? current_process->launch_args : "", sizeof(args_copy) - 1);
     args_copy[sizeof(args_copy) - 1] = '\0';
+
+    _trace("exec_spawned_program: start pid=%d path='%s' name='%s' args='%s'", current_task ? current_task->id : -1, path_copy, name_copy, args_copy);
 
     if (path_copy[0] == '\0') {
         // Abort the child immediately when no executable was staged; affects process lifetime and exit status.
+        _trace("exec_spawned_program: no path staged, exiting");
         exit_current_process(-1);
         return;
     }
 
     // Replace the kernel-thread stub with the requested user program; expects a valid packed executable at path_copy.
+    _trace("exec_spawned_program: calling exec_user_program('%s')", path_copy);
     if (exec_user_program(path_copy) != 0) {
         // Record the spawn failure for diagnosis; affects kernel logs only.
         log_error("Unable to spawn %s as %s", path_copy, name_copy);
+        _trace("exec_spawned_program: exec_user_program failed for %s", path_copy);
         // Terminate the child when exec fails so callers do not observe a half-initialized task.
         exit_current_process(-1);
     }
+    _trace("exec_spawned_program: exec_user_program succeeded for %s", path_copy);
 
     // Publish the staged child name after exec has rebuilt the task image but before returning to EL0.
     task_set_user_name(current_task, name_copy);
-    strncpy(current_task->user_launch_args, args_copy, sizeof(current_task->user_launch_args) - 1);
-    current_task->user_launch_args[sizeof(current_task->user_launch_args) - 1] = '\0';
-    current_task->user_program_path[0] = '\0';
+    if (current_process) {
+        strncpy(current_process->launch_args, args_copy, sizeof(current_process->launch_args) - 1);
+        current_process->launch_args[sizeof(current_process->launch_args) - 1] = '\0';
+        current_process->program_path[0] = '\0';
+    }
 }
 
 /**
@@ -1194,12 +1509,12 @@ static int shared_library_load_legacy(SharedLibrary* library, const char* path) 
         return -1;
     }
     // Read and validate the fixed header before allocating shared pages; expects a compatible packed DLL image.
-    if (exec_read_exact(&fd, &header, sizeof(header)) != 0 || exec_validate_header(&header) != 0) {
+    if (exec_read_exact(&fd, &header, sizeof(header)) != 0 || exec_validate_header(&header, fd.size) != 0) {
         // Close the descriptor on malformed input so no VFS handle leaks remain.
         vfs_fd_close(&fd);
         return -1;
     }
-    if (header.entry_point < USER_SHARED_LIBRARY_BASE) {
+    if (header.entry_point < USER_SHARED_LIBRARY_BASE || header.entry_point >= USER_SHARED_LIBRARY_LIMIT) {
         // Close the descriptor when the linked base falls outside the shared-library window.
         vfs_fd_close(&fd);
         return -1;
@@ -1291,11 +1606,13 @@ static int shared_library_map_task(Task* task, const SharedLibrary* library) {
         }
 
         // Map the shared physical page into this task; affects the task page tables but not the global cache contents.
-        process_map_shared_page(task,
+        if (process_map_shared_page(task,
             library->pages[index].phys_addr,
             library->pages[index].virt_addr,
             // Reuse the cached MMU attributes so each task observes the same access permissions.
-            shared_library_find_page_flags(library, library->pages[index].virt_addr));
+            shared_library_find_page_flags(library, library->pages[index].virt_addr)) != 0) {
+            return -1;
+        }
     }
 
     return 0;
@@ -1323,6 +1640,8 @@ Address load_user_shared_library(const char* path) {
     if (!task || !path || path[0] == '\0') {
         return 0;
     }
+
+    _trace("load_user_shared_library: start pid=%d path='%s'", task->id, path);
 
     // Snapshot the library path locally so later logging survives caller-side buffer reuse.
     strncpy(path_copy, path, sizeof(path_copy) - 1);
@@ -1440,7 +1759,12 @@ Address load_user_shared_library_local(const char* path, ULong size) {
         }
 
         memzero(page + VA_START, PAGE_SIZE);
-        process_map_page(task, page, base + (index * PAGE_SIZE), PE_USER_DATA);
+        if (process_map_page(task, page, base + (index * PAGE_SIZE), PE_USER_DATA) != 0) {
+            mem_free_page(page);                                 // return the page if task-local tracking cannot record it
+            shared_library_release_task_local_pages(task, base, mapped_pages);
+            preempt_enable();
+            return 0;
+        }
         mapped_pages++;
     }
 
@@ -1471,7 +1795,7 @@ Address load_user_shared_library_local(const char* path, ULong size) {
  *   Child PID on success, or `-1` when the spawn request cannot be prepared.
  */
 int spawn_user_program(const char* path, const char* name, const char* args) {
-    _trace("Spawning user program %s as %s", path ? path : "<null>", name ? name : "<null>");
+    _trace("spawn_user_program: Spawning user program %s as %s", path ? path : "<null>", name ? name : "<null>");
     int pid;
     Task* child;
 
@@ -1483,7 +1807,8 @@ int spawn_user_program(const char* path, const char* name, const char* args) {
     preempt_disable();
 
     // Clone a kernel thread that will immediately exec the requested user program; affects the global task table.
-    pid = (int)process_copy_thread(PF_KTHREAD, (Address)&exec_spawned_program, 0);
+    pid = (int)process_create_main_thread(PF_KTHREAD, (Address)&exec_spawned_program, 0);
+    _trace("spawn_user_program: process_create_main_thread returned pid=%d", pid);
     if (pid < 0) {
         // Restore scheduling when task creation fails so the caller does not leave preemption disabled.
         preempt_enable();
@@ -1497,22 +1822,28 @@ int spawn_user_program(const char* path, const char* name, const char* args) {
         return -1;
     }
 
-    memzero((Address)child->user_program_path, sizeof(child->user_program_path));
-    memzero((Address)child->user_name, sizeof(child->user_name));
-    memzero((Address)child->user_launch_args, sizeof(child->user_launch_args));
+    if (!child->process) {
+        preempt_enable();
+        return -1;
+    }
+    memzero((Address)child->process->program_path, sizeof(child->process->program_path));
+    memzero((Address)child->process->name, sizeof(child->process->name));
+    memzero((Address)child->process->launch_args, sizeof(child->process->launch_args));
 
     // Stage the executable path inside the child descriptor so its bootstrap thread knows what to exec.
-    strncpy(child->user_program_path, path, sizeof(child->user_program_path) - 1);
-    child->user_program_path[sizeof(child->user_program_path) - 1] = '\0';
+    strncpy(child->process->program_path, path, sizeof(child->process->program_path) - 1);
+    child->process->program_path[sizeof(child->process->program_path) - 1] = '\0';
     // Publish the requested short name on the child task before it starts running.
     task_set_user_name(child, name);
     if (args && args[0] != '\0') {
-        strncpy(child->user_launch_args, args, sizeof(child->user_launch_args) - 1);
-        child->user_launch_args[sizeof(child->user_launch_args) - 1] = '\0';
+        strncpy(child->process->launch_args, args, sizeof(child->process->launch_args) - 1);
+        child->process->launch_args[sizeof(child->process->launch_args) - 1] = '\0';
     }
 
     // Let the scheduler run again now that the child bootstrap metadata is fully populated.
     preempt_enable();
+
+    _trace("spawn_user_program: staged child %d program_path=%s name=%s", pid, child->process->program_path, child->process->name);
 
     return pid;
 }
@@ -1530,6 +1861,11 @@ int exec_user_program(const char* path) {
     struct FileDesc fd;
     UserExeHeader header;
     Task* task = current_task;
+    Task* staged_task;
+    TaskMemory* old_mm;
+    Address old_kernel_stack_page;
+    Address stack_page;
+    struct pt_regs* regs;
     char path_copy[128];
 
     // Snapshot the executable path for logging and error handling before VFS operations begin.
@@ -1542,8 +1878,25 @@ int exec_user_program(const char* path) {
     // Block rescheduling while the current task image is being replaced in place.
     preempt_disable();
 
+    staged_task = (Task*)kmalloc(sizeof(*staged_task));
+    old_mm = (TaskMemory*)kmalloc(sizeof(*old_mm));
+    old_kernel_stack_page = 0;
+    if (!staged_task || !old_mm) {
+        if (old_mm) {
+            kfree((Address)old_mm);
+        }
+        if (staged_task) {
+            kfree((Address)staged_task);
+        }
+        preempt_enable();
+        log_error("Unable to allocate exec staging state for %s", path_copy);
+        return -1;
+    }
+
     // Open the executable from VFS so the loader can read its header and segments.
     if (vfs_fd_open(&fd, path, O_READ) < 0) {
+        kfree((Address)old_mm);                                  // release staging snapshot storage on open failure
+        kfree((Address)staged_task);                             // release the temporary task image container
         // Restore scheduling before returning from an open failure.
         preempt_enable();
         // Log the open failure so invalid paths are visible during bring-up.
@@ -1551,9 +1904,11 @@ int exec_user_program(const char* path) {
         return -1;
     }
     // Read and validate the fixed-size header before tearing down the current user image.
-    if (exec_read_exact(&fd, &header, sizeof(header)) != 0 || exec_validate_header(&header) != 0) {
+    if (exec_read_exact(&fd, &header, sizeof(header)) != 0 || exec_validate_header(&header, fd.size) != 0) {
         // Release the descriptor on invalid input so the failed exec path does not leak VFS state.
         vfs_fd_close(&fd);
+        kfree((Address)old_mm);                                  // return the saved-mm buffer on header failure
+        kfree((Address)staged_task);                             // return the staging task buffer on header failure
         // Restore scheduling before returning control to the caller.
         preempt_enable();
         // Record that the file is not a compatible packed executable.
@@ -1561,26 +1916,29 @@ int exec_user_program(const char* path) {
         return -1;
     }
 
-    // Drop the previous user mappings and register state before constructing the new image.
-    process_reset_user_space(task);
-    task->flags = 0;
-    task->cpu_context.x19 = 0;
-    task->cpu_context.x20 = 0;
-    task->cpu_context.x21 = 0;
-    task->wakeup_tick = 0;
+    exec_init_staged_task(staged_task, task);                    // build the new user image in a temporary task context
 
-    // Allocate one stack page for the fresh image; affects physical page availability.
-    Address stack_page = mem_alloc_page();
+    // Allocate one stack page for the staged image; affects physical page availability only after commit.
+    stack_page = mem_alloc_page();
     if (!stack_page) {
         // Close the executable before aborting the load due to memory pressure.
         vfs_fd_close(&fd);
+        kfree((Address)old_mm);                                  // release the old-mm snapshot buffer
+        kfree((Address)staged_task);                             // release the temporary task image container
         // Re-enable scheduling because exec will no longer touch shared task state on this path.
         preempt_enable();
         return -1;
     }
 
     // Give the new image a single page stack at the fixed top-of-user-space stack address.
-    process_map_page(task, stack_page, (Address)(VA_USER_STACK - PAGE_SIZE), PE_USER_DATA);
+    if (process_map_page(staged_task, stack_page, (Address)(VA_USER_STACK - PAGE_SIZE), PE_USER_DATA) != 0) {
+        mem_free_page(stack_page);                               // return the page if the staged task cannot map or track it
+        vfs_fd_close(&fd);
+        kfree((Address)old_mm);                                  // release the old-mm snapshot buffer
+        kfree((Address)staged_task);                             // release the temporary task image container
+        preempt_enable();
+        return -1;
+    }
 
     // show trace log where we place the application code .text in physical memory address and its virtual memory address
     // it should be 0x3000 virtual address of the application code .text and 0x3000 physical address of the application code .text because we use identity mapping for the user space in this kernel
@@ -1591,27 +1949,41 @@ int exec_user_program(const char* path) {
 
     // Load every declared program segment into the freshly reset user address space.
     for (UInt index = 0; index < header.segment_count; index++) {
-        if (exec_load_segment(task, &fd, &header.segments[index]) != 0) {
+        if (exec_load_segment(staged_task, &fd, &header.segments[index]) != 0) {
             // Close the descriptor before unwinding a segment load failure.
             vfs_fd_close(&fd);
             // Restore scheduling because the in-place exec replacement is being abandoned.
+            exec_release_task_image(task, &staged_task->mm, staged_task->kernel_stack_page); // free the partially staged image
+            kfree((Address)old_mm);                              // release the saved-mm buffer after a staged load failure
+            kfree((Address)staged_task);                         // release the temporary task image container
             preempt_enable();
             // Identify which segment failed so malformed images are easier to diagnose.
             log_error("Failed to load executable segment %u for %s", index, path_copy);
             return -1;
         }
 
-        exec_trace_loaded_segment(task, path_copy, index, &header.segments[index]);
+        exec_trace_loaded_segment(staged_task, path_copy, index, &header.segments[index]);
+        exec_sync_segment_icache(staged_task, &header.segments[index]);      // make newly copied EL0 code visible to instruction fetch
     }
 
     // trace what we just did
     _trace("Executable %s loaded. Entry 0x%lX", path_copy, header.entry_point);
-    exec_trace_entry_point(task, path_copy, header.entry_point);
+    exec_trace_entry_point(staged_task, path_copy, header.entry_point);
+
+    *old_mm = task->mm;                                           // snapshot the old address-space bookkeeping before the commit
+    old_kernel_stack_page = task->kernel_stack_page;
+
+    task->mm = staged_task->mm;                                  // publish the fully built image in one step
+    task->flags = 0;
+    task->cpu_context.x19 = 0;
+    task->cpu_context.x20 = 0;
+    task->cpu_context.x21 = 0;
+    task->wakeup_tick = 0;
 
 
     // Seed the EL0 register frame so the scheduler returns directly into the new program entry point.
     // Fetch the saved register frame for this task; affects which EL0 CPU state is rewritten.
-    struct pt_regs* regs = task_pt_regs(task);
+    regs = task_pt_regs(task);
     regs->pstate = PSR_MODE_EL0t;
     regs->pc = header.entry_point;
     regs->sp = VA_USER_STACK;
@@ -1619,8 +1991,12 @@ int exec_user_program(const char* path) {
     // Activate the task page tables now that the replacement image is fully loaded.
     // Install the updated page tables on the current CPU so the new user mappings become live immediately.
     set_pgd(task->mm.pgd);
+    exec_release_task_image(task, old_mm, old_kernel_stack_page); // free the old image after commit
+    kfree((Address)old_mm);                                      // release the saved-mm snapshot buffer after cleanup
+    kfree((Address)staged_task);                                 // release the staging task container after publish
     // Close the executable because all required bytes are resident in memory now.
     vfs_fd_close(&fd);
+    log_info("Exec committed for %s: pgd=0x%lX pc=0x%lX sp=0x%lX", path_copy, task->mm.pgd, regs->pc, regs->sp);
     // Re-enable scheduling after the task image and MMU state are consistent again.
     preempt_enable();
 

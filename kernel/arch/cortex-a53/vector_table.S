@@ -134,9 +134,10 @@ el0_svc:
 	adr		syscall_table_ptr, sys_call_table					// load syscall table pointer
 	mov		syscall_num, x8
 
-	bl		enable_irq
+	// Keep IRQs masked while executing the syscall body on this task's kernel stack.
 	cmp     syscall_num, #SYS_NUM_OF_ENTRIES                    // check upper syscall limit
 	b.hs	ni_sys
+	bl      enable_irq
 
 	ldr		x16, [syscall_table_ptr, syscall_num, lsl #3]		// address in the syscall table
 	blr		x16													// call sys_* routine

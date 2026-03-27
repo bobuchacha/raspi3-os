@@ -86,9 +86,12 @@ delay:
 //--------------------------------------------------------------
 .globl memzero
 memzero:
-    str     xzr, [x0], #8
-    subs    x1, x1, #8
-    b.gt    memzero
+	cbz     x1, 2f
+1:
+	strb    wzr, [x0], #1
+	subs    x1, x1, #1
+	b.ne    1b
+2:
     ret
 
 //--------------------------------------------------------------
@@ -96,10 +99,13 @@ memzero:
 //--------------------------------------------------------------
 .globl memcpy
 memcpy:
-    ldr     x3, [x1], #8
-    str     x3, [x0], #8
-    subs    x2, x2, #8
-    b.gt    memcpy
+	cbz     x2, 2f
+1:
+	ldrb    w3, [x1], #1
+	strb    w3, [x0], #1
+	subs    x2, x2, #1
+	b.ne    1b
+2:
     ret
 
 .globl get_sp_el0

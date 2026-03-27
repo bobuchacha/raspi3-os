@@ -1,0 +1,11 @@
+#ifndef ROS_LOADER_PERIPHERAL_TIMER_H
+#define ROS_LOADER_PERIPHERAL_TIMER_H
+
+#include "base.h"
+
+#define TIMER_CS (PBASE + 0x00003000)
+#define TIMER_CLO (PBASE + 0x00003004)
+#define TIMER_CHI (PBASE + 0x00003008)
+#define TIMER_C1 (PBASE + 0x00003010)
+
+#endif

@@ -1,5 +1,6 @@
 #include "device.h"
 #include "device/sd.h"
+#include "boot-handoff.h"
 #include "graphics.h"
 #include "hal/hal.h"
 #include "irq.h"
@@ -17,9 +18,21 @@ static const struct BlockDeviceDriver sdcard_driver = {
     .block_write = &sd_block_write,
 };
 
+static RosBootHandoff* device_boot_handoff(void)
+{
+    return (RosBootHandoff*)mem_phys_to_virt((PhysAddr)ROS_BOOT_HANDOFF_PHYS_ADDR);
+}
+
 void device_init()
 {
-    uart0_init();
+    RosBootHandoff* handoff = device_boot_handoff();
+    Bool uart0_ready = ros_boot_handoff_is_valid(handoff) && (handoff->flags & ROS_BOOT_HANDOFF_FLAG_UART0_READY);
+    Bool sd_ready = ros_boot_handoff_is_valid(handoff) && (handoff->flags & ROS_BOOT_HANDOFF_FLAG_SD_READY);
+
+    if (!uart0_ready)
+    {
+        uart0_init();
+    }
     init_printf(put_buffer, uart0_putc);
 
     _trace("Initializing IRQ...\n");
@@ -34,7 +47,7 @@ void device_init()
     enable_irq();
 
     _trace("Initialize SD Card");
-    if (sd_init() != SD_OK)
+    if (sd_ready ? (sd_try_import_handoff(handoff) != SD_OK) : (sd_init() != SD_OK))
     {
         log_error("SD card initialization error!\n");
     }

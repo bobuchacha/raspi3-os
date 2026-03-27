@@ -23,6 +23,7 @@ PLATFORM_CPPFLAGS += -DROS_QEMU_USB_ENABLED=$(QEMU_USB)
 
 BUILD_DIR = output
 SRC_DIR = kernel
+LOADER_DIR = kernel-loader
 USR_DIR = applications
 USR_INCLUDE_DIR = $(USR_DIR)/include
 USR_COMMON_DIR = $(USR_DIR)/common
@@ -33,9 +34,16 @@ INCLUDE_DIR = $(SRC_DIR)/include
 OBJS_DIR = $(BUILD_DIR)/objs
 KERNEL_ELF = $(BUILD_DIR)/kernel8.elf
 KERNEL_IMG = $(BUILD_DIR)/kernel8.img
+MAIN_KERNEL_ELF = $(BUILD_DIR)/roskrnl.elf
+MAIN_KERNEL_IMAGE = $(BUILD_DIR)/roskrnl
+MAIN_KERNEL_LINKER_SCRIPT = $(SRC_DIR)/link.ld
+LOADER_LINKER_SCRIPT = $(LOADER_DIR)/link.ld
+ROSKRNL_NAME = roskrnl
 
-COPS = -g -Werror -nostdlib -nostartfiles -ffreestanding -fno-omit-frame-pointer -I$(INCLUDE_DIR) -I$(SRC_DIR) -mgeneral-regs-only $(PLATFORM_CPPFLAGS)
-ASMOPS = -g -I$(INCLUDE_DIR) $(PLATFORM_CPPFLAGS)
+COPS = -g -Werror -nostdlib -nostartfiles -ffreestanding -fno-omit-frame-pointer -I. -I$(INCLUDE_DIR) -I$(SRC_DIR) -mgeneral-regs-only $(PLATFORM_CPPFLAGS)
+ASMOPS = -g -I. -I$(INCLUDE_DIR) $(PLATFORM_CPPFLAGS)
+LOADER_COPS = -g -Werror -nostdlib -nostartfiles -ffreestanding -fno-omit-frame-pointer -I. -I$(LOADER_DIR)/include -I$(LOADER_DIR) -mgeneral-regs-only $(PLATFORM_CPPFLAGS)
+LOADER_ASMOPS = -g -I. -I$(LOADER_DIR)/include -I$(LOADER_DIR) $(PLATFORM_CPPFLAGS)
 USER_COPS = -g -Werror -nostdlib -nostartfiles -ffreestanding -fno-omit-frame-pointer -I$(USR_INCLUDE_DIR) -mgeneral-regs-only
 USER_CXXOPS = $(USER_COPS) -fno-exceptions -fno-rtti -fno-threadsafe-statics -fno-use-cxa-atexit
 USER_ASMOPS = -g -I$(USR_INCLUDE_DIR)
@@ -63,6 +71,19 @@ $(OBJS_DIR)/%_s.o: $(SRC_DIR)/%.S
 	@echo "-> $@..."
 	@$(ARMGNU)-gcc $(ASMOPS) -MMD -c $< -o $@
 
+$(OBJS_DIR)/kernel-loader/%_c.o: $(LOADER_DIR)/%.c
+	@echo "-> $@..."
+	@mkdir -p $(@D)
+	@$(ARMGNU)-gcc $(LOADER_COPS) -MMD -c $< -o $@
+$(OBJS_DIR)/kernel-loader/%_cpp.o: $(LOADER_DIR)/%.cpp
+	@echo "-> $@..."
+	@mkdir -p $(@D)
+	@$(ARMGNU)-g++ $(LOADER_COPS) -MMD -c $< -o $@
+$(OBJS_DIR)/kernel-loader/%_s.o: $(LOADER_DIR)/%.S
+	@echo "-> $@..."
+	@mkdir -p $(@D)
+	@$(ARMGNU)-gcc $(LOADER_ASMOPS) -MMD -c $< -o $@
+
 FONT_PSF_OBJ = $(OBJS_DIR)/font_psf.o
 FONT_PSF_SRC = build/screenfont/font.psf
 FONT_SFN_OBJ = $(OBJS_DIR)/font_sfn.o
@@ -87,6 +108,19 @@ OBJ_FILES += $(FONT_PSF_OBJ)
 DEP_FILES = $(OBJ_FILES:%.o=%.d)
 -include $(DEP_FILES)
 
+LOADER_SOURCE_FIND = find $(LOADER_DIR) -type d -name '_*' -prune -o -type f
+LOADER_C_FILES = $(shell $(LOADER_SOURCE_FIND) -name '*.c' -print)
+LOADER_CPP_FILES = $(shell $(LOADER_SOURCE_FIND) -name '*.cpp' -print)
+LOADER_ASM_FILES = $(shell $(LOADER_SOURCE_FIND) -name '*.S' -print)
+LOADER_OBJ_FILES = $(LOADER_C_FILES:$(LOADER_DIR)/%.c=$(OBJS_DIR)/kernel-loader/%_c.o)
+LOADER_OBJ_FILES += $(LOADER_CPP_FILES:$(LOADER_DIR)/%.cpp=$(OBJS_DIR)/kernel-loader/%_cpp.o)
+LOADER_OBJ_FILES += $(LOADER_ASM_FILES:$(LOADER_DIR)/%.S=$(OBJS_DIR)/kernel-loader/%_s.o)
+LOADER_DEP_FILES = $(LOADER_OBJ_FILES:%.o=%.d)
+-include $(LOADER_DEP_FILES)
+
+BOOTLOADER_OBJ_FILES = $(LOADER_OBJ_FILES)
+MAIN_KERNEL_OBJ_FILES = $(filter-out $(OBJS_DIR)/arch/cortex-a53/boot/% $(OBJS_DIR)/arch/cortex-a53/secondary_entry_s.o,$(OBJ_FILES))
+
 
 #######################################################################################################
 USER_BUILD_DIR = $(BUILD_DIR)/applications
@@ -107,6 +141,7 @@ USER_DLL_LINKER_SCRIPT = $(USR_COMMON_DIR)/dll.ld
 USER_PACKER = python3 tools/pack_user_exe.py
 USER_DLL_PACKER = python3 tools/pack_user_dll.py
 USER_MODULE_PACKER = python3 tools/pack_kernel_module.py
+MAIN_KERNEL_PACKER = python3 tools/pack_roskrnl.py
 USER_TEMPLATE_DIR = $(USR_DIR)/_templates
 USER_SOURCE_FIND = find $(USR_DIR) -type d -name '_*' -prune -o -type f
 .PHONY: all clean applications applications-vfs user user-vfs new-app new-dll new-sys new-app-pair new-user-app new-user-dll new-user-sys new-user-pair fat32-mount fat32-umount fat32-list fat32-read fat32-hexdump run debug asm dump diasm gdb kernel8.img
@@ -407,44 +442,52 @@ new-user-pair:
 	echo "Created $(USR_INCLUDE_DIR)/app/$(DLL_NAME).h"; \
 	echo "Created $(USR_DLLS_DIR)/$(DLL_NAME)/main.c"
 
-applications-vfs: applications
+applications-vfs: applications $(MAIN_KERNEL_IMAGE)
 	@set -e; \
-	if mount | grep -q " on $(USER_VFS_MOUNT_DIR_ABS) "; then umount $(USER_VFS_MOUNT_DIR_ABS) >/dev/null 2>&1 || true; fi; \
-	if [ -f $(USER_VFS_DEV_FILE) ]; then hdiutil detach "$$(cat $(USER_VFS_DEV_FILE))" >/dev/null 2>&1 || true; rm -f $(USER_VFS_DEV_FILE); fi; \
+	if mount | grep -q " on $(USER_VFS_MOUNT_DIR_ABS) "; then umount -f $(USER_VFS_MOUNT_DIR_ABS) >/dev/null 2>&1 || true; fi; \
+	if [ -f $(USER_VFS_DEV_FILE) ]; then hdiutil detach -force "$$(cat $(USER_VFS_DEV_FILE))" >/dev/null 2>&1 || true; rm -f $(USER_VFS_DEV_FILE); fi; \
+	STALE_DEVS=$$(hdiutil info | awk '/image-path/ && $$NF == "'"$(PWD)/fat32.img"'" { found=1; next } found && /^\/dev\// { print $$1; found=0 }'); \
+	for STALE_DEV in $$STALE_DEVS; do hdiutil detach -force "$$STALE_DEV" >/dev/null 2>&1 || true; done; \
 	mkdir -p $(USER_VFS_MOUNT_DIR_ABS); \
 	DEV=$$($(USER_VFS_ATTACH) | awk 'NR==1 { print $$1 }'); \
-	trap 'umount $(USER_VFS_MOUNT_DIR_ABS) >/dev/null 2>&1 || true; hdiutil detach "'"'$$DEV'"'" >/dev/null 2>&1 || true' EXIT; \
+	if [ -z "$$DEV" ]; then echo "Failed to attach fat32.img"; exit 1; fi; \
+	trap 'umount -f $(USER_VFS_MOUNT_DIR_ABS) >/dev/null 2>&1 || true; hdiutil detach -force "'"'$$DEV'"'" >/dev/null 2>&1 || true' EXIT; \
 	mount -t msdos "$$DEV" $(USER_VFS_MOUNT_DIR_ABS); \
 	mkdir -p $(USER_VFS_BIN_DIR); \
 	mkdir -p $(USER_VFS_LIB_DIR); \
 	mkdir -p $(USER_VFS_MOUNT_DIR)/system; \
+	rm -f $(USER_VFS_MOUNT_DIR)/$(ROSKRNL_NAME); \
 	rm -f $(USER_VFS_MOUNT_DIR)/user.exe; \
 	find $(USER_VFS_BIN_DIR) -maxdepth 1 -type f \( -name '*.elf' -o -name '*.exe' \) -delete; \
 	find $(USER_VFS_LIB_DIR) -maxdepth 1 -type f -name '*.dll' -delete; \
 	find $(USER_VFS_MOUNT_DIR)/system -maxdepth 1 -type f -name '*.sys' -delete; \
+	cp "$(MAIN_KERNEL_IMAGE)" $(USER_VFS_MOUNT_DIR)/$(ROSKRNL_NAME); \
 	for exe in $(USER_PROGRAM_EXES); do cp "$${exe}" $(USER_VFS_BIN_DIR)/$$(basename "$$exe"); done; \
 	for dll in $(USER_DLLS); do cp "$${dll}" $(USER_VFS_LIB_DIR)/$$(basename "$$dll"); done; \
 	for sys in $(USER_SYS_RUNTIME_PACKED); do cp "$${sys}" $(USER_VFS_MOUNT_DIR)/system/$$(basename "$$sys"); done; \
 	echo "FAT32 image contents after sync:"; \
 	find $(USER_VFS_MOUNT_DIR_ABS) -mindepth 1 -maxdepth 2 -print | sed 's#^$(USER_VFS_MOUNT_DIR_ABS)##' | LC_ALL=C sort; \
-	umount $(USER_VFS_MOUNT_DIR_ABS); \
-	hdiutil detach "$$DEV" >/dev/null; \
+	umount -f $(USER_VFS_MOUNT_DIR_ABS); \
+	hdiutil detach -force "$$DEV" >/dev/null; \
 	trap - EXIT
 
 user-vfs: applications-vfs
 
 fat32-list:
 	@set -e; \
-	if mount | grep -q " on $(USER_VFS_MOUNT_DIR_ABS) "; then umount $(USER_VFS_MOUNT_DIR_ABS) >/dev/null 2>&1 || true; fi; \
-	if [ -f $(USER_VFS_DEV_FILE) ]; then hdiutil detach "$$(cat $(USER_VFS_DEV_FILE))" >/dev/null 2>&1 || true; rm -f $(USER_VFS_DEV_FILE); fi; \
+	if mount | grep -q " on $(USER_VFS_MOUNT_DIR_ABS) "; then umount -f $(USER_VFS_MOUNT_DIR_ABS) >/dev/null 2>&1 || true; fi; \
+	if [ -f $(USER_VFS_DEV_FILE) ]; then hdiutil detach -force "$$(cat $(USER_VFS_DEV_FILE))" >/dev/null 2>&1 || true; rm -f $(USER_VFS_DEV_FILE); fi; \
+	STALE_DEVS=$$(hdiutil info | awk '/image-path/ && $$NF == "'"$(PWD)/fat32.img"'" { found=1; next } found && /^\/dev\// { print $$1; found=0 }'); \
+	for STALE_DEV in $$STALE_DEVS; do hdiutil detach -force "$$STALE_DEV" >/dev/null 2>&1 || true; done; \
 	mkdir -p $(USER_VFS_MOUNT_DIR_ABS); \
 	DEV=$$($(USER_VFS_ATTACH) | awk 'NR==1 { print $$1 }'); \
-	trap 'umount $(USER_VFS_MOUNT_DIR_ABS) >/dev/null 2>&1 || true; hdiutil detach "'"'$$DEV'"'" >/dev/null 2>&1 || true' EXIT; \
+	if [ -z "$$DEV" ]; then echo "Failed to attach fat32.img"; exit 1; fi; \
+	trap 'umount -f $(USER_VFS_MOUNT_DIR_ABS) >/dev/null 2>&1 || true; hdiutil detach -force "'"'$$DEV'"'" >/dev/null 2>&1 || true' EXIT; \
 	mount -t msdos "$$DEV" $(USER_VFS_MOUNT_DIR_ABS); \
 	echo "FAT32 image contents:"; \
 	find $(USER_VFS_MOUNT_DIR_ABS) -mindepth 1 -maxdepth 2 -print | sed 's#^$(USER_VFS_MOUNT_DIR_ABS)##' | LC_ALL=C sort; \
-	umount $(USER_VFS_MOUNT_DIR_ABS); \
-	hdiutil detach "$$DEV" >/dev/null; \
+	umount -f $(USER_VFS_MOUNT_DIR_ABS); \
+	hdiutil detach -force "$$DEV" >/dev/null; \
 	trap - EXIT
 
 fat32-mount:
@@ -454,7 +497,11 @@ fat32-mount:
 		echo "fat32.img is already mounted at $(USER_VFS_MOUNT_DIR_ABS)"; \
 		exit 0; \
 	fi; \
+	if [ -f $(USER_VFS_DEV_FILE) ]; then hdiutil detach -force "$$(cat $(USER_VFS_DEV_FILE))" >/dev/null 2>&1 || true; rm -f $(USER_VFS_DEV_FILE); fi; \
+	STALE_DEVS=$$(hdiutil info | awk '/image-path/ && $$NF == "'"$(PWD)/fat32.img"'" { found=1; next } found && /^\/dev\// { print $$1; found=0 }'); \
+	for STALE_DEV in $$STALE_DEVS; do hdiutil detach -force "$$STALE_DEV" >/dev/null 2>&1 || true; done; \
 	DEV=$$($(USER_VFS_ATTACH) | awk 'NR==1 { print $$1 }'); \
+	if [ -z "$$DEV" ]; then echo "Failed to attach fat32.img"; exit 1; fi; \
 	echo "$$DEV" > $(USER_VFS_DEV_FILE); \
 	mount -t msdos "$$DEV" $(USER_VFS_MOUNT_DIR_ABS); \
 	echo "Mounted fat32.img at $(USER_VFS_MOUNT_DIR_ABS) using $$DEV"
@@ -462,16 +509,18 @@ fat32-mount:
 fat32-umount:
 	@set -e; \
 	if mount | grep -q " on $(USER_VFS_MOUNT_DIR_ABS) "; then \
-		umount $(USER_VFS_MOUNT_DIR_ABS); \
+		umount -f $(USER_VFS_MOUNT_DIR_ABS) >/dev/null 2>&1 || true; \
 	fi; \
 	if [ -f $(USER_VFS_DEV_FILE) ]; then \
 		DEV=$$(cat $(USER_VFS_DEV_FILE)); \
-		hdiutil detach "$$DEV" >/dev/null 2>&1 || true; \
+		hdiutil detach -force "$$DEV" >/dev/null 2>&1 || true; \
 		rm -f $(USER_VFS_DEV_FILE); \
 		echo "Detached $$DEV"; \
 	else \
 		echo "No recorded FAT32 device to detach"; \
-	fi
+	fi; \
+	STALE_DEVS=$$(hdiutil info | awk '/image-path/ && $$NF == "'"$(PWD)/fat32.img"'" { found=1; next } found && /^\/dev\// { print $$1; found=0 }'); \
+	for STALE_DEV in $$STALE_DEVS; do hdiutil detach -force "$$STALE_DEV" >/dev/null 2>&1 || true; echo "Detached $$STALE_DEV"; done
 
 fat32-read:
 	@set -e; \
@@ -530,9 +579,17 @@ populate_disk: mount_disk
 #######################################################################################################
 
 
-$(KERNEL_IMG): $(SRC_DIR)/link.ld $(OBJ_FILES)
+$(MAIN_KERNEL_ELF): $(MAIN_KERNEL_LINKER_SCRIPT) $(MAIN_KERNEL_OBJ_FILES)
 	@mkdir -p $(BUILD_DIR)
-	@$(ARMGNU)-ld -nostdlib -T $(SRC_DIR)/link.ld -o $(KERNEL_ELF) $(OBJ_FILES) -g
+	@$(ARMGNU)-ld -nostdlib -T $(MAIN_KERNEL_LINKER_SCRIPT) -o $(MAIN_KERNEL_ELF) $(MAIN_KERNEL_OBJ_FILES) -g
+
+$(MAIN_KERNEL_IMAGE): $(MAIN_KERNEL_ELF) tools/pack_roskrnl.py
+	@mkdir -p $(BUILD_DIR)
+	@$(MAIN_KERNEL_PACKER) --input $(MAIN_KERNEL_ELF) --output $(MAIN_KERNEL_IMAGE)
+
+$(KERNEL_IMG): $(LOADER_LINKER_SCRIPT) $(BOOTLOADER_OBJ_FILES)
+	@mkdir -p $(BUILD_DIR)
+	@$(ARMGNU)-ld -nostdlib -T $(LOADER_LINKER_SCRIPT) -o $(KERNEL_ELF) $(BOOTLOADER_OBJ_FILES) -g
 	@$(ARMGNU)-objcopy $(KERNEL_ELF) -O binary $(KERNEL_IMG)
 
 kernel8.img: applications-vfs $(KERNEL_IMG)
@@ -541,23 +598,23 @@ dump: all
 	@$(ARMGNU)-objdump --all-headers $(KERNEL_ELF)
 diasm: all
 	@$(ARMGNU)-objdump --all-headers $(KERNEL_ELF)
-run: QEMU_GUI=1
-run: all
+run: QEMU_GUI=0
+run: kernel8.img
 	@echo "Running: --------------------------------------------------------------------------------- "
-	@$(QEMU) -M $(QEMU_MACHINE) -smp $(QEMU_CPUS) -kernel $(KERNEL_IMG) -serial stdio -s $(QEMU_DISPLAY_ARGS) $(QEMU_USB_ARGS) -drive file=fat32.img,if=sd,format=raw
+	@$(QEMU) -M $(QEMU_MACHINE) -smp $(QEMU_CPUS) -kernel $(KERNEL_IMG) -serial stdio $(QEMU_DISPLAY_ARGS) $(QEMU_USB_ARGS) -drive file=fat32.img,if=sd,format=raw
 run-gfx: QEMU_GUI=1
-run-gfx: all
+run-gfx: kernel8.img
 	@echo "Running with framebuffer display --------------------------------------------------------- "
-	@$(QEMU) -M $(QEMU_MACHINE) -smp $(QEMU_CPUS) -kernel $(KERNEL_IMG) -serial stdio -s -display default $(QEMU_USB_ARGS) -drive file=fat32.img,if=sd,format=raw
-run-headless: all
+	@$(QEMU) -M $(QEMU_MACHINE) -smp $(QEMU_CPUS) -kernel $(KERNEL_IMG) -serial stdio -display default $(QEMU_USB_ARGS) -drive file=fat32.img,if=sd,format=raw
+run-headless: kernel8.img
 	@echo "Running headless ------------------------------------------------------------------------- "
-	@$(QEMU) -M $(QEMU_MACHINE) -smp $(QEMU_CPUS) -kernel $(KERNEL_IMG) -serial stdio -s -display none -drive file=fat32.img,if=sd,format=raw
-debug: all
+	@$(QEMU) -M $(QEMU_MACHINE) -smp $(QEMU_CPUS) -kernel $(KERNEL_IMG) -serial stdio -display none -drive file=fat32.img,if=sd,format=raw
+debug: kernel8.img
 	@echo "QEMU starting. Remember to start gdb------------------------------------------------------ "
 	# @$(QEMU) -M $(QEMU_MACHINE) -kernel $(KERNEL_IMG) -serial null -serial stdio -display none -s -S -d trace:bcm2835_systmr*
 	@$(QEMU) -M $(QEMU_MACHINE) -smp $(QEMU_CPUS) -kernel $(KERNEL_IMG) -serial stdio -display none -s -S
 
-asm: all
+asm: kernel8.img
 	@echo "Running: --------------------------------------------------------------------------------- "
 	@$(QEMU) -M $(QEMU_MACHINE) -smp $(QEMU_CPUS) -kernel $(KERNEL_IMG) -serial null -d in_asm -monitor stdio -nographic -S -gdb tcp::1234
 gdb:

@@ -9,10 +9,17 @@
 #include "user-exe.h"
 
 typedef enum TASK_STATES {
-    TASK_RUNNING = 1,
-    TASK_SLEEPING = 2,
-    TASK_ZOMBIE = 0
+    TASK_ZOMBIE = 0,
+    TASK_READY = 1,
+    TASK_RUNNING = 2,
+    TASK_SLEEPING = 3,
+    TASK_BLOCKED = 4
 } TaskState;
+
+typedef enum PROCESS_STATES {
+    PROCESS_ZOMBIE = 0,
+    PROCESS_ACTIVE = 1
+} ProcessState;
 
 enum TASK_PRIORITY {
     PRIORITY_NORMAL = 1,
@@ -131,42 +138,52 @@ typedef struct pt_regs {
     unsigned long pstate;
 } TaskRegisters;
 
+struct task_struct;
+
+typedef struct process_struct {
+    long id;
+    long parent_process_id;
+    ProcessState state;
+    long main_thread_id;
+    long thread_count;
+    struct task_struct* main_thread;
+    char name[TASK_USER_NAME_MAX];
+    char program_path[TASK_USER_PROGRAM_PATH_MAX];
+    char launch_args[TASK_USER_LAUNCH_ARGS_MAX];
+} Process;
+
 /**
  * Full task descriptor used by the scheduler and process subsystem.
  *
  * Fields:
  *   cpu_context: Callee-saved kernel context used during task switches.
- *   id: Scheduler-visible task identifier.
- *   parent_pid: Parent task id used for process-tree views.
- *   state: Runnable, sleeping, or zombie state.
+ *   id: Scheduler-visible thread identifier.
+ *   state: Ready, running, sleeping, blocked, or zombie state.
  *   counter: Remaining timeslice budget.
  *   priority: Base scheduling weight.
  *   cpu_affinity: Logical CPU that owns and schedules this task.
  *   preempt_count: Nesting level of preemption disable sections.
  *   flags: Kernel-thread vs user-thread flags.
- *   mm: Memory ownership and mapping metadata.
- *   name: Human-readable task label.
- *   user_name: Small per-task user-visible name used by spawned applications.
- *   user_program_path: Spawned executable path consumed by the kernel bootstrap thread.
- *   user_launch_args: Raw launch-argument string staged by the shell or parent task.
+ *   process: Owning process box that groups this thread with siblings.
+ *   mm: Per-process memory ownership currently carried by the main thread during phase 1.
+ *   name: Human-readable thread label.
+ *   thread_name: Small per-thread visible name.
  *   wakeup_tick: Scheduler tick when a sleeping task becomes runnable again.
  */
 typedef struct task_struct {
     CPUContext cpu_context;
     long id;
-    long parent_pid;
     TaskState state;
     long counter;
     long priority;
     unsigned int cpu_affinity;
     long preempt_count;
     Flags flags;
+    Process* process;
     TaskMemory mm;
     Address kernel_stack_page;
     Buffer name;
-    char user_name[TASK_USER_NAME_MAX];
-    char user_program_path[TASK_USER_PROGRAM_PATH_MAX];
-    char user_launch_args[TASK_USER_LAUNCH_ARGS_MAX];
+    char thread_name[TASK_USER_NAME_MAX];
     unsigned long wakeup_tick;
 } Task;
 
@@ -176,6 +193,7 @@ typedef struct task_struct {
 #define THREAD_SIZE 4096
 #define NR_CPUS 4
 #define NR_TASKS 64
+#define NR_PROCESSES NR_TASKS
 #define FIRST_TASK tasks[0]
 #define LAST_TASK tasks[nr_tasks - 1]
 #define PF_KTHREAD 0x00000002
@@ -195,8 +213,11 @@ typedef struct task_struct {
    * Let these variable expose everywhere through out our kernel code
    */
 extern struct task_struct* current_tasks[NR_CPUS];
+extern int current_task_ids[NR_CPUS];
 extern struct task_struct* tasks[NR_TASKS]; // max support running task
 extern int nr_tasks;                        // number of running tasks
+extern Process* processes[NR_PROCESSES];
+extern int nr_processes;
 
 /**
  * Return the logical CPU index derived from MPIDR_EL1.
@@ -206,10 +227,15 @@ extern int nr_tasks;                        // number of running tasks
  */
 static inline unsigned int task_cpu_index(void) {
     unsigned long mpidr;
+    unsigned int cpu;
 
     // Read MPIDR_EL1 so task state can be addressed by CPU index.
     asm volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
-    return (unsigned int)(mpidr & 0xFFUL);
+    cpu = (unsigned int)(mpidr & 0xFFUL);
+    if (cpu >= NR_CPUS) {
+        cpu = 0;
+    }
+    return cpu;
 }
 
 /**
@@ -225,6 +251,11 @@ static inline struct task_struct** current_task_slot(void) {
 // Expose `current_task` as a per-CPU lvalue so existing C code can keep
 // using the old identifier while reading and writing CPU-local state.
 #define current_task (*current_task_slot())
+#define current_process ((current_task) ? (current_task)->process : 0)
+
+static inline long task_process_id(const struct task_struct* task) {
+    return (task && task->process) ? task->process->id : -1;
+}
 
 extern void init_schedler(void);
 
@@ -241,24 +272,36 @@ extern void preempt_disable(void);
 extern void preempt_enable(void);
 
 extern void cpu_switch_to(struct task_struct* prev, struct task_struct* next);
+extern void scheduler_lock_acquire(void);
+extern void scheduler_lock_release(void);
 
 int copy_process(Flags clone_flags, unsigned long fn, unsigned long arg, unsigned long stack);
 
-#define INIT_TASK                                                                                            \
+#define INIT_PROCESS                                                                                         \
+    /* id */ 0,                                                                                             \
+    /* parent_process_id */ 0,                                                                              \
+    /* state */ PROCESS_ACTIVE,                                                                             \
+    /* main_thread_id */ 0,                                                                                 \
+    /* thread_count */ 1,                                                                                   \
+    /* main_thread */ 0,                                                                                    \
+    /* name */ "kernel",                                                                                    \
+    /* program_path */ {0},                                                                                 \
+    /* launch_args */ {0}
+
+#define INIT_TASK(PROCESS_PTR)                                                                               \
     /*cpu_context*/ {{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},                                                \
                      /* id */ 0,                                                                             \
-                     /* parent_pid */ 0,                                                                     \
                      /* state */ TASK_RUNNING,                                                               \
                      0,                                                                                      \
                      1,                                                                                      \
                      0,                                                                                      \
                      0,                                                                                      \
                      PF_KTHREAD,                                                                             \
+                     /* process */ PROCESS_PTR,                                                              \
                      /* mm */ {0, 0, {0}, 0, {0}, USER_HEAP_BASE, {0}, USER_SHARED_LIBRARY_LOCAL_BASE, {0}}, \
                      /* kernel_stack_page */ 0,                                                              \
                      /* name */ "KERNEL IDLE",                                                               \
-                     /* user_name */ {0},                                                                    \
-                     /* user_program_path */ {0},                                                            \
+                     /* thread_name */ {0},                                                                  \
                      /* wakeup_tick */ 0} // this is our kernel task
 
 /**
@@ -330,6 +373,9 @@ int create_user_process(Address program_addr, ULong program_size);
  *   New PID on success, or `-1` when task creation fails.
  */
 ulong process_copy_thread(Flags flags, Address program_addr, Pointer arg);
+ulong process_create_main_thread(Flags flags, Address program_addr, Pointer arg);
+Process* process_lookup(long pid);
+Task* process_main_thread(long pid);
 
 /**
  * Drop all user mappings and per-task heap metadata before loading a new image.
