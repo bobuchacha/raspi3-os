@@ -1,9 +1,23 @@
+# Default macOS/Linux toolchain path (override in environment as needed)
 ARMGNU ?= /Applications/ArmGNUToolchain/12.3.Rel1/aarch64-none-elf/bin/aarch64-none-elf
 #ARMGNU ?= /Applications/ArmGNUToolchain/13.2.Rel1/aarch64-none-elf/bin/aarch64-none-elf
 #ARMGNU ?= E:\Nextcloud\raspo3b-os/toolchain/Windows/arm-gnu-toolchain-13.2.Rel1-mingw-w64-i686-aarch64-none-elf/bin/aarch64-none-elf
 #ARMGNU ?= aarch64-none-elf
+# QEMU default. On Windows, prefer explicit .exe when running native cmd shells.
 QEMU ?= qemu-system-aarch64
-# QEMU = d:\qemu\qemu-system-aarch64.exe
+
+# Basic Windows detection (GNU Make on Windows sets OS=Windows_NT)
+ifeq ($(OS),Windows_NT)
+	IS_WINDOWS := 1
+	# If using native Windows toolchain path, you can set ARMGNU externally,
+	# otherwise provide a common example (adjust to your installation):
+	ARMGNU ?= E:/Nextcloud/raspo3b-os/toolchain/Windows/arm-gnu-toolchain-13.2.Rel1-mingw-w64-i686-aarch64-none-elf/bin/aarch64-none-elf
+	# Prefer bash-style shell if available (MSYS2/MinGW). If not present, many
+	# Make targets require a POSIX shell—consider using WSL or MSYS2 on Windows.
+	SHELL := bash
+	QEMU := d:\qemu\qemu-system-aarch64.exe
+endif
+
 QEMU_CPUS ?= 4
 QEMU_USB ?= 0
 QEMU_GUI ?= 0
@@ -442,11 +456,34 @@ new-user-pair:
 	echo "Created $(USR_INCLUDE_DIR)/app/$(DLL_NAME).h"; \
 	echo "Created $(USR_DLLS_DIR)/$(DLL_NAME)/main.c"
 
+ifeq ($(IS_WINDOWS),1)
+applications-vfs:
+	@echo "applications-vfs is not supported on native Windows shells."
+	@echo "Use WSL, MSYS2, or run this Makefile on macOS/Linux to use 'applications-vfs'."
+
+user-vfs: applications-vfs
+
+fat32-list:
+	@echo "fat32-list is not supported on native Windows shells."
+	@echo "Use WSL/MSYS2 or mount fat32.img manually."
+
+fat32-mount:
+	@echo "fat32-mount is not supported on native Windows shells."
+
+fat32-umount:
+	@echo "fat32-umount is not supported on native Windows shells."
+
+fat32-read:
+	@echo "fat32-read is not supported on native Windows shells."
+
+fat32-hexdump:
+	@echo "fat32-hexdump is not supported on native Windows shells."
+else
 applications-vfs: applications $(MAIN_KERNEL_IMAGE)
 	@set -e; \
 	if mount | grep -q " on $(USER_VFS_MOUNT_DIR_ABS) "; then umount -f $(USER_VFS_MOUNT_DIR_ABS) >/dev/null 2>&1 || true; fi; \
 	if [ -f $(USER_VFS_DEV_FILE) ]; then hdiutil detach -force "$$(cat $(USER_VFS_DEV_FILE))" >/dev/null 2>&1 || true; rm -f $(USER_VFS_DEV_FILE); fi; \
-	STALE_DEVS=$$(hdiutil info | awk '/image-path/ && $$NF == "'"$(PWD)/fat32.img"'" { found=1; next } found && /^\/dev\// { print $$1; found=0 }'); \
+	STALE_DEVS=$$(hdiutil info | awk '/image-path/ && $$NF == "'""$(PWD)/fat32.img"'"" { found=1; next } found && /^\/dev\// { print $$1; found=0 }'); \
 	for STALE_DEV in $$STALE_DEVS; do hdiutil detach -force "$$STALE_DEV" >/dev/null 2>&1 || true; done; \
 	mkdir -p $(USER_VFS_MOUNT_DIR_ABS); \
 	DEV=$$($(USER_VFS_ATTACH) | awk 'NR==1 { print $$1 }'); \
@@ -470,6 +507,7 @@ applications-vfs: applications $(MAIN_KERNEL_IMAGE)
 	umount -f $(USER_VFS_MOUNT_DIR_ABS); \
 	hdiutil detach -force "$$DEV" >/dev/null; \
 	trap - EXIT
+endif
 
 user-vfs: applications-vfs
 
@@ -559,6 +597,17 @@ fat32-hexdump:
 	xxd -g 1 -l 256 "$$TARGET"
 #######################################################################################################
 
+
+ifeq ($(IS_WINDOWS),1)
+f32.disk:
+	@echo "f32.disk target is not supported on native Windows shells."
+
+f32.empty:
+	@echo "f32.empty target is not supported on native Windows shells."
+
+populate_disk:
+	@echo "populate_disk is not supported on native Windows shells."
+else
 f32.disk:
 	-rm f32.disk
 	dd if=/dev/zero of=f32.disk bs=1M count=64
@@ -575,6 +624,7 @@ populate_disk: mount_disk
 	sleep 1
 	sudo umount fat32
 	-@rm -Rf fat32
+endif
 
 #######################################################################################################
 

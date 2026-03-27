@@ -46,9 +46,9 @@ typedef struct RosBootHandoff {
 
 static inline Bool ros_boot_handoff_is_valid(const RosBootHandoff* handoff) {
     return handoff &&
-           handoff->magic == ROS_BOOT_HANDOFF_MAGIC &&
-           handoff->version == ROS_BOOT_HANDOFF_VERSION &&
-           handoff->size >= sizeof(RosBootHandoff);
+        handoff->magic == ROS_BOOT_HANDOFF_MAGIC &&
+        handoff->version == ROS_BOOT_HANDOFF_VERSION &&
+        handoff->size >= sizeof(RosBootHandoff);
 }
 #endif
 
