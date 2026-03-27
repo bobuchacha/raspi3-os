@@ -14,3 +14,5 @@ int check_elf_magic_num(const unsigned char *e_ident) {
            e_ident[EI_MAG2] != ELFMAG2 ||
            e_ident[EI_MAG3] != ELFMAG3;
 }
+
+
