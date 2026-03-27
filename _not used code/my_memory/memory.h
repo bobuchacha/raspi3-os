@@ -1,6 +1,0 @@
-#ifndef KERNEL_MEMORY_H
-#define KERNEL_MEMORY_H
-
-
-
-#endif // KERNEL_MEMORY_H
