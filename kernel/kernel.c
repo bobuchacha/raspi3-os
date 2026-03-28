@@ -39,6 +39,12 @@ void kernel_shell_main(Pointer arg);
  *   Nothing. On failure the current task is terminated.
  */
 void kernel_load_user_program() {
+    static Bool g_userspace_spawned = false;
+
+    if (g_userspace_spawned) {
+        log_info("kernel_load_user_program: userspace already spawned; skipping");
+        return;
+    }
     // Replace this kernel thread's task image with the configured init executable.
     module_load_boot_modules();
     log_info("Boot modules loaded; executing /bin/core.exe");
@@ -49,6 +55,7 @@ void kernel_load_user_program() {
         exit_current_process(-1);
     }
 
+    g_userspace_spawned = true;
     log_info("/bin/core.exe spawn requested; returning to scheduler");
 }
 
