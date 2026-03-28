@@ -163,9 +163,7 @@ void kernel_main() {
     // Keep secondaries parked until the bootloader-owned secondary trampoline is stable.
     log_info("Skipping secondary CPU wake while SMP handoff is unstable...\n");
 
-    // Spawn the primary kernel thread that loads the first userspace program.
-    log_info("Spawning init thread...\n");
-    process_copy_thread(PF_KTHREAD, (Address)&kernel_load_user_program, 0);
+    /* userspace launcher will be scheduled from the main loop after boot ticks */
 
     // create another thread
 
