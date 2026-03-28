@@ -15,3 +15,4 @@
 *.disk
 *.disk*
 fat32.img
+/output/
