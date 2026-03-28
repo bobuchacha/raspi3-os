@@ -16,6 +16,7 @@ PT_LOAD = 1
 PF_X = 0x1
 PF_W = 0x2
 PF_R = 0x4
+PAGE_SIZE = 0x1000
 
 USER_EXE_MAGIC = b"ROSXEXE\x00"
 USER_EXE_VERSION = 1
@@ -98,12 +99,18 @@ def load_elf_metadata(data: bytes):
         if p_flags & PF_X:
             exe_flags |= 0x4
 
+        # The runtime loader maps user images at 4 KiB granularity, so record a
+        # loader-relevant alignment instead of the ELF max-page-size alignment.
+        segment_align = PAGE_SIZE
+        if p_align and p_align < PAGE_SIZE:
+            segment_align = p_align
+
         segments.append(
             {
                 "vaddr": p_vaddr,
                 "filesz": p_filesz,
                 "memsz": p_memsz,
-                "align": p_align,
+                "align": segment_align,
                 "flags": exe_flags,
                 "data": data[p_offset : p_offset + p_filesz],
             }

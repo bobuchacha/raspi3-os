@@ -9,18 +9,98 @@
 #include "percpu.h"
 #include "arch/cortex-a53/dbg.h"
 
-static struct task_struct init_task = INIT_TASK;
+static Process init_process = { INIT_PROCESS };
+
+// Keep the bootstrap task in THREAD_SIZE-aligned, page-sized storage because
+// task_pt_regs() computes frames relative to a full task stack page.
+typedef union bootstrap_task_page {
+	struct task_struct task;
+	unsigned char stack[THREAD_SIZE];
+} BootstrapTaskPage;
+
+static BootstrapTaskPage init_task_page __attribute__((aligned(THREAD_SIZE))) = {
+	.task = INIT_TASK(&init_process)
+};
+
+#define init_task (init_task_page.task)
 struct task_struct* current_tasks[NR_CPUS] = {
 	&(init_task),
+};
+int current_task_ids[NR_CPUS] = {
+	0,
 };
 struct task_struct* tasks[NR_TASKS] = {
 	&(init_task),
 };
+Process* processes[NR_PROCESSES] = {
+	&(init_process),
+};
 int nr_tasks = 1;
+int nr_processes = 1;
 static unsigned long schedler_ticks = 0;
+static volatile unsigned int scheduler_spinlock = 0;
+
+static void schedler_bootstrap_state(void) {
+	if (!init_process.main_thread) {
+		init_process.main_thread = &init_task;
+		init_process.main_thread_id = 0;
+		init_process.thread_count = 1;
+		init_task.process = &init_process;
+	}
+}
+
+static inline unsigned int scheduler_spin_try_acquire(volatile unsigned int* lock) {
+	unsigned int previous;
+	unsigned int status;
+
+	asm volatile(
+		"ldaxr %w0, [%2]\n"
+		"cbnz %w0, 1f\n"
+		"mov %w0, #1\n"
+		"stxr %w1, %w0, [%2]\n"
+		"cbnz %w1, 2f\n"
+		"mov %w0, wzr\n"
+		"b 3f\n"
+		"1:\n"
+		"mov %w1, wzr\n"
+		"2:\n"
+		"3:\n"
+		: "=&r"(previous), "=&r"(status)
+		: "r"(lock)
+		: "memory");
+
+	return previous == 0U && status == 0U;
+}
+
+static inline void scheduler_spin_release(volatile unsigned int* lock) {
+	asm volatile(
+		"stlr %w1, [%0]\n"
+		:
+	: "r"(lock), "r"(0U)
+		: "memory");
+}
+
+void scheduler_lock_acquire(void) {
+	while (!scheduler_spin_try_acquire(&scheduler_spinlock)) {
+		asm volatile("yield\n");
+	}
+}
+
+void scheduler_lock_release(void) {
+	scheduler_spin_release(&scheduler_spinlock);
+}
+
+int current_task_should_return_to_user(void) {
+	schedler_bootstrap_state();
+	return current_task && !(current_task->flags & PF_KTHREAD);
+}
 
 static int schedler_task_matches_cpu(const struct task_struct* task, unsigned int cpu) {
 	return task && task->cpu_affinity == cpu;
+}
+
+static int schedler_task_is_ready(const struct task_struct* task) {
+	return task && task->state == TASK_READY;
 }
 
 /**
@@ -43,7 +123,7 @@ static void schedler_wake_sleeping_tasks(void) {
 			continue;
 		}
 		task->wakeup_tick = 0;
-		task->state = TASK_RUNNING;
+		task->state = TASK_READY;
 		if (task->counter <= 0) {
 			task->counter = task->priority;
 		}
@@ -96,26 +176,29 @@ void preempt_enable(void) {
 void _schedule(void) {
 	// _trace("scheduling...\n");
 	dbg_wait_if_paused();
+	schedler_bootstrap_state();
 
 	// Prevent nested scheduling while this routine searches for the next runnable task.
 	preempt_disable();
 
 	unsigned int cpu = task_cpu_index();
 	int next, c;
-	int has_runnable;
+	int has_ready;
 	struct task_struct* p;
 	struct task_struct* fallback;
 	struct task_struct* idle_task;
+	struct task_struct* next_task;
 
 	idle_task = percpu_idle_task(cpu);
 	fallback = schedler_task_matches_cpu(current_task, cpu) && current_task->state == TASK_RUNNING
 		? current_task
-		: (schedler_task_matches_cpu(idle_task, cpu) && idle_task->state == TASK_RUNNING ? idle_task : 0);
+		: (schedler_task_matches_cpu(idle_task, cpu) && (idle_task->state == TASK_RUNNING || idle_task->state == TASK_READY) ? idle_task : 0);
 	while (1) {
 		// Pick the runnable task with the largest remaining counter.
 		c = -1;
 		next = 0;
-		has_runnable = 0;
+		has_ready = 0;
+		scheduler_lock_acquire();
 		for (int i = 0; i < NR_TASKS; i++) {
 			p = tasks[i];
 			if (!schedler_task_matches_cpu(p, cpu)) {
@@ -131,40 +214,51 @@ void _schedule(void) {
 				// 	c
 				// 	);
 			}
-			if (p && p->state == TASK_RUNNING && p->counter > c) {
-				has_runnable = 1;
+			if (schedler_task_is_ready(p) && p->counter > c) {
+				has_ready = 1;
 				c = p->counter;
-				// kprint("              --> New c %d\n", c);
 				next = i;
 			}
-			else if (p && p->state == TASK_RUNNING) {
-				has_runnable = 1;
+			else if (schedler_task_is_ready(p)) {
+				has_ready = 1;
 			}
 		}
 
 		if (c > 0) {
+			scheduler_lock_release();
 			break;
 		}
 
-		if (!has_runnable) {
+		if (!has_ready) {
 			if (fallback) {
 				fallback->counter = fallback->priority;
 			}
+			scheduler_lock_release();
 			break;
 		}
 
 		// Refill timeslices when every runnable task has exhausted its current counter.
 		for (int i = 0; i < NR_TASKS; i++) {
 			p = tasks[i];
-			if (schedler_task_matches_cpu(p, cpu) && p->state == TASK_RUNNING) {
+			if (schedler_task_matches_cpu(p, cpu) && p->state == TASK_READY) {
 				p->counter = (p->counter >> 1) + p->priority;
-				// p->counter = (p->counter + 1) + p->priority;
 			}
 		}
+		scheduler_lock_release();
+	}
+
+	next_task = c > 0 ? tasks[next] : fallback;
+	if (!next_task) {
+		next_task = idle_task;
+	}
+	if (next_task && next_task->state == TASK_READY) {
+		scheduler_lock_acquire();
+		next_task->state = TASK_RUNNING;
+		scheduler_lock_release();
 	}
 
 	// Hand control to the best runnable task selected by the loop above.
-	schedler_switch_to(c > 0 ? tasks[next] : fallback);
+	schedler_switch_to(next_task);
 	// _trace("Switch completed!\n");
 	preempt_enable();
 }
@@ -181,7 +275,13 @@ void _schedule(void) {
 void schedler_schedule(void) {
 	// Zero the remaining budget so the scheduler will pick another runnable task now.
 	dbg_wait_if_paused();
+	schedler_bootstrap_state();
+	scheduler_lock_acquire();
+	if (current_task->state == TASK_RUNNING) {
+		current_task->state = TASK_READY;
+	}
 	current_task->counter = 0;
+	scheduler_lock_release();
 	_schedule();
 }
 
@@ -211,11 +311,14 @@ void schedler_sleep_ticks(unsigned long ticks) {
 	if (ticks == 0) {
 		return;
 	}
+	schedler_bootstrap_state();
 
 	// Record the wakeup deadline and move the task out of the runnable set.
 	preempt_disable();
+	scheduler_lock_acquire();
 	current_task->wakeup_tick = schedler_ticks + ticks;
 	current_task->state = TASK_SLEEPING;
+	scheduler_lock_release();
 	preempt_enable();
 
 	// Yield immediately so another runnable task can use the CPU.
@@ -232,12 +335,19 @@ void schedler_sleep_ticks(unsigned long ticks) {
  *   Nothing. CPU state is exchanged by the architecture-specific switch routine.
  */
 void schedler_switch_to(struct task_struct* next) {
+	unsigned int cpu = task_cpu_index();
 	// _trace("Switching task from %d to %d",  current_task->id, next->id);
 
-	if (current_task == next)
+	if (current_task == next) {
+		current_task_ids[cpu] = current_task ? (int)current_task->id : -1;
+		if (current_task && current_task->state == TASK_READY) {
+			current_task->state = TASK_RUNNING;
+		}
 		return;
+	}
 	struct task_struct* prev = current_task;
 	current_task = next;
+	current_task_ids[cpu] = next ? (int)next->id : -1;
 	// Switch to the next task's page tables before restoring its CPU context.
 	set_pgd(next->mm.pgd);
 	// process_dump_task_struct(current_task);
@@ -271,12 +381,15 @@ void schedule_tail(void) {
  */
 void schedler_timer_tick() {
 	dbg_wait_if_paused();
+	schedler_bootstrap_state();
 	if (task_cpu_index() == 0) {
+		scheduler_lock_acquire();
 		// Advance time on the boot CPU so sleep accounting has a single timekeeper.
 		++schedler_ticks;
 
 		// Move due sleeping tasks back into the runnable set before considering preemption.
 		schedler_wake_sleeping_tasks();
+		scheduler_lock_release();
 	}
 
 	// Charge the running task for the tick that just elapsed.
@@ -286,7 +399,12 @@ void schedler_timer_tick() {
 	}
 
 	// Force a reschedule once the task's timeslice is gone and preemption is allowed.
+	scheduler_lock_acquire();
+	if (current_task->state == TASK_RUNNING) {
+		current_task->state = TASK_READY;
+	}
 	current_task->counter = 0;
+	scheduler_lock_release();
 	enable_irq();
 	_schedule();
 	disable_irq();

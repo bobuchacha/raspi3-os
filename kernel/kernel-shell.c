@@ -4,6 +4,7 @@
 #include "filesystem/vfs/vfs.h"
 #include "graphics.h"
 #include "memory.h"
+#include "hal/hal.h"
 #include "module.h"
 #include "module/module_format.h"
 #include "percpu.h"
@@ -45,6 +46,8 @@
 #define SHELL_MONITOR_DEFAULT_DELAY_MS 1000UL
 #define SHELL_MONITOR_MAX_SAMPLES 120UL
 #define SHELL_MONITOR_MAX_DELAY_MS 10000UL
+#define SHELL_HEAPTEST_BLOCK_COUNT 8
+#define SHELL_HEAPTEST_MAX_LOOPS 128UL
 
 static const char shell_banner[] =
 "\r\n"
@@ -177,8 +180,14 @@ static const char* shell_task_state_color(const char* state) {
     if (strcmp(state, "RUN") == 0) {
         return SHELL_COLOR_OK;
     }
+    if (strcmp(state, "READY") == 0) {
+        return SHELL_COLOR_PATH;
+    }
     if (strcmp(state, "SLEEP") == 0) {
         return SHELL_COLOR_WARN;
+    }
+    if (strcmp(state, "BLOCK") == 0) {
+        return SHELL_COLOR_PATH;
     }
     return SHELL_COLOR_ERROR;
 }
@@ -191,14 +200,30 @@ static const char* shell_task_display_name(Task* task) {
     }
 
     name = task->name ? (char*)task->name : "";
-    if (name[0] == '\0' && task->user_name[0] != '\0') {
-        name = task->user_name;
+    if (name[0] == '\0' && task->process && task->process->name[0] != '\0') {
+        name = task->process->name;
     }
     if (name[0] == '\0') {
         name = "<unnamed>";
     }
 
     return name;
+}
+
+static const char* shell_task_state_text(TaskState state) {
+    switch (state) {
+    case TASK_READY:
+        return "READY";
+    case TASK_RUNNING:
+        return "RUN";
+    case TASK_SLEEPING:
+        return "SLEEP";
+    case TASK_BLOCKED:
+        return "BLOCK";
+    case TASK_ZOMBIE:
+    default:
+        return "ZOMBIE";
+    }
 }
 
 static unsigned long shell_read_mpidr_el1(void) {
@@ -470,8 +495,7 @@ static void shell_show_cpu_detail(const char* cpu_text) {
     if (current) {
         shell_print_kv("current id", "%ld", current->id);
         shell_print_kv("current name", "%s", shell_task_display_name(current));
-        shell_print_kv("current state", "%s",
-            current->state == TASK_RUNNING ? "RUN" : (current->state == TASK_SLEEPING ? "SLEEP" : "ZOMBIE"));
+        shell_print_kv("current state", "%s", shell_task_state_text(current->state));
         shell_print_kv("timeslice", "%ld", current->counter);
         shell_print_kv("priority", "%ld", current->priority);
         shell_print_kv("preempt", "%ld", current->preempt_count);
@@ -590,15 +614,7 @@ static void shell_show_top_snapshot(unsigned long sample_index, unsigned long sa
             continue;
         }
 
-        if (task->state == TASK_RUNNING) {
-            state = "RUN";
-        }
-        else if (task->state == TASK_SLEEPING) {
-            state = "SLEEP";
-        }
-        else {
-            state = "ZOMBIE";
-        }
+        state = shell_task_state_text(task->state);
 
         kprint("  ");
         shell_format_text(number, "%ld", task->id);
@@ -743,6 +759,223 @@ static void shell_show_usage_snapshot(unsigned long sample_index, unsigned long 
     }
 }
 
+/*
+ * Fill one heap block with a deterministic byte pattern so later validation can
+ * detect overwrite, stale data, or realloc copy bugs.
+ */
+static void shell_heaptest_fill(Address ptr, unsigned long length, UByte seed) {
+    UByte* bytes = (UByte*)(Pointer)ptr;
+    unsigned long index;
+
+    if (!ptr) {
+        return;
+    }
+
+    // Write a repeatable pattern across the full payload range.
+    for (index = 0; index < length; index++) {
+        bytes[index] = (UByte)(seed + (UByte)index);
+    }
+}
+
+/*
+ * Verify that one heap block still contains the deterministic pattern written by
+ * shell_heaptest_fill.
+ */
+static int shell_heaptest_verify(Address ptr, unsigned long length, UByte seed, unsigned long* mismatch_index) {
+    UByte* bytes = (UByte*)(Pointer)ptr;
+    unsigned long index;
+
+    if (!ptr) {
+        if (mismatch_index) {
+            *mismatch_index = 0;
+        }
+        return -1;
+    }
+
+    // Scan the payload and report the first mismatched byte to aid debugging.
+    for (index = 0; index < length; index++) {
+        if (bytes[index] != (UByte)(seed + (UByte)index)) {
+            if (mismatch_index) {
+                *mismatch_index = index;
+            }
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+/*
+ * Release every temporary heap block used by the shell self-test and clear the
+ * tracking table so cleanup can be called more than once safely.
+ */
+static void shell_heaptest_cleanup(Address* blocks, int count) {
+    int index;
+
+    if (!blocks || count <= 0) {
+        return;
+    }
+
+    // Free any surviving allocations from the current test iteration.
+    for (index = 0; index < count; index++) {
+        if (blocks[index] != 0) {
+            kfree(blocks[index]);                                // release the temporary test block
+            blocks[index] = 0;
+        }
+    }
+}
+
+/*
+ * Run one deterministic heap exercise that covers allocate, fragment, realloc,
+ * verify, and full cleanup.
+ */
+static int shell_heaptest_once(unsigned long iteration, char* failure_reason, int failure_reason_size) {
+    static const unsigned long initial_sizes[SHELL_HEAPTEST_BLOCK_COUNT] = { 24UL, 48UL, 96UL, 160UL, 320UL, 640UL, 1024UL, 2048UL };
+    static const unsigned long refill_sizes[SHELL_HEAPTEST_BLOCK_COUNT] = { 0UL, 32UL, 0UL, 128UL, 0UL, 384UL, 0UL, 1536UL };
+    Address blocks[SHELL_HEAPTEST_BLOCK_COUNT];
+    unsigned long logical_sizes[SHELL_HEAPTEST_BLOCK_COUNT];
+    unsigned long before_used = mem_heap_used_bytes();
+    unsigned long before_free = mem_heap_free_bytes();
+    unsigned long mismatch_index = 0;
+    unsigned long after_used;
+    unsigned long after_free;
+    int index;
+
+    memzero((Address)blocks, sizeof(blocks));                    // start with a clean tracking table
+    memzero((Address)logical_sizes, sizeof(logical_sizes));      // clear logical payload sizes for verification
+
+    // Allocate one mixed-size working set and seed each block with known data.
+    for (index = 0; index < SHELL_HEAPTEST_BLOCK_COUNT; index++) {
+        blocks[index] = kmalloc((int)initial_sizes[index]);      // allocate the initial working set
+        if (blocks[index] == 0) {
+            shell_format_text(failure_reason, "alloc failed at slot %d (%lu bytes)", index, initial_sizes[index]);
+            shell_heaptest_cleanup(blocks, SHELL_HEAPTEST_BLOCK_COUNT); // tear down the partial iteration state
+            return -1;
+        }
+        logical_sizes[index] = initial_sizes[index];
+        shell_heaptest_fill(blocks[index], logical_sizes[index], (UByte)(0x20U + index)); // seed the block with a predictable pattern
+    }
+
+    // Free every other block so later allocations have to reuse fragmented holes.
+    for (index = 1; index < SHELL_HEAPTEST_BLOCK_COUNT; index += 2) {
+        kfree(blocks[index]);                                    // create fragmentation between live allocations
+        blocks[index] = 0;
+        logical_sizes[index] = 0;
+    }
+
+    // Verify the surviving allocations were not damaged by neighbour frees.
+    for (index = 0; index < SHELL_HEAPTEST_BLOCK_COUNT; index += 2) {
+        if (shell_heaptest_verify(blocks[index], logical_sizes[index], (UByte)(0x20U + index), &mismatch_index) != 0) {
+            shell_format_text(failure_reason, "verify failed at slot %d offset %lu after fragmentation", index, mismatch_index);
+            shell_heaptest_cleanup(blocks, SHELL_HEAPTEST_BLOCK_COUNT); // release all tracked allocations before returning
+            return -1;
+        }
+    }
+
+    // Refill the freed holes with different sizes to exercise splitting decisions.
+    for (index = 1; index < SHELL_HEAPTEST_BLOCK_COUNT; index += 2) {
+        blocks[index] = kmalloc((int)refill_sizes[index]);       // allocate into the fragmented free space
+        if (blocks[index] == 0) {
+            shell_format_text(failure_reason, "refill failed at slot %d (%lu bytes)", index, refill_sizes[index]);
+            shell_heaptest_cleanup(blocks, SHELL_HEAPTEST_BLOCK_COUNT); // release all tracked allocations before returning
+            return -1;
+        }
+        logical_sizes[index] = refill_sizes[index];
+        shell_heaptest_fill(blocks[index], logical_sizes[index], (UByte)(0x60U + index)); // seed the replacement blocks with a new pattern
+    }
+
+    // Grow one live block and make sure its original payload survives the realloc.
+    blocks[4] = krealloc(blocks[4], 768U);                       // force a grow path through the allocator
+    if (blocks[4] == 0) {
+        shell_format_text(failure_reason, "realloc failed at slot 4");
+        shell_heaptest_cleanup(blocks, SHELL_HEAPTEST_BLOCK_COUNT); // release all tracked allocations before returning
+        return -1;
+    }
+    if (shell_heaptest_verify(blocks[4], initial_sizes[4], (UByte)(0x20U + 4), &mismatch_index) != 0) {
+        shell_format_text(failure_reason, "realloc verify failed at slot 4 offset %lu", mismatch_index);
+        shell_heaptest_cleanup(blocks, SHELL_HEAPTEST_BLOCK_COUNT); // release all tracked allocations before returning
+        return -1;
+    }
+    logical_sizes[4] = 768U;
+    shell_heaptest_fill(blocks[4], logical_sizes[4], (UByte)(0x90U + 4)); // refresh the grown block with a new full-size pattern
+
+    // Re-verify the full working set before cleanup to catch cross-block corruption.
+    for (index = 0; index < SHELL_HEAPTEST_BLOCK_COUNT; index++) {
+        UByte seed = (index == 4) ? (UByte)(0x90U + index) : (index % 2 == 0 ? (UByte)(0x20U + index) : (UByte)(0x60U + index));
+
+        if (shell_heaptest_verify(blocks[index], logical_sizes[index], seed, &mismatch_index) != 0) {
+            shell_format_text(failure_reason, "final verify failed at slot %d offset %lu", index, mismatch_index);
+            shell_heaptest_cleanup(blocks, SHELL_HEAPTEST_BLOCK_COUNT); // release all tracked allocations before returning
+            return -1;
+        }
+    }
+
+    shell_heaptest_cleanup(blocks, SHELL_HEAPTEST_BLOCK_COUNT);  // return the heap to its pre-test state
+
+    after_used = mem_heap_used_bytes();
+    after_free = mem_heap_free_bytes();
+    if (after_used != before_used || after_free != before_free) {
+        shell_format_text(failure_reason,
+            "heap accounting changed on iteration %lu (used %lu->%lu free %lu->%lu)",
+            iteration + 1,
+            before_used,
+            after_used,
+            before_free,
+            after_free);
+        return -1;
+    }
+
+    if (failure_reason_size > 0) {
+        failure_reason[0] = '\0';
+    }
+    return 0;
+}
+
+/*
+ * Run the shell-visible heap self-test command for one or more iterations and
+ * report allocator health before and after the exercise.
+ */
+static void shell_run_heaptest(char* loops_text) {
+    unsigned long loops = 1;
+    unsigned long before_used = mem_heap_used_bytes();
+    unsigned long before_free = mem_heap_free_bytes();
+    unsigned long after_used;
+    unsigned long after_free;
+    char failure_reason[128];
+    unsigned long iteration;
+
+    if (loops_text && shell_parse_ulong(loops_text, &loops) != 0) {
+        shell_print_usage("heaptest [loops]");
+        return;
+    }
+    if (loops == 0 || loops > SHELL_HEAPTEST_MAX_LOOPS) {
+        shell_print_error("Loop count must be between 1 and %lu", SHELL_HEAPTEST_MAX_LOOPS);
+        return;
+    }
+
+    shell_print_heading("Heap Self-Test");
+    shell_print_kv("loops", "%lu", loops);
+    shell_print_kv("heap used", "%lu bytes", before_used);
+    shell_print_kv("heap free", "%lu bytes", before_free);
+
+    // Repeat the deterministic allocator exercise enough times to catch list corruption.
+    for (iteration = 0; iteration < loops; iteration++) {
+        if (shell_heaptest_once(iteration, failure_reason, sizeof(failure_reason)) != 0) {
+            shell_print_kv("result", SHELL_COLOR_ERROR "FAIL" SHELL_COLOR_RESET);
+            shell_print_kv("iteration", "%lu", iteration + 1);
+            shell_print_kv("reason", "%s", failure_reason);
+            mem_heap_dump(24);                                   // dump a short heap snapshot to help diagnose the failure
+            return;
+        }
+    }
+
+    after_used = mem_heap_used_bytes();
+    after_free = mem_heap_free_bytes();
+    shell_print_kv("result", SHELL_COLOR_OK "PASS" SHELL_COLOR_RESET);
+    shell_print_kv("heap used", "%lu bytes", after_used);
+    shell_print_kv("heap free", "%lu bytes", after_free);
+}
+
 static void shell_run_monitor(void (*snapshot)(unsigned long, unsigned long, unsigned long), unsigned long samples, unsigned long delay_ms) {
     unsigned long sample_index;
 
@@ -827,6 +1060,93 @@ static void shell_show_hardware_info(void) {
     else {
         shell_print_kv("touch", "%s", "not ready");
     }
+}
+
+static const char* hal_partition_type_name(enum HalPartitionFilesystemType fs_type) {
+    switch (fs_type) {
+    case HAL_PARTITION_TYPE_NONE: return "none";
+    case HAL_PARTITION_TYPE_OTHER: return "other";
+    case HAL_PARTITION_TYPE_FAT32: return "FAT32";
+    case HAL_PARTITION_TYPE_LINUX: return "LINUX";
+    case HAL_PARTITION_TYPE_DATA: return "DATA";
+    case HAL_PARTITION_TYPE_ESP: return "ESP";
+    default: return "unknown";
+    }
+}
+
+static void shell_show_devices(void) {
+    char number[64];
+    int found = 0;
+
+    shell_print_heading("Devices");
+
+    /* Block devices */
+    kprint(SHELL_COLOR_MUTED "  ");
+    shell_print_text_column("TYPE", 8, null);
+    kprint(" ");
+    shell_print_text_column("ID", 6, null);
+    kprint(" ");
+    shell_print_text_column("INFO", 40, null);
+    kprint("\r\n");
+    shell_print_separator();
+
+    for (int i = 0; i < HAL_BLOCK_MAX; i++) {
+        if (hal_block_map[i].driver) {
+            char info[64];
+            shell_format_text(info, "driver=0x%lX priv=0x%lX", (unsigned long)hal_block_map[i].driver, (unsigned long)hal_block_map[i].private);
+            kprint("  ");
+            shell_print_text_column("block", 8, SHELL_COLOR_LABEL);
+            kprint(" ");
+            shell_format_text(number, "%d", i);
+            shell_print_text_column(number, 6, null);
+            kprint(" %s\r\n", info);
+            found++;
+        }
+    }
+    if (found == 0) {
+        kprint("  (no block devices)\r\n");
+    }
+
+    /* Partitions */
+    shell_print_heading("Partitions");
+    kprint(SHELL_COLOR_MUTED "  ");
+    shell_print_text_column("IDX", 6, null);
+    kprint(" ");
+    shell_print_text_column("DEV", 6, null);
+    kprint(" ");
+    shell_print_text_column("BEGIN", 12, null);
+    kprint(" ");
+    shell_print_text_column("SIZE", 12, null);
+    kprint(" TYPE" SHELL_COLOR_RESET "\r\n");
+    shell_print_separator();
+
+    for (int i = 0; i < HAL_PARTITION_MAX; i++) {
+        if (hal_partition_map[i].fs_type != HAL_PARTITION_TYPE_NONE) {
+            const char* tname = hal_partition_type_name(hal_partition_map[i].fs_type);
+            kprint("  ");
+            shell_format_text(number, "%d", i);
+            shell_print_text_column(number, 6, null);
+            kprint(" ");
+            shell_format_text(number, "%d", hal_partition_map[i].dev);
+            shell_print_text_column(number, 6, null);
+            kprint(" ");
+            shell_format_text(number, "0x%lX", hal_partition_map[i].begin);
+            shell_print_text_column(number, 12, null);
+            kprint(" ");
+            shell_format_text(number, "0x%lX", hal_partition_map[i].size);
+            shell_print_text_column(number, 12, null);
+            kprint(" %s\r\n", tname);
+        }
+    }
+
+    /* Graphics / Input */
+    shell_print_heading("Graphics / Input");
+    shell_print_kv("framebuffer", "%s", graphics_is_ready() ? "ready" : "not ready");
+    if (graphics_is_ready()) {
+        shell_print_kv("resolution", "%ux%u pitch=%u", graphics_width(), graphics_height(), graphics_pitch());
+        shell_print_kv("fb addr", SHELL_COLOR_PHYS "0x%lX" SHELL_COLOR_RESET, graphics_framebuffer());
+    }
+    shell_print_kv("touch", "%s", touch_is_ready() ? "ready" : "not ready");
 }
 
 static char* shell_skip_spaces(char* text) {
@@ -1104,7 +1424,7 @@ static void shell_dump_task_memory(const char* pid_text, const char* va_text, co
 
     shell_print_heading("Task Memory Dump");
     shell_print_kv("task", "%d", task->id);
-    shell_print_kv("name", "%s", task->user_name[0] != '\0' ? task->user_name : (task->name ? (char*)task->name : "<unnamed>"));
+    shell_print_kv("name", "%s", shell_task_display_name(task));
     shell_print_kv("pgd", SHELL_COLOR_PHYS "0x%lX" SHELL_COLOR_RESET, task->mm.pgd);
     shell_print_kv("virt", "%s0x%lX%s", SHELL_COLOR_VIRT, va, SHELL_COLOR_RESET);
     shell_print_kv("length", "%lu bytes", length);
@@ -1729,6 +2049,7 @@ static void shell_print_help(void) {
     kprint("  "); shell_print_text_column("top [samples] [delay_ms]", SHELL_HELP_COL_WIDTH, SHELL_COLOR_LABEL); kprint(" Refresh compact task view\r\n");
     kprint("  "); shell_print_text_column("mpstat [samples] [delay_ms]", SHELL_HELP_COL_WIDTH, SHELL_COLOR_LABEL); kprint(" Refresh compact per-CPU scheduler view\r\n");
     kprint("  "); shell_print_text_column("hwinfo", SHELL_HELP_COL_WIDTH, SHELL_COLOR_LABEL); kprint(" Show board and device status\r\n");
+    kprint("  "); shell_print_text_column("lsdev", SHELL_HELP_COL_WIDTH, SHELL_COLOR_LABEL); kprint(" List registered devices\r\n");
     kprint("  "); shell_print_text_column("ls [path]", SHELL_HELP_COL_WIDTH, SHELL_COLOR_LABEL); kprint(" List a directory\r\n");
     kprint("  "); shell_print_text_column("cat <path>", SHELL_HELP_COL_WIDTH, SHELL_COLOR_LABEL); kprint(" Print a text file\r\n");
     kprint("  "); shell_print_text_column("run <path> [name]", SHELL_HELP_COL_WIDTH, SHELL_COLOR_LABEL); kprint(" Spawn a user program\r\n");
@@ -1746,6 +2067,7 @@ static void shell_print_help(void) {
     kprint("  "); shell_print_text_column("mwrite <addr> <byte...>", SHELL_HELP_COL_WIDTH, SHELL_COLOR_LABEL); kprint(" Write bytes to kernel VA or physical memory\r\n");
     kprint("  "); shell_print_text_column("mwrite phys|virt|task ...", SHELL_HELP_COL_WIDTH, SHELL_COLOR_LABEL); kprint(" Write bytes to a scoped memory target\r\n");
     kprint("  "); shell_print_text_column("mmutest", SHELL_HELP_COL_WIDTH, SHELL_COLOR_LABEL); kprint(" Run MMU self-test\r\n");
+    kprint("  "); shell_print_text_column("heaptest [loops]", SHELL_HELP_COL_WIDTH, SHELL_COLOR_LABEL); kprint(" Run kernel heap allocate/free/realloc self-test\r\n");
     kprint("  "); shell_print_text_column("ticks", SHELL_HELP_COL_WIDTH, SHELL_COLOR_LABEL); kprint(" Show scheduler ticks\r\n");
     kprint("  "); shell_print_text_column("clear", SHELL_HELP_COL_WIDTH, SHELL_COLOR_LABEL); kprint(" Clear the serial screen\r\n");
     shell_print_heading("Examples");
@@ -1771,6 +2093,7 @@ static void shell_print_help(void) {
     kprint("  " SHELL_COLOR_PATH "mem task 1 0x4000 64" SHELL_COLOR_RESET "\r\n");
     kprint("  " SHELL_COLOR_PATH "mwrite phys 0x1000 0x41 0x42 0x43" SHELL_COLOR_RESET "\r\n");
     kprint("  " SHELL_COLOR_PATH "mwrite task 1 0x4000 0x90 0x90" SHELL_COLOR_RESET "\r\n");
+    kprint("  " SHELL_COLOR_PATH "heaptest 10" SHELL_COLOR_RESET "\r\n");
 }
 
 static void shell_print_task_table(void) {
@@ -1800,24 +2123,10 @@ static void shell_print_task_table(void) {
             continue;
         }
 
-        if (task->state == TASK_RUNNING) {
-            state = "RUN";
-        }
-        else if (task->state == TASK_SLEEPING) {
-            state = "SLEEP";
-        }
-        else {
-            state = "ZOMBIE";
-        }
+        state = shell_task_state_text(task->state);
         state_color = shell_task_state_color(state);
 
-        name = task->name ? (char*)task->name : "";
-        if (name[0] == '\0' && task->user_name[0] != '\0') {
-            name = task->user_name;
-        }
-        if (name[0] == '\0') {
-            name = "<unnamed>";
-        }
+        name = shell_task_display_name(task);
 
         kprint("  ");
         shell_format_text(number, "%d", task->id);
@@ -1865,14 +2174,14 @@ static const UserSharedLibraryInfo* shell_find_loaded_library(const UserSharedLi
     return null;
 }
 
-static const char* shell_task_parent_text(Task* task, char* buffer, int size) {
-    if (!task || task->parent_pid <= 0 || task->parent_pid >= NR_TASKS || !tasks[task->parent_pid]) {
+static const char* shell_process_parent_text(Process* process, char* buffer, int size) {
+    if (!process || process->parent_process_id <= 0 || process->parent_process_id >= NR_PROCESSES || !processes[process->parent_process_id]) {
         strncpy(buffer, "-", size - 1);
         buffer[size - 1] = '\0';
         return buffer;
     }
 
-    shell_format_text(buffer, "%ld", task->parent_pid);
+    shell_format_text(buffer, "%ld", process->parent_process_id);
     return buffer;
 }
 
@@ -1912,22 +2221,27 @@ static void shell_print_library_local(const UserSharedLibraryInfo* infos, UInt i
     }
 }
 
-static void shell_print_process_tree_node(Task* task, const UserSharedLibraryInfo* infos, UInt info_count, Bool* visited, int depth) {
+static void shell_print_process_tree_node(Process* process, const UserSharedLibraryInfo* infos, UInt info_count, Bool* visited, int depth) {
     char parent_text[32];
+    Task* task;
 
-    if (!task || visited[task->id]) {
+    if (!process || process->id < 0 || process->id >= NR_PROCESSES || visited[process->id]) {
+        return;
+    }
+    task = process->main_thread;
+    if (!task) {
         return;
     }
 
-    visited[task->id] = true;
+    visited[process->id] = true;
 
     shell_tree_line_prefix(depth);
-    kprint("process %ld\r\n", task->id);
+    kprint("process %ld\r\n", process->id);
 
     shell_tree_detail_prefix(depth + 1);
-    kprint("parent: %s\r\n", shell_task_parent_text(task, parent_text, sizeof(parent_text)));
+    kprint("parent: %s\r\n", shell_process_parent_text(process, parent_text, sizeof(parent_text)));
     shell_tree_detail_prefix(depth + 1);
-    kprint("state: %s\r\n", task->state == TASK_RUNNING ? "RUN" : (task->state == TASK_SLEEPING ? "SLEEP" : "ZOMBIE"));
+    kprint("state: %s\r\n", shell_task_state_text(task->state));
     shell_tree_detail_prefix(depth + 1);
     kprint("cpu: %u\r\n", task->cpu_affinity);
     shell_tree_detail_prefix(depth + 1);
@@ -1935,11 +2249,15 @@ static void shell_print_process_tree_node(Task* task, const UserSharedLibraryInf
     shell_tree_detail_prefix(depth + 1);
     kprint("counter: %ld\r\n", task->counter);
     shell_tree_detail_prefix(depth + 1);
-    kprint("name: %s\r\n", shell_task_display_name(task));
+    kprint("name: %s\r\n", process->name[0] ? process->name : shell_task_display_name(task));
     shell_tree_detail_prefix(depth + 1);
-    kprint("program: %s\r\n", task->user_program_path[0] ? task->user_program_path : "<none>");
+    kprint("program: %s\r\n", process->program_path[0] ? process->program_path : "<none>");
     shell_tree_detail_prefix(depth + 1);
-    kprint("args: %s\r\n", task->user_launch_args[0] ? task->user_launch_args : "<none>");
+    kprint("args: %s\r\n", process->launch_args[0] ? process->launch_args : "<none>");
+    shell_tree_detail_prefix(depth + 1);
+    kprint("main thread: %ld\r\n", task->id);
+    shell_tree_detail_prefix(depth + 1);
+    kprint("threads: %ld\r\n", process->thread_count);
     shell_tree_detail_prefix(depth + 1);
     kprint("pgd: 0x%lX\r\n", task->mm.pgd);
     shell_tree_detail_prefix(depth + 1);
@@ -1963,10 +2281,10 @@ static void shell_print_process_tree_node(Task* task, const UserSharedLibraryInf
         shell_print_library_local(infos, info_count, local, depth + 1);
     }
 
-    for (int index = 0; index < NR_TASKS; index++) {
-        Task* child = tasks[index];
+    for (int index = 0; index < NR_PROCESSES; index++) {
+        Process* child = processes[index];
 
-        if (!child || child->parent_pid != task->id || visited[child->id]) {
+        if (!child || child->parent_process_id != process->id || visited[child->id]) {
             continue;
         }
 
@@ -1984,7 +2302,8 @@ static void shell_show_process_tree(void) {
     library_count = user_shared_library_snapshot(libraries, USER_SHARED_LIBRARY_MAX_LOADED);
 
     shell_print_heading("Process Tree");
-    shell_print_kv("tasks", "%d", nr_tasks);
+    shell_print_kv("processes", "%d", nr_processes);
+    shell_print_kv("threads", "%d", nr_tasks);
     shell_print_kv("loaded libs", "%u", library_count);
 
     if (library_count > 0) {
@@ -1998,27 +2317,28 @@ static void shell_show_process_tree(void) {
     }
 
     shell_print_heading("Tree");
-    for (int index = 0; index < NR_TASKS; index++) {
-        Task* task = tasks[index];
+    for (int index = 0; index < NR_PROCESSES; index++) {
+        Process* process = processes[index];
 
-        if (!task || visited[task->id]) {
+        if (!process || visited[process->id]) {
             continue;
         }
-        if (task->parent_pid > 0 && task->parent_pid < NR_TASKS && tasks[task->parent_pid]) {
+        if (process->parent_process_id > 0 && process->parent_process_id < NR_PROCESSES && processes[process->parent_process_id]) {
             continue;
         }
 
-        shell_print_process_tree_node(task, libraries, library_count, visited, 0);
+        shell_print_process_tree_node(process, libraries, library_count, visited, 0);
     }
 
     for (int index = 0; index < NR_TASKS; index++) {
         Task* task = tasks[index];
+        Process* process = task ? task->process : 0;
 
-        if (!task || visited[task->id]) {
+        if (!process || visited[process->id]) {
             continue;
         }
 
-        shell_print_process_tree_node(task, libraries, library_count, visited, 0);
+        shell_print_process_tree_node(process, libraries, library_count, visited, 0);
     }
 }
 
@@ -2260,6 +2580,10 @@ static void shell_execute(char* line) {
         shell_show_hardware_info();
         return;
     }
+    if (strcmp(command, "lsdev") == 0) {
+        shell_show_devices();
+        return;
+    }
     if (strcmp(command, "ls") == 0) {
         char* path = shell_next_token(&cursor);
         shell_list_directory(path ? path : "/");
@@ -2438,6 +2762,10 @@ static void shell_execute(char* line) {
             SHELL_COLOR_RESET);
         return;
     }
+    if (strcmp(command, "heaptest") == 0) {
+        shell_run_heaptest(shell_next_token(&cursor));
+        return;
+    }
     if (strcmp(command, "ticks") == 0) {
         shell_print_heading("Scheduler Ticks");
         shell_print_kv("ticks", "%lu", schedler_get_ticks());
@@ -2499,9 +2827,16 @@ void kernel_shell_main(Pointer arg) {
 
     (void)arg;
 
-    strncpy(current_task->user_name, "shell", sizeof(current_task->user_name) - 1);
-    current_task->user_name[sizeof(current_task->user_name) - 1] = '\0';
-    current_task->name = (Buffer)current_task->user_name;
+    if (current_process) {
+        strncpy(current_process->name, "shell", sizeof(current_process->name) - 1);
+        current_process->name[sizeof(current_process->name) - 1] = '\0';
+        current_task->name = (Buffer)current_process->name;
+    }
+    else {
+        strncpy(current_task->thread_name, "shell", sizeof(current_task->thread_name) - 1);
+        current_task->thread_name[sizeof(current_task->thread_name) - 1] = '\0';
+        current_task->name = (Buffer)current_task->thread_name;
+    }
 
     kprint("%s", shell_banner);
     shell_print_prompt();

@@ -38,6 +38,7 @@ extern int file_last_status;
 void kernel_load_user_program() {
     // Replace this kernel thread's task image with the configured init executable.
     module_load_boot_modules();
+    log_info("Boot modules loaded; executing /bin/init.exe");
 
     if (exec_user_program("/bin/init.exe") != 0) {
         log_error("Unable to load /bin/init.exe");
@@ -45,6 +46,8 @@ void kernel_load_user_program() {
         // Terminate the thread if the first userspace image cannot be started.
         exit_current_process(-1);
     }
+
+    log_info("/bin/init.exe image committed; returning to EL0");
 }
 
 static void kernel_draw_boot_graphics(void) {
@@ -125,16 +128,8 @@ void kernel_main() {
     // Bring up the HAL abstraction before touching board devices or memory services.
     hal_init();
 
-    // Wake and initialize other CPU cores (secondary cores will run
-    // `secondary_start`). This is intentionally lightweight; a full SMP
-    // scheduler conversion is a separate task.
-
-
-    // need to initialize device before output anything
-
     // Initialize console-capable devices so later logging becomes visible.
     device_init();
-    wake_secondary_cores();
     // init memory management
 
     // Build page allocation and heap state before higher-level subsystems allocate memory.
@@ -160,6 +155,9 @@ void kernel_main() {
     log_info("Initializing touch input...\n");
     device_init_touch();
 
+    // Bring secondary CPUs online before we start placing runnable work on them.
+    log_info("Waking secondary CPUs...\n");
+    wake_secondary_cores();
 
     // Spawn the primary kernel thread that loads the first userspace program.
     log_info("Spawning init thread...\n");

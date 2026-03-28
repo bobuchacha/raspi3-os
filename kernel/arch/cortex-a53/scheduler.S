@@ -33,12 +33,8 @@ FUNCTION start_thread_context
 	mov 	x1, x21
 	mov 	x2, x22
 	blr 	x19
-	mrs 	x11, mpidr_el1
-	and 	x11, x11, #0xFF
-	ldr 	x9, =current_tasks
-	ldr 	x9, [x9, x11, lsl #3]
-	ldr 	x10, [x9, #THREAD_CPU_CONTEXT]
- 	cbz 	x10, switch_to_user_mode
+	bl      current_task_should_return_to_user
+	cbnz    x0, switch_to_user_mode
 	mov 	x0, xzr
 	bl 	exit_current_process
 	b 	.

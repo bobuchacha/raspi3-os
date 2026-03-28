@@ -58,6 +58,29 @@ static int sys_find_free_heap_slot(Task* task) {
     return -1;
 }
 
+static int sys_copy_user_cstring(const char* user_text, char* kernel_text, unsigned long kernel_size) {
+    if (!user_text || !kernel_text || kernel_size == 0) {
+        return -1;
+    }
+
+    for (unsigned long index = 0; index < kernel_size; index++) {
+        char ch;
+
+        if (process_copy_from_user(0, (Address)user_text + index, &ch, sizeof(ch)) != 0) {
+            kernel_text[0] = '\0';
+            return -1;
+        }
+
+        kernel_text[index] = ch;
+        if (ch == '\0') {
+            return 0;
+        }
+    }
+
+    kernel_text[kernel_size - 1] = '\0';
+    return -1;
+}
+
 /**
  * Kernel implementation of the write syscall.
  *
@@ -68,12 +91,17 @@ static int sys_find_free_heap_slot(Task* task) {
  *   Nothing. The string is emitted to the kernel console.
  */
 void sys_write(char* buf) {
+    char text[512];
+
     if (!buf) {
+        return;
+    }
+    if (sys_copy_user_cstring(buf, text, sizeof(text)) != 0) {
         return;
     }
 
     console_lock();
-    printf("%s", buf);
+    printf("%s", text);
     console_unlock();
 }
 
@@ -236,7 +264,8 @@ long sys_task_name(char* buf, unsigned long size) {
         return -1;
     }
 
-    name = current_task->user_name[0] != '\0' ? current_task->user_name : "user";
+    name = (current_process && current_process->name[0] != '\0') ? current_process->name
+        : (current_task->thread_name[0] != '\0' ? current_task->thread_name : "user");
     _trace("Task %d name is '%s'", current_task->id, name);
     while (count + 1 < size && name[count] != '\0') {
         buf[count] = name[count];
@@ -254,7 +283,7 @@ long sys_task_args(char* buf, unsigned long size) {
         return -1;
     }
 
-    args = current_task->user_launch_args;
+    args = (current_process && current_process->launch_args[0] != '\0') ? current_process->launch_args : "";
     while (count + 1 < size && args[count] != '\0') {
         buf[count] = args[count];
         count++;
@@ -274,11 +303,35 @@ long sys_task_args(char* buf, unsigned long size) {
  *   Child PID on success, or `-1` when the spawn fails.
  */
 long sys_spawn(const char* path, const char* name, const char* args) {
+    char path_copy[USER_EXEC_PATH_MAX];
+    char name_copy[TASK_USER_NAME_MAX];
+    char args_copy[TASK_USER_LAUNCH_ARGS_MAX];
+    const char* resolved_name = null;
+    const char* resolved_args = null;
+
     if (!path || path[0] == '\0') {
         return -1;
     }
 
-    return spawn_user_program(path, name, args);
+    if (sys_copy_user_cstring(path, path_copy, sizeof(path_copy)) != 0 || path_copy[0] == '\0') {
+        return -1;
+    }
+    if (name && name[0] != '\0') {
+        if (sys_copy_user_cstring(name, name_copy, sizeof(name_copy)) != 0) {
+            return -1;
+        }
+        resolved_name = name_copy;
+    }
+    if (args && args[0] != '\0') {
+        if (sys_copy_user_cstring(args, args_copy, sizeof(args_copy)) != 0) {
+            return -1;
+        }
+        resolved_args = args_copy;
+    }
+
+    _trace("sys_spawn: Spawning program '%s' with name '%s' and args '%s'", path_copy, resolved_name ? resolved_name : "<null>", resolved_args ? resolved_args : "<null>");
+
+    return spawn_user_program(path_copy, resolved_name, resolved_args);
 }
 
 /**
@@ -291,13 +344,18 @@ long sys_spawn(const char* path, const char* name, const char* args) {
  *   `0` on success, or `-1` when the path is invalid or the executable cannot be loaded.
  */
 long sys_exec(const char* path) {
+    char path_copy[USER_EXEC_PATH_MAX];
+
     if (!path || path[0] == '\0') {
+        return -1;
+    }
+    if (sys_copy_user_cstring(path, path_copy, sizeof(path_copy)) != 0 || path_copy[0] == '\0') {
         return -1;
     }
 
     // Hand control to the executable loader, which replaces the current task image in place.
-    if (exec_user_program(path) != 0) {
-        log_error("Unable to exec %s", path);
+    if (exec_user_program(path_copy) != 0) {
+        log_error("Unable to exec %s", path_copy);
 
         // Kill the task when exec fails so the system does not continue in a half-reset state.
         exit_current_process(-1);
@@ -317,26 +375,45 @@ long sys_exec(const char* path) {
  *   Entry-point virtual address on success, or `0` when the path is invalid or the library cannot be loaded.
  */
 unsigned long sys_shlib_open(const char* path) {
+    char path_copy[USER_SHARED_LIBRARY_PATH_MAX];
+
     if (!path || path[0] == '\0') {
+        return 0;
+    }
+    if (sys_copy_user_cstring(path, path_copy, sizeof(path_copy)) != 0 || path_copy[0] == '\0') {
         return 0;
     }
 
     // Load the shared image into the global cache and map its pages into the current task.
-    return load_user_shared_library(path);
+    _trace("sys_shlib_open: Loading shared library '%s'", path_copy);
+    Address entry = load_user_shared_library(path_copy);
+    if (!entry) {
+        return 0;
+    }
+
+    return (unsigned long)entry;
 }
 
 unsigned long sys_shlib_export(const char* path, const char* export_name) {
     Address address;
+    char path_copy[USER_SHARED_LIBRARY_PATH_MAX];
+    char export_copy[USER_SHARED_LIBRARY_EXPORT_NAME_MAX];
 
     if (!path || path[0] == '\0' || !export_name || export_name[0] == '\0') {
         return 0;
     }
-
-    if (!load_user_shared_library(path)) {
+    if (sys_copy_user_cstring(path, path_copy, sizeof(path_copy)) != 0 || path_copy[0] == '\0') {
+        return 0;
+    }
+    if (sys_copy_user_cstring(export_name, export_copy, sizeof(export_copy)) != 0 || export_copy[0] == '\0') {
         return 0;
     }
 
-    address = load_user_shared_library_export(path, export_name);
+    if (!load_user_shared_library(path_copy)) {
+        return 0;
+    }
+
+    address = load_user_shared_library_export(path_copy, export_copy);
     return address;
 }
 
@@ -351,11 +428,16 @@ unsigned long sys_shlib_export(const char* path, const char* export_name) {
  *   User virtual address of the task-local block on success, or `0` on invalid input or allocation failure.
  */
 unsigned long sys_shlib_local(const char* path, unsigned long size) {
+    char path_copy[USER_SHARED_LIBRARY_PATH_MAX];
+
     if (!path || path[0] == '\0' || size == 0) {
         return 0;
     }
+    if (sys_copy_user_cstring(path, path_copy, sizeof(path_copy)) != 0 || path_copy[0] == '\0') {
+        return 0;
+    }
 
-    return load_user_shared_library_local(path, size);
+    return load_user_shared_library_local(path_copy, size);
 }
 
 long sys_console_read(void) {
@@ -433,6 +515,7 @@ long sys_mkdir(const char* path) {
 }
 
 long sys_task_info(long pid, UserTaskInfo* info) {
+    Process* process;
     Task* task;
     const char* name;
 
@@ -440,22 +523,25 @@ long sys_task_info(long pid, UserTaskInfo* info) {
         return -1;
     }
 
-    task = tasks[pid];
+    process = process_lookup(pid);
+    if (!process) {
+        return 0;
+    }
+    task = process->main_thread;
     if (!task) {
         return 0;
     }
 
     memzero((Address)info, sizeof(*info));
-    info->id = task->id;
+    info->id = process->id;
+    info->thread_id = task->id;
+    info->parent_process_id = process->parent_process_id;
     info->state = task->state;
     info->counter = task->counter;
     info->priority = task->priority;
     info->flags = task->flags;
 
-    name = task->name ? (char*)task->name : "";
-    if (name[0] == '\0' && task->user_name[0] != '\0') {
-        name = task->user_name;
-    }
+    name = process->name[0] != '\0' ? process->name : (task->name ? (char*)task->name : "");
     strncpy(info->name, name, sizeof(info->name) - 1);
     info->name[sizeof(info->name) - 1] = '\0';
     return 1;

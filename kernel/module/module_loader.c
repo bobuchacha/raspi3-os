@@ -1311,7 +1311,7 @@ static int module_probe_file(const char* path, const char* display_name) {
 
     // Publish registry state only after the runtime is fully initialized.
     module_registry_mark_ready(info, header.flags, image_size, bss_size);
-    log_info("Loaded kernel module %s from %s (image=%u bss=%u)", info->name, path, image_size, bss_size);
+    log_info("Loaded kernel module %s from %s (image=%u bss=%u)\n", info->name, path, image_size, bss_size);
     rc = 0;
 
 cleanup:

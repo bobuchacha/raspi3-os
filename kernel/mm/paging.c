@@ -148,8 +148,9 @@ void mem_init_paging(unsigned long int* heap_start) {
     register int
         mem_size,
         page_array_len,
+        page_array_pages,
         kernel_pages,
-        page_array_end,
+        heap_reserved_pages,
         i;
 
     mem_size = mem_get_size();
@@ -162,6 +163,7 @@ void mem_init_paging(unsigned long int* heap_start) {
 
     // Allocate space for all those pages' metadata.  Start this block just after the src image is finished
     page_array_len = sizeof(PAGE) * num_pages;
+    page_array_pages = mem_align_up((ULong)page_array_len) / PAGE_SIZE;
     page_array = (PAGE*)VA_HIGH_MEMORY;
     memzero((Address)page_array, page_array_len);
 
@@ -175,6 +177,7 @@ void mem_init_paging(unsigned long int* heap_start) {
     // Iterate over all pages and mark them with the appropriate flags
     // Start with src pages, and the paging metadata
     kernel_pages = LOW_MEMORY_CEILING / PAGE_SIZE;
+    heap_reserved_pages = mem_align_up((ULong)KERNEL_HEAP_SIZE) / PAGE_SIZE;
 
     for (i = 0; i < kernel_pages; i++) {
         page_array[i].phys_addr = (i * PAGE_SIZE); // Identity map the src pages
@@ -184,7 +187,7 @@ void mem_init_paging(unsigned long int* heap_start) {
     }
 
     // map the paging metadata
-    for (; i < (kernel_pages + page_array_len / PAGE_SIZE); i++) {
+    for (; i < (kernel_pages + page_array_pages); i++) {
         page_array[i].phys_addr = (i * PAGE_SIZE); // Identity map the src pages
         page_array[i].ref_count = 1;
         page_array[i].flags.allocated = 1;
@@ -192,7 +195,7 @@ void mem_init_paging(unsigned long int* heap_start) {
     }
 
     // map the heap region
-    for (; i < (kernel_pages + (page_array_len / PAGE_SIZE) + (KERNEL_HEAP_SIZE / PAGE_SIZE)); i++) {
+    for (; i < (kernel_pages + page_array_pages + heap_reserved_pages); i++) {
         page_array[i].phys_addr = (i * PAGE_SIZE); // Identity map the src pages
         page_array[i].ref_count = 1;
         page_array[i].flags.allocated = 1;
@@ -207,7 +210,7 @@ void mem_init_paging(unsigned long int* heap_start) {
         append_page_list(&free_pages, &page_array[i]);
     }
 
-    *heap_start = (unsigned long int)page_array + page_array_len;
+    *heap_start = mem_align_up((ULong)page_array + (ULong)page_array_len); // start the heap on a clean page boundary
 }
 
 /**

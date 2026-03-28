@@ -7,8 +7,8 @@
 
 #define VA_START            0xFFFF000000000000
 
-#define LOW_MEMORY_CEILING  0x200000                // first 2MB is for low memory.
-                                                    // This is for our kernel resides, its heap and stacks
+#define LOW_MEMORY_CEILING  0x800000                // first 8MB is reserved for boot images,
+                                                    // boot stacks, and early allocator state
 
 #define VA_HIGH_MEMORY      (VA_START + LOW_MEMORY_CEILING)
 #define PAGE_SIZE           0x1000                  // 1 page frame = 4KB
@@ -95,6 +95,7 @@ PAGE* mem_page_from_phys(PhysAddr phys_addr);       // page metadata entry for a
 unsigned long mem_heap_total_bytes(void);           // total kernel heap span managed by kmalloc
 unsigned long mem_heap_used_bytes(void);            // bytes currently held by allocated heap segments
 unsigned long mem_heap_free_bytes(void);            // bytes currently available in free heap segments
+void mem_heap_dump(int count);                      // dump heap segments for allocator debugging
 Address mem_alloc_page(void);                        // allocate a page in physical memory
 void mem_retain_page(Address ptr);                   // increment page reference count
 void mem_free_page(Address  ptr);                    // release one reference to a page

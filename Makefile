@@ -1,12 +1,44 @@
+# Default macOS/Linux toolchain path (override in environment as needed)
 #ARMGNU ?= /Applications/ArmGNUToolchain/12.3.Rel1/aarch64-none-elf/bin/aarch64-none-elf
 #ARMGNU ?= /Applications/ArmGNUToolchain/13.2.Rel1/aarch64-none-elf/bin/aarch64-none-elf
 ARMGNU ?= E:\Nextcloud\raspo3b-os/toolchain/Windows/arm-gnu-toolchain-13.2.Rel1-mingw-w64-i686-aarch64-none-elf/bin/aarch64-none-elf
 #ARMGNU ?= C:\Users\bobuc\Nextcloud\raspo3b-os/toolchain/Windows/arm-gnu-toolchain-13.2.Rel1-mingw-w64-i686-aarch64-none-elf/bin/aarch64-none-elf
 #ARMGNU ?= aarch64-none-elf
-#QEMU ?= qemu-system-aarch64
-QEMU ?= d:\qemu\qemu-system-aarch64.exe
+# QEMU default. On Windows, prefer explicit .exe when running native cmd shells.
+QEMU ?= qemu-system-aarch64
+
+# Detect Windows more robustly (OS, uname, MSYS/MINGW/CYGWIN, or WINDIR)
+UNAME_S := $(shell uname -s 2>/dev/null || true)
+IS_WINDOWS := 0
+ifeq ($(OS),Windows_NT)
+	IS_WINDOWS := 1
+endif
+ifneq ($(findstring MINGW,$(UNAME_S)),)
+	IS_WINDOWS := 1
+endif
+ifneq ($(findstring MSYS,$(UNAME_S)),)
+	IS_WINDOWS := 1
+endif
+ifneq ($(findstring CYGWIN,$(UNAME_S)),)
+	IS_WINDOWS := 1
+endif
+ifneq ($(WINDIR),)
+	IS_WINDOWS := 1
+endif
+$(info Detected OS: $(OS) uname: $(UNAME_S) IS_WINDOWS=$(IS_WINDOWS))
+ifeq ($(IS_WINDOWS),1)
+	# If using native Windows toolchain path, you can set ARMGNU externally,
+	# otherwise provide a common example (adjust to your installation):
+	ARMGNU ?= E:/Nextcloud/raspo3b-os/toolchain/Windows/arm-gnu-toolchain-13.2.Rel1-mingw-w64-i686-aarch64-none-elf/bin/aarch64-none-elf
+	# Prefer bash-style shell if available (MSYS2/MinGW). If not present, many
+	# Make targets require a POSIX shell—consider using WSL or MSYS2 on Windows.
+	SHELL := bash
+	# Use forward slashes in Windows QEMU path to avoid backslash escaping
+	QEMU := d:/qemu/qemu-system-aarch64.exe
+endif
+
 QEMU_CPUS ?= 4
-QEMU_USB ?= 0
+QEMU_USB ?= 1
 QEMU_GUI ?= 0
 comma := ,
 
@@ -14,8 +46,13 @@ ARCH ?= aarch64
 CPU ?= cortex-a53
 BOARD ?= raspi3b
 QEMU_MACHINE ?= raspi3b
-QEMU_USB_ARGS = $(if $(filter 1,$(QEMU_USB)),-device qemu-xhci$(comma)id=xhci -device usb-kbd -device usb-mouse -device usb-tablet,)
 QEMU_DISPLAY_ARGS = $(if $(filter 1,$(QEMU_GUI)),-display default,$(if $(filter 1,$(QEMU_USB)),-display default,-display none))
+
+ifneq ($(filter virt,$(QEMU_MACHINE)),)
+QEMU_USB_ARGS = $(if $(filter 1,$(QEMU_USB)),-device qemu-xhci$(comma)id=xhci -device usb-kbd -device usb-mouse -device usb-tablet,)
+else
+QEMU_USB_ARGS = $(if $(filter 1,$(QEMU_USB)),-device usb-kbd -device usb-mouse -device usb-tablet,)
+endif
 
 PLATFORM_CPPFLAGS = -DROS_BOARD_HEADER=\"platform/board/$(BOARD).h\"
 PLATFORM_CPPFLAGS += -DROS_CPU_MMU_HEADER=\"platform/cpu/$(CPU)/mmu.h\"
@@ -24,6 +61,7 @@ PLATFORM_CPPFLAGS += -DROS_QEMU_USB_ENABLED=$(QEMU_USB)
 
 BUILD_DIR = output
 SRC_DIR = kernel
+LOADER_DIR = kernel-loader
 USR_DIR = applications
 USR_INCLUDE_DIR = $(USR_DIR)/include
 USR_COMMON_DIR = $(USR_DIR)/common
@@ -34,9 +72,16 @@ INCLUDE_DIR = $(SRC_DIR)/include
 OBJS_DIR = $(BUILD_DIR)/objs
 KERNEL_ELF = $(BUILD_DIR)/kernel8.elf
 KERNEL_IMG = $(BUILD_DIR)/kernel8.img
+MAIN_KERNEL_ELF = $(BUILD_DIR)/roskrnl.elf
+MAIN_KERNEL_IMAGE = $(BUILD_DIR)/roskrnl
+MAIN_KERNEL_LINKER_SCRIPT = $(SRC_DIR)/link.ld
+LOADER_LINKER_SCRIPT = $(LOADER_DIR)/link.ld
+ROSKRNL_NAME = roskrnl
 
-COPS = -g -Werror -nostdlib -nostartfiles -ffreestanding -fno-omit-frame-pointer -I$(INCLUDE_DIR) -I$(SRC_DIR) -mgeneral-regs-only $(PLATFORM_CPPFLAGS)
-ASMOPS = -g -I$(INCLUDE_DIR) $(PLATFORM_CPPFLAGS)
+COPS = -g -Werror -nostdlib -nostartfiles -ffreestanding -fno-omit-frame-pointer -I. -I$(INCLUDE_DIR) -I$(SRC_DIR) -mgeneral-regs-only $(PLATFORM_CPPFLAGS)
+ASMOPS = -g -I. -I$(INCLUDE_DIR) $(PLATFORM_CPPFLAGS)
+LOADER_COPS = -g -Werror -nostdlib -nostartfiles -ffreestanding -fno-omit-frame-pointer -I. -I$(LOADER_DIR)/include -I$(LOADER_DIR) -mgeneral-regs-only $(PLATFORM_CPPFLAGS)
+LOADER_ASMOPS = -g -I. -I$(LOADER_DIR)/include -I$(LOADER_DIR) $(PLATFORM_CPPFLAGS)
 USER_COPS = -g -Werror -nostdlib -nostartfiles -ffreestanding -fno-omit-frame-pointer -I$(USR_INCLUDE_DIR) -mgeneral-regs-only
 USER_CXXOPS = $(USER_COPS) -fno-exceptions -fno-rtti -fno-threadsafe-statics -fno-use-cxa-atexit
 USER_ASMOPS = -g -I$(USR_INCLUDE_DIR)
@@ -64,6 +109,19 @@ $(OBJS_DIR)/%_s.o: $(SRC_DIR)/%.S
 	@echo "-> $@..."
 	@$(ARMGNU)-gcc $(ASMOPS) -MMD -c $< -o $@
 
+$(OBJS_DIR)/kernel-loader/%_c.o: $(LOADER_DIR)/%.c
+	@echo "-> $@..."
+	@mkdir -p $(@D)
+	@$(ARMGNU)-gcc $(LOADER_COPS) -MMD -c $< -o $@
+$(OBJS_DIR)/kernel-loader/%_cpp.o: $(LOADER_DIR)/%.cpp
+	@echo "-> $@..."
+	@mkdir -p $(@D)
+	@$(ARMGNU)-g++ $(LOADER_COPS) -MMD -c $< -o $@
+$(OBJS_DIR)/kernel-loader/%_s.o: $(LOADER_DIR)/%.S
+	@echo "-> $@..."
+	@mkdir -p $(@D)
+	@$(ARMGNU)-gcc $(LOADER_ASMOPS) -MMD -c $< -o $@
+
 FONT_PSF_OBJ = $(OBJS_DIR)/font_psf.o
 FONT_PSF_SRC = build/screenfont/font.psf
 FONT_SFN_OBJ = $(OBJS_DIR)/font_sfn.o
@@ -77,16 +135,32 @@ $(FONT_SFN_OBJ): $(FONT_SFN_SRC)
 
 #C_FILES = $(wildcard $(SRC_DIR)/*.c)
 SOURCE_FIND = find $(SRC_DIR) -type d -name '_*' -prune -o -type f
-C_FILES = $(shell $(SOURCE_FIND) -name '*.c' -print)
-CPP_FILES = $(shell $(SOURCE_FIND) -name '*.cpp' -print)
-#ASM_FILES = $(wildcard $(SRC_DIR)/*.S)
-ASM_FILES = $(shell $(SOURCE_FIND) -name '*.S' -print)
+# Run the find once and filter in Make to avoid multiple shell spawns
+SOURCE_FILES := $(shell $(SOURCE_FIND) -print)
+C_FILES := $(filter %.c,$(SOURCE_FILES))
+CPP_FILES := $(filter %.cpp,$(SOURCE_FILES))
+ASM_FILES := $(filter %.S,$(SOURCE_FILES))
 OBJ_FILES = $(C_FILES:$(SRC_DIR)/%.c=$(OBJS_DIR)/%_c.o)
 OBJ_FILES += $(CPP_FILES:$(SRC_DIR)/%.cpp=$(OBJS_DIR)/%_cpp.o)
 OBJ_FILES += $(ASM_FILES:$(SRC_DIR)/%.S=$(OBJS_DIR)/%_s.o)
 OBJ_FILES += $(FONT_PSF_OBJ)
 DEP_FILES = $(OBJ_FILES:%.o=%.d)
 -include $(DEP_FILES)
+
+LOADER_SOURCE_FIND = find $(LOADER_DIR) -type d -name '_*' -prune -o -type f
+# Cache loader file list then filter
+LOADER_SOURCE_FILES := $(shell $(LOADER_SOURCE_FIND) -print)
+LOADER_C_FILES := $(filter %.c,$(LOADER_SOURCE_FILES))
+LOADER_CPP_FILES := $(filter %.cpp,$(LOADER_SOURCE_FILES))
+LOADER_ASM_FILES := $(filter %.S,$(LOADER_SOURCE_FILES))
+LOADER_OBJ_FILES = $(LOADER_C_FILES:$(LOADER_DIR)/%.c=$(OBJS_DIR)/kernel-loader/%_c.o)
+LOADER_OBJ_FILES += $(LOADER_CPP_FILES:$(LOADER_DIR)/%.cpp=$(OBJS_DIR)/kernel-loader/%_cpp.o)
+LOADER_OBJ_FILES += $(LOADER_ASM_FILES:$(LOADER_DIR)/%.S=$(OBJS_DIR)/kernel-loader/%_s.o)
+LOADER_DEP_FILES = $(LOADER_OBJ_FILES:%.o=%.d)
+-include $(LOADER_DEP_FILES)
+
+BOOTLOADER_OBJ_FILES = $(LOADER_OBJ_FILES)
+MAIN_KERNEL_OBJ_FILES = $(filter-out $(OBJS_DIR)/arch/cortex-a53/boot/% $(OBJS_DIR)/arch/cortex-a53/secondary_entry_s.o,$(OBJ_FILES))
 
 
 #######################################################################################################
@@ -108,26 +182,32 @@ USER_DLL_LINKER_SCRIPT = $(USR_COMMON_DIR)/dll.ld
 USER_PACKER = python3 tools/pack_user_exe.py
 USER_DLL_PACKER = python3 tools/pack_user_dll.py
 USER_MODULE_PACKER = python3 tools/pack_kernel_module.py
+MAIN_KERNEL_PACKER = python3 tools/pack_roskrnl.py
 USER_TEMPLATE_DIR = $(USR_DIR)/_templates
 USER_SOURCE_FIND = find $(USR_DIR) -type d -name '_*' -prune -o -type f
 .PHONY: all clean applications applications-vfs user user-vfs new-app new-dll new-sys new-app-pair new-user-app new-user-dll new-user-sys new-user-pair fat32-mount fat32-umount fat32-list fat32-read fat32-hexdump run debug asm dump diasm gdb kernel8.img
-USER_C_FILES = $(shell $(USER_SOURCE_FIND) -name '*.c' -print)
-USER_CPP_FILES = $(shell $(USER_SOURCE_FIND) -name '*.cpp' -print)
-USER_ASM_FILES = $(shell $(USER_SOURCE_FIND) -name '*.S' -print)
+# Cache all user-space files once, then derive per-directory lists with filters
+USER_SOURCE_FILES := $(shell $(USER_SOURCE_FIND) -print)
+USER_C_FILES := $(filter %.c,$(USER_SOURCE_FILES))
+USER_CPP_FILES := $(filter %.cpp,$(USER_SOURCE_FILES))
+USER_ASM_FILES := $(filter %.S,$(USER_SOURCE_FILES))
 USER_OBJ_FILES = $(USER_C_FILES:$(USR_DIR)/%.c=$(USER_OBJS_DIR)/%_c.o)
 USER_OBJ_FILES += $(USER_CPP_FILES:$(USR_DIR)/%.cpp=$(USER_OBJS_DIR)/%_cpp.o)
 USER_OBJ_FILES += $(USER_ASM_FILES:$(USR_DIR)/%.S=$(USER_OBJS_DIR)/%_s.o)
 USER_DEP_FILES = $(USER_OBJ_FILES:%.o=%.d)
 USER_PROGRAMS = $(sort $(notdir $(shell find $(USR_PROGRAMS_DIR) -mindepth 1 -maxdepth 1 -type d)))
-USER_COMMON_C_FILES = $(shell find $(USR_COMMON_DIR) -type f -name '*.c')
-USER_COMMON_CPP_FILES = $(shell find $(USR_COMMON_DIR) -type f -name '*.cpp')
-USER_COMMON_ASM_FILES = $(shell find $(USR_COMMON_DIR) -type f -name '*.S')
+# Common and lib lists derived from cached USER_SOURCE_FILES to avoid extra find calls
+USER_COMMON_FILES := $(filter $(USR_COMMON_DIR)/%,$(USER_SOURCE_FILES))
+USER_COMMON_C_FILES := $(filter %.c,$(USER_COMMON_FILES))
+USER_COMMON_CPP_FILES := $(filter %.cpp,$(USER_COMMON_FILES))
+USER_COMMON_ASM_FILES := $(filter %.S,$(USER_COMMON_FILES))
 USER_COMMON_OBJ_FILES = $(USER_COMMON_C_FILES:$(USR_DIR)/%.c=$(USER_OBJS_DIR)/%_c.o)
 USER_COMMON_OBJ_FILES += $(USER_COMMON_CPP_FILES:$(USR_DIR)/%.cpp=$(USER_OBJS_DIR)/%_cpp.o)
 USER_COMMON_OBJ_FILES += $(USER_COMMON_ASM_FILES:$(USR_DIR)/%.S=$(USER_OBJS_DIR)/%_s.o)
-USER_LIB_C_FILES = $(shell find $(USR_LIB_DIR) -type f -name '*.c')
-USER_LIB_CPP_FILES = $(shell find $(USR_LIB_DIR) -type f -name '*.cpp')
-USER_LIB_ASM_FILES = $(shell find $(USR_LIB_DIR) -type f -name '*.S')
+USER_LIB_FILES := $(filter $(USR_LIB_DIR)/%,$(USER_SOURCE_FILES))
+USER_LIB_C_FILES := $(filter %.c,$(USER_LIB_FILES))
+USER_LIB_CPP_FILES := $(filter %.cpp,$(USER_LIB_FILES))
+USER_LIB_ASM_FILES := $(filter %.S,$(USER_LIB_FILES))
 USER_LIB_OBJ_FILES = $(USER_LIB_C_FILES:$(USR_DIR)/%.c=$(USER_OBJS_DIR)/%_c.o)
 USER_LIB_OBJ_FILES += $(USER_LIB_CPP_FILES:$(USR_DIR)/%.cpp=$(USER_OBJS_DIR)/%_cpp.o)
 USER_LIB_OBJ_FILES += $(USER_LIB_ASM_FILES:$(USR_DIR)/%.S=$(USER_OBJS_DIR)/%_s.o)
@@ -209,9 +289,10 @@ $(USER_SYSTEM_OBJ_DIR)/%_s.o: $(USR_SYSTEM_DIR)/%.S
 	@$(ARMGNU)-gcc $(MODULE_ASMOPS) -MMD -c $< -o $@
 
 define BUILD_USER_PROGRAM
-USER_$(1)_C_FILES := $$(shell find $(USR_PROGRAMS_DIR)/$(1) -type f -name '*.c')
-USER_$(1)_CPP_FILES := $$(shell find $(USR_PROGRAMS_DIR)/$(1) -type f -name '*.cpp')
-USER_$(1)_ASM_FILES := $$(shell find $(USR_PROGRAMS_DIR)/$(1) -type f -name '*.S')
+USER_$(1)_FILES := $$(filter $(USR_PROGRAMS_DIR)/$(1)/%,$$(USER_SOURCE_FILES))
+USER_$(1)_C_FILES := $$(filter %.c,$$(USER_$(1)_FILES))
+USER_$(1)_CPP_FILES := $$(filter %.cpp,$$(USER_$(1)_FILES))
+USER_$(1)_ASM_FILES := $$(filter %.S,$$(USER_$(1)_FILES))
 USER_$(1)_OBJ_FILES := $$(USER_$(1)_C_FILES:$(USR_DIR)/%.c=$(USER_OBJS_DIR)/%_c.o)
 USER_$(1)_OBJ_FILES += $$(USER_$(1)_CPP_FILES:$(USR_DIR)/%.cpp=$(USER_OBJS_DIR)/%_cpp.o)
 USER_$(1)_OBJ_FILES += $$(USER_$(1)_ASM_FILES:$(USR_DIR)/%.S=$(USER_OBJS_DIR)/%_s.o)
@@ -230,9 +311,10 @@ endef
 $(foreach prog,$(USER_PROGRAMS),$(eval $(call BUILD_USER_PROGRAM,$(prog))))
 
 define BUILD_USER_DLL
-USER_DLL_$(1)_C_FILES := $$(shell find $(USR_DLLS_DIR)/$(1) -type f -name '*.c')
-USER_DLL_$(1)_CPP_FILES := $$(shell find $(USR_DLLS_DIR)/$(1) -type f -name '*.cpp')
-USER_DLL_$(1)_ASM_FILES := $$(shell find $(USR_DLLS_DIR)/$(1) -type f -name '*.S')
+USER_DLL_$(1)_FILES := $$(filter $(USR_DLLS_DIR)/$(1)/%,$$(USER_SOURCE_FILES))
+USER_DLL_$(1)_C_FILES := $$(filter %.c,$$(USER_DLL_$(1)_FILES))
+USER_DLL_$(1)_CPP_FILES := $$(filter %.cpp,$$(USER_DLL_$(1)_FILES))
+USER_DLL_$(1)_ASM_FILES := $$(filter %.S,$$(USER_DLL_$(1)_FILES))
 USER_DLL_$(1)_OBJ_FILES := $$(USER_DLL_$(1)_C_FILES:$(USR_DIR)/%.c=$(USER_DLL_OBJ_DIR)/%_c.o)
 USER_DLL_$(1)_OBJ_FILES += $$(USER_DLL_$(1)_CPP_FILES:$(USR_DIR)/%.cpp=$(USER_DLL_OBJ_DIR)/%_cpp.o)
 USER_DLL_$(1)_OBJ_FILES += $$(USER_DLL_$(1)_ASM_FILES:$(USR_DIR)/%.S=$(USER_DLL_OBJ_DIR)/%_s.o)
@@ -252,9 +334,10 @@ endef
 $(foreach dll,$(USER_SHARED_LIBRARIES),$(eval $(call BUILD_USER_DLL,$(dll))))
 
 define BUILD_USER_SYS
-USER_SYS_$(1)_C_FILES := $$(shell find $(USR_SYSTEM_DIR)/$(1) -type f -name '*.c')
-USER_SYS_$(1)_CPP_FILES := $$(shell find $(USR_SYSTEM_DIR)/$(1) -type f -name '*.cpp')
-USER_SYS_$(1)_ASM_FILES := $$(shell find $(USR_SYSTEM_DIR)/$(1) -type f -name '*.S')
+USER_SYS_$(1)_FILES := $$(filter $(USR_SYSTEM_DIR)/$(1)/%,$$(USER_SOURCE_FILES))
+USER_SYS_$(1)_C_FILES := $$(filter %.c,$$(USER_SYS_$(1)_FILES))
+USER_SYS_$(1)_CPP_FILES := $$(filter %.cpp,$$(USER_SYS_$(1)_FILES))
+USER_SYS_$(1)_ASM_FILES := $$(filter %.S,$$(USER_SYS_$(1)_FILES))
 USER_SYS_$(1)_OBJ_FILES := $$(USER_SYS_$(1)_C_FILES:$(USR_SYSTEM_DIR)/%.c=$(USER_SYSTEM_OBJ_DIR)/%_c.o)
 USER_SYS_$(1)_OBJ_FILES += $$(USER_SYS_$(1)_CPP_FILES:$(USR_SYSTEM_DIR)/%.cpp=$(USER_SYSTEM_OBJ_DIR)/%_cpp.o)
 USER_SYS_$(1)_OBJ_FILES += $$(USER_SYS_$(1)_ASM_FILES:$(USR_SYSTEM_DIR)/%.S=$(USER_SYSTEM_OBJ_DIR)/%_s.o)
@@ -408,44 +491,76 @@ new-user-pair:
 	echo "Created $(USR_INCLUDE_DIR)/app/$(DLL_NAME).h"; \
 	echo "Created $(USR_DLLS_DIR)/$(DLL_NAME)/main.c"
 
-applications-vfs: applications
+ifeq ($(IS_WINDOWS),1)
+applications-vfs:
+	@echo "applications-vfs is not supported on native Windows shells."
+	@echo "Use WSL, MSYS2, or run this Makefile on macOS/Linux to use 'applications-vfs'."
+
+user-vfs: applications-vfs
+
+fat32-list:
+	@echo "fat32-list is not supported on native Windows shells."
+	@echo "Use WSL/MSYS2 or mount fat32.img manually."
+
+fat32-mount:
+	@echo "fat32-mount is not supported on native Windows shells."
+
+fat32-umount:
+	@echo "fat32-umount is not supported on native Windows shells."
+
+fat32-read:
+	@echo "fat32-read is not supported on native Windows shells."
+
+fat32-hexdump:
+	@echo "fat32-hexdump is not supported on native Windows shells."
+else
+applications-vfs: applications $(MAIN_KERNEL_IMAGE)
 	@set -e; \
-	if mount | grep -q " on $(USER_VFS_MOUNT_DIR_ABS) "; then umount $(USER_VFS_MOUNT_DIR_ABS) >/dev/null 2>&1 || true; fi; \
-	if [ -f $(USER_VFS_DEV_FILE) ]; then hdiutil detach "$$(cat $(USER_VFS_DEV_FILE))" >/dev/null 2>&1 || true; rm -f $(USER_VFS_DEV_FILE); fi; \
+	if mount | grep -q " on $(USER_VFS_MOUNT_DIR_ABS) "; then umount -f $(USER_VFS_MOUNT_DIR_ABS) >/dev/null 2>&1 || true; fi; \
+	if [ -f $(USER_VFS_DEV_FILE) ]; then hdiutil detach -force "$$(cat $(USER_VFS_DEV_FILE))" >/dev/null 2>&1 || true; rm -f $(USER_VFS_DEV_FILE); fi; \
+	STALE_DEVS=$$(hdiutil info | awk -v target="$$PWD/fat32.img" '/image-path/ && $$NF == target { found=1; next } found && /^\/dev\// { print $$1; found=0 }'); \
+	for STALE_DEV in $$STALE_DEVS; do hdiutil detach -force "$$STALE_DEV" >/dev/null 2>&1 || true; done; \
 	mkdir -p $(USER_VFS_MOUNT_DIR_ABS); \
 	DEV=$$($(USER_VFS_ATTACH) | awk 'NR==1 { print $$1 }'); \
-	trap 'umount $(USER_VFS_MOUNT_DIR_ABS) >/dev/null 2>&1 || true; hdiutil detach "'"'$$DEV'"'" >/dev/null 2>&1 || true' EXIT; \
+	if [ -z "$$DEV" ]; then echo "Failed to attach fat32.img"; exit 1; fi; \
+	trap 'umount -f $(USER_VFS_MOUNT_DIR_ABS) >/dev/null 2>&1 || true; hdiutil detach -force "'"'$$DEV'"'" >/dev/null 2>&1 || true' EXIT; \
 	mount -t msdos "$$DEV" $(USER_VFS_MOUNT_DIR_ABS); \
 	mkdir -p $(USER_VFS_BIN_DIR); \
 	mkdir -p $(USER_VFS_LIB_DIR); \
 	mkdir -p $(USER_VFS_MOUNT_DIR)/system; \
+	rm -f $(USER_VFS_MOUNT_DIR)/$(ROSKRNL_NAME); \
 	rm -f $(USER_VFS_MOUNT_DIR)/user.exe; \
 	find $(USER_VFS_BIN_DIR) -maxdepth 1 -type f \( -name '*.elf' -o -name '*.exe' \) -delete; \
 	find $(USER_VFS_LIB_DIR) -maxdepth 1 -type f -name '*.dll' -delete; \
 	find $(USER_VFS_MOUNT_DIR)/system -maxdepth 1 -type f -name '*.sys' -delete; \
+	cp "$(MAIN_KERNEL_IMAGE)" $(USER_VFS_MOUNT_DIR)/$(ROSKRNL_NAME); \
 	for exe in $(USER_PROGRAM_EXES); do cp "$${exe}" $(USER_VFS_BIN_DIR)/$$(basename "$$exe"); done; \
 	for dll in $(USER_DLLS); do cp "$${dll}" $(USER_VFS_LIB_DIR)/$$(basename "$$dll"); done; \
 	for sys in $(USER_SYS_RUNTIME_PACKED); do cp "$${sys}" $(USER_VFS_MOUNT_DIR)/system/$$(basename "$$sys"); done; \
 	echo "FAT32 image contents after sync:"; \
 	find $(USER_VFS_MOUNT_DIR_ABS) -mindepth 1 -maxdepth 2 -print | sed 's#^$(USER_VFS_MOUNT_DIR_ABS)##' | LC_ALL=C sort; \
-	umount $(USER_VFS_MOUNT_DIR_ABS); \
-	hdiutil detach "$$DEV" >/dev/null; \
+	umount -f $(USER_VFS_MOUNT_DIR_ABS); \
+	hdiutil detach -force "$$DEV" >/dev/null; \
 	trap - EXIT
+endif
 
 user-vfs: applications-vfs
 
 fat32-list:
 	@set -e; \
-	if mount | grep -q " on $(USER_VFS_MOUNT_DIR_ABS) "; then umount $(USER_VFS_MOUNT_DIR_ABS) >/dev/null 2>&1 || true; fi; \
-	if [ -f $(USER_VFS_DEV_FILE) ]; then hdiutil detach "$$(cat $(USER_VFS_DEV_FILE))" >/dev/null 2>&1 || true; rm -f $(USER_VFS_DEV_FILE); fi; \
+	if mount | grep -q " on $(USER_VFS_MOUNT_DIR_ABS) "; then umount -f $(USER_VFS_MOUNT_DIR_ABS) >/dev/null 2>&1 || true; fi; \
+	if [ -f $(USER_VFS_DEV_FILE) ]; then hdiutil detach -force "$$(cat $(USER_VFS_DEV_FILE))" >/dev/null 2>&1 || true; rm -f $(USER_VFS_DEV_FILE); fi; \
+	STALE_DEVS=$$(hdiutil info | awk -v target="$$PWD/fat32.img" '/image-path/ && $$NF == target { found=1; next } found && /^\/dev\// { print $$1; found=0 }'); \
+	for STALE_DEV in $$STALE_DEVS; do hdiutil detach -force "$$STALE_DEV" >/dev/null 2>&1 || true; done; \
 	mkdir -p $(USER_VFS_MOUNT_DIR_ABS); \
 	DEV=$$($(USER_VFS_ATTACH) | awk 'NR==1 { print $$1 }'); \
-	trap 'umount $(USER_VFS_MOUNT_DIR_ABS) >/dev/null 2>&1 || true; hdiutil detach "'"'$$DEV'"'" >/dev/null 2>&1 || true' EXIT; \
+	if [ -z "$$DEV" ]; then echo "Failed to attach fat32.img"; exit 1; fi; \
+	trap 'umount -f $(USER_VFS_MOUNT_DIR_ABS) >/dev/null 2>&1 || true; hdiutil detach -force "'"'$$DEV'"'" >/dev/null 2>&1 || true' EXIT; \
 	mount -t msdos "$$DEV" $(USER_VFS_MOUNT_DIR_ABS); \
 	echo "FAT32 image contents:"; \
 	find $(USER_VFS_MOUNT_DIR_ABS) -mindepth 1 -maxdepth 2 -print | sed 's#^$(USER_VFS_MOUNT_DIR_ABS)##' | LC_ALL=C sort; \
-	umount $(USER_VFS_MOUNT_DIR_ABS); \
-	hdiutil detach "$$DEV" >/dev/null; \
+	umount -f $(USER_VFS_MOUNT_DIR_ABS); \
+	hdiutil detach -force "$$DEV" >/dev/null; \
 	trap - EXIT
 
 fat32-mount:
@@ -455,7 +570,11 @@ fat32-mount:
 		echo "fat32.img is already mounted at $(USER_VFS_MOUNT_DIR_ABS)"; \
 		exit 0; \
 	fi; \
+	if [ -f $(USER_VFS_DEV_FILE) ]; then hdiutil detach -force "$$(cat $(USER_VFS_DEV_FILE))" >/dev/null 2>&1 || true; rm -f $(USER_VFS_DEV_FILE); fi; \
+	STALE_DEVS=$$(hdiutil info | awk -v target="$$PWD/fat32.img" '/image-path/ && $$NF == target { found=1; next } found && /^\/dev\// { print $$1; found=0 }'); \
+	for STALE_DEV in $$STALE_DEVS; do hdiutil detach -force "$$STALE_DEV" >/dev/null 2>&1 || true; done; \
 	DEV=$$($(USER_VFS_ATTACH) | awk 'NR==1 { print $$1 }'); \
+	if [ -z "$$DEV" ]; then echo "Failed to attach fat32.img"; exit 1; fi; \
 	echo "$$DEV" > $(USER_VFS_DEV_FILE); \
 	mount -t msdos "$$DEV" $(USER_VFS_MOUNT_DIR_ABS); \
 	echo "Mounted fat32.img at $(USER_VFS_MOUNT_DIR_ABS) using $$DEV"
@@ -463,16 +582,18 @@ fat32-mount:
 fat32-umount:
 	@set -e; \
 	if mount | grep -q " on $(USER_VFS_MOUNT_DIR_ABS) "; then \
-		umount $(USER_VFS_MOUNT_DIR_ABS); \
+		umount -f $(USER_VFS_MOUNT_DIR_ABS) >/dev/null 2>&1 || true; \
 	fi; \
 	if [ -f $(USER_VFS_DEV_FILE) ]; then \
 		DEV=$$(cat $(USER_VFS_DEV_FILE)); \
-		hdiutil detach "$$DEV" >/dev/null 2>&1 || true; \
+		hdiutil detach -force "$$DEV" >/dev/null 2>&1 || true; \
 		rm -f $(USER_VFS_DEV_FILE); \
 		echo "Detached $$DEV"; \
 	else \
 		echo "No recorded FAT32 device to detach"; \
-	fi
+	fi; \
+	STALE_DEVS=$$(hdiutil info | awk -v target="$$PWD/fat32.img" '/image-path/ && $$NF == target { found=1; next } found && /^\/dev\// { print $$1; found=0 }'); \
+	for STALE_DEV in $$STALE_DEVS; do hdiutil detach -force "$$STALE_DEV" >/dev/null 2>&1 || true; echo "Detached $$STALE_DEV"; done
 
 fat32-read:
 	@set -e; \
@@ -511,6 +632,17 @@ fat32-hexdump:
 	xxd -g 1 -l 256 "$$TARGET"
 #######################################################################################################
 
+
+ifeq ($(IS_WINDOWS),1)
+f32.disk:
+	@echo "f32.disk target is not supported on native Windows shells."
+
+f32.empty:
+	@echo "f32.empty target is not supported on native Windows shells."
+
+populate_disk:
+	@echo "populate_disk is not supported on native Windows shells."
+else
 f32.disk:
 	-rm f32.disk
 	dd if=/dev/zero of=f32.disk bs=1M count=64
@@ -527,38 +659,55 @@ populate_disk: mount_disk
 	sleep 1
 	sudo umount fat32
 	-@rm -Rf fat32
+endif
 
 #######################################################################################################
 
 
-$(KERNEL_IMG): $(SRC_DIR)/link.ld $(OBJ_FILES)
+$(MAIN_KERNEL_ELF): $(MAIN_KERNEL_LINKER_SCRIPT) $(MAIN_KERNEL_OBJ_FILES)
 	@mkdir -p $(BUILD_DIR)
-	@$(ARMGNU)-ld -nostdlib -T $(SRC_DIR)/link.ld -o $(KERNEL_ELF) $(OBJ_FILES) -g
+	@$(ARMGNU)-ld -nostdlib -T $(MAIN_KERNEL_LINKER_SCRIPT) -o $(MAIN_KERNEL_ELF) $(MAIN_KERNEL_OBJ_FILES) -g
+
+$(MAIN_KERNEL_IMAGE): $(MAIN_KERNEL_ELF) tools/pack_roskrnl.py
+	@mkdir -p $(BUILD_DIR)
+	@$(MAIN_KERNEL_PACKER) --input $(MAIN_KERNEL_ELF) --output $(MAIN_KERNEL_IMAGE)
+
+$(KERNEL_IMG): $(LOADER_LINKER_SCRIPT) $(BOOTLOADER_OBJ_FILES)
+	@mkdir -p $(BUILD_DIR)
+	@$(ARMGNU)-ld -nostdlib -T $(LOADER_LINKER_SCRIPT) -o $(KERNEL_ELF) $(BOOTLOADER_OBJ_FILES) -g
 	@$(ARMGNU)-objcopy $(KERNEL_ELF) -O binary $(KERNEL_IMG)
 
-kernel8.img: applications-vfs $(KERNEL_IMG)
+kernel8.img: applications-vfs $(MAIN_KERNEL_IMAGE) $(KERNEL_IMG)
 	@true
 dump: all
 	@$(ARMGNU)-objdump --all-headers $(KERNEL_ELF)
 diasm: all
 	@$(ARMGNU)-objdump --all-headers $(KERNEL_ELF)
-run: QEMU_GUI=1
-run: all
+ifeq ($(IS_WINDOWS),1)
+run: QEMU_GUI=0
+run: kernel8.img
+	@echo "Running on Windows: --------------------------------------------------------------------- "
+	@echo "Using QEMU: $(QEMU)"
+	"$(QEMU)" -M $(QEMU_MACHINE) -smp $(QEMU_CPUS) -kernel "$(KERNEL_IMG)" -serial stdio $(QEMU_DISPLAY_ARGS) $(QEMU_USB_ARGS) -drive file=fat32.img,if=sd,format=raw
+else
+run: QEMU_GUI=0
+run: kernel8.img
 	@echo "Running: --------------------------------------------------------------------------------- "
-	@$(QEMU) -M $(QEMU_MACHINE) -smp $(QEMU_CPUS) -kernel $(KERNEL_IMG) -serial stdio -s $(QEMU_DISPLAY_ARGS) $(QEMU_USB_ARGS) -drive file=fat32.img,if=sd,format=raw
+	@$(QEMU) -M $(QEMU_MACHINE) -smp $(QEMU_CPUS) -kernel $(KERNEL_IMG) -serial stdio $(QEMU_DISPLAY_ARGS) $(QEMU_USB_ARGS) -drive file=fat32.img,if=sd,format=raw
+endif
 run-gfx: QEMU_GUI=1
-run-gfx: all
+run-gfx: kernel8.img
 	@echo "Running with framebuffer display --------------------------------------------------------- "
-	@$(QEMU) -M $(QEMU_MACHINE) -smp $(QEMU_CPUS) -kernel $(KERNEL_IMG) -serial stdio -s -display default $(QEMU_USB_ARGS) -drive file=fat32.img,if=sd,format=raw
-run-headless: all
+	@$(QEMU) -M $(QEMU_MACHINE) -smp $(QEMU_CPUS) -kernel $(KERNEL_IMG) -serial stdio -display default $(QEMU_USB_ARGS) -drive file=fat32.img,if=sd,format=raw
+run-headless: kernel8.img
 	@echo "Running headless ------------------------------------------------------------------------- "
-	@$(QEMU) -M $(QEMU_MACHINE) -smp $(QEMU_CPUS) -kernel $(KERNEL_IMG) -serial stdio -s -display none -drive file=fat32.img,if=sd,format=raw
-debug: all
+	@$(QEMU) -M $(QEMU_MACHINE) -smp $(QEMU_CPUS) -kernel $(KERNEL_IMG) -serial stdio -display none -drive file=fat32.img,if=sd,format=raw
+debug: kernel8.img
 	@echo "QEMU starting. Remember to start gdb------------------------------------------------------ "
 	# @$(QEMU) -M $(QEMU_MACHINE) -kernel $(KERNEL_IMG) -serial null -serial stdio -display none -s -S -d trace:bcm2835_systmr*
 	@$(QEMU) -M $(QEMU_MACHINE) -smp $(QEMU_CPUS) -kernel $(KERNEL_IMG) -serial stdio -display none -s -S
 
-asm: all
+asm: kernel8.img
 	@echo "Running: --------------------------------------------------------------------------------- "
 	@$(QEMU) -M $(QEMU_MACHINE) -smp $(QEMU_CPUS) -kernel $(KERNEL_IMG) -serial null -d in_asm -monitor stdio -nographic -S -gdb tcp::1234
 gdb:

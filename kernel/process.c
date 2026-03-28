@@ -19,6 +19,60 @@ void copy_virtual_memory(struct task_struct* p);
 // mmu.c
 int process_map_page(Task* task, Address pa, Address va, Flags flags);
 
+Process* process_lookup(long pid) {
+    if (pid < 0 || pid >= NR_PROCESSES) {
+        return 0;
+    }
+
+    return processes[pid];
+}
+
+Task* process_main_thread(long pid) {
+    Process* process = process_lookup(pid);
+
+    return process ? process->main_thread : 0;
+}
+
+static int process_allocate_thread_slot(void) {
+    for (int index = 1; index < NR_TASKS; index++) {
+        if (!tasks[index]) {
+            return index;
+        }
+    }
+
+    return -1;
+}
+
+static Process* process_allocate_box(long pid, Process* parent) {
+    Process* process = (Process*)kmalloc(sizeof(Process));
+
+    if (!process) {
+        return 0;
+    }
+
+    memzero((Address)process, sizeof(*process));
+    process->id = pid;
+    process->parent_process_id = parent ? parent->id : 0;
+    process->state = PROCESS_ACTIVE;
+    process->main_thread_id = pid;
+    return process;
+}
+
+static void process_attach_thread(Task* task, Process* process) {
+    task->process = process;
+    if (!task->thread_name[0]) {
+        task->name = (Buffer)(process && process->name[0] ? process->name : "thread");
+    }
+
+    if (process) {
+        process->thread_count++;
+        if (!process->main_thread) {
+            process->main_thread = task;
+            process->main_thread_id = task->id;
+        }
+    }
+}
+
 /**
  * Record one kernel-owned page in the task bookkeeping array.
  *
@@ -165,7 +219,12 @@ void process_reset_user_space(Task* task) {
 void process_unload(Task* task) {
     // Move the task into zombie state so the cleanup pass can reclaim its resources later.
     preempt_disable();
+    scheduler_lock_acquire();
     task->state = TASK_ZOMBIE;
+    if (task->process && task->process->main_thread == task) {
+        task->process->state = PROCESS_ZOMBIE;
+    }
+    scheduler_lock_release();
 
     preempt_enable();
 
@@ -195,7 +254,10 @@ int kill_task(long pid) {
     }
 
     preempt_disable();
-    task = tasks[pid];
+    task = process_main_thread(pid);
+    if (!task) {
+        task = tasks[pid];
+    }
     if (!task || task->state == TASK_ZOMBIE) {
         preempt_enable();
         return -1;
@@ -207,7 +269,12 @@ int kill_task(long pid) {
         return 0;
     }
 
+    scheduler_lock_acquire();
     task->state = TASK_ZOMBIE;
+    if (task->process && task->process->main_thread == task) {
+        task->process->state = PROCESS_ZOMBIE;
+    }
+    scheduler_lock_release();
     preempt_enable();
     return 0;
 }
@@ -271,7 +338,20 @@ void cleanup_zombie_processes() {
             }
 
             // unset task in the array
+            scheduler_lock_acquire();
             tasks[i] = null;
+            if (t->process) {
+                if (t->process->thread_count > 0) {
+                    t->process->thread_count--;
+                }
+                if (t->process->main_thread == t && t->process->id > 0 && processes[t->process->id] == t->process) {
+                    processes[t->process->id] = 0;
+                    nr_processes--;
+                    kfree((Address)t->process);
+                }
+            }
+            nr_tasks--;
+            scheduler_lock_release();
         }
     }
     preempt_enable();
@@ -357,6 +437,8 @@ void user_process_loader(Address program_addr, ulong program_size) {
 int create_user_process(Address program_addr, ULong program_size) {
     preempt_disable();
     Task* new_task;
+    Process* new_process = 0;
+    int slot;
 
     Address task_page = mem_alloc_page();
     Address stack_page;
@@ -376,20 +458,33 @@ int create_user_process(Address program_addr, ULong program_size) {
     memzero(task_page + VA_START, PAGE_SIZE);
     new_task = (struct task_struct*)(task_page + VA_START);
     new_task->kernel_stack_page = stack_page;
+    slot = process_allocate_thread_slot();
+    if (slot < 0) {
+        mem_free_page(stack_page);
+        mem_free_page(task_page);
+        preempt_enable();
+        return -1;
+    }
+    new_process = process_allocate_box(slot, current_process);
+    if (!new_process) {
+        mem_free_page(stack_page);
+        mem_free_page(task_page);
+        preempt_enable();
+        return -1;
+    }
     struct pt_regs* childregs = task_pt_regs(new_task);
     new_task->mm.kernel_pages_count = 0;
     new_task->mm.user_pages_count = 0;
     new_task->mm.heap_next = USER_HEAP_BASE;
     new_task->mm.dll_local_next = USER_SHARED_LIBRARY_LOCAL_BASE;
-    new_task->name = (Buffer)new_task->user_name;
-    new_task->parent_pid = current_task ? current_task->id : 0;
-    new_task->user_name[0] = '\0';
-    new_task->user_program_path[0] = '\0';
+    new_task->name = (Buffer)new_task->thread_name;
+    new_task->thread_name[0] = '\0';
 
     // Clear heap bookkeeping because this task starts with no dynamic allocations.
     memzero((Address)new_task->mm.heap_allocs, sizeof(new_task->mm.heap_allocs));
     memzero((Address)new_task->mm.dll_locals, sizeof(new_task->mm.dll_locals));
     if (process_track_kernel_page(new_task, task_page) < 0 || process_track_kernel_page(new_task, stack_page) < 0) {
+        kfree((Address)new_process);
         mem_free_page(stack_page);
         mem_free_page(task_page);
         preempt_enable();
@@ -405,26 +500,32 @@ int create_user_process(Address program_addr, ULong program_size) {
 
     // Initialize scheduler-visible task state before placing the task in the global run queue.
     new_task->flags = PF_KTHREAD;
+    new_task->process = new_process;
     new_task->priority = current_task->priority;
-    new_task->state = TASK_RUNNING;
+    new_task->state = TASK_READY;
     new_task->counter = new_task->priority;
-    // Place spawned work on a target CPU instead of inheriting the caller's CPU blindly.
-    new_task->cpu_affinity = percpu_select_target_cpu();
+    // Keep task execution on the caller CPU while secondary context handling is stabilized.
+    new_task->cpu_affinity = task_cpu_index();
     new_task->preempt_count = 1; // disable preemtion until schedule_tail
 
     // new_task->cpu_context.pc = (unsigned long)user_process_pre_loader;
     new_task->cpu_context.pc = (unsigned long)start_thread_context;
     new_task->cpu_context.sp = (unsigned long)childregs; // new thread's SP is right below the reg struct. This is kernel space address
 
-    int pid = nr_tasks++;
-    new_task->id = pid;
-    tasks[pid] = new_task;
+    new_task->id = slot;
+    scheduler_lock_acquire();
+    tasks[slot] = new_task;
+    processes[new_process->id] = new_process;
+    nr_tasks++;
+    nr_processes++;
+    process_attach_thread(new_task, new_process);
+    scheduler_lock_release();
 
     // Wake a sleeping secondary so it can notice the newly queued task promptly.
     percpu_kick_cpu(new_task->cpu_affinity);
 
     preempt_enable();
-    return pid;
+    return new_process->id;
 }
 
 /**
@@ -438,9 +539,11 @@ int create_user_process(Address program_addr, ULong program_size) {
  * Returns:
  *   New PID on success, or `-1` when task creation fails.
  */
-ulong process_copy_thread(Flags flags, Address program_addr, Pointer arg) {
+ulong process_create_main_thread(Flags flags, Address program_addr, Pointer arg) {
     preempt_disable();
     Task* new_task;
+    Process* new_process = 0;
+    int slot;
 
     Address task_page = mem_alloc_page();
     Address stack_page;
@@ -460,20 +563,33 @@ ulong process_copy_thread(Flags flags, Address program_addr, Pointer arg) {
     memzero(task_page + VA_START, PAGE_SIZE);
     new_task = (struct task_struct*)(task_page + VA_START);
     new_task->kernel_stack_page = stack_page;
+    slot = process_allocate_thread_slot();
+    if (slot < 0) {
+        mem_free_page(stack_page);
+        mem_free_page(task_page);
+        preempt_enable();
+        return -1;
+    }
+    new_process = process_allocate_box(slot, current_process);
+    if (!new_process) {
+        mem_free_page(stack_page);
+        mem_free_page(task_page);
+        preempt_enable();
+        return -1;
+    }
     struct pt_regs* childregs = task_pt_regs(new_task);
     new_task->mm.kernel_pages_count = 0;
     new_task->mm.user_pages_count = 0;
     new_task->mm.heap_next = USER_HEAP_BASE;
     new_task->mm.dll_local_next = USER_SHARED_LIBRARY_LOCAL_BASE;
-    new_task->name = (Buffer)new_task->user_name;
-    new_task->parent_pid = current_task ? current_task->id : 0;
-    new_task->user_name[0] = '\0';
-    new_task->user_program_path[0] = '\0';
+    new_task->name = (Buffer)new_task->thread_name;
+    new_task->thread_name[0] = '\0';
 
     // Start with an empty heap allocation table for the new task.
     memzero((Address)new_task->mm.heap_allocs, sizeof(new_task->mm.heap_allocs));
     memzero((Address)new_task->mm.dll_locals, sizeof(new_task->mm.dll_locals));
     if (process_track_kernel_page(new_task, task_page) < 0 || process_track_kernel_page(new_task, stack_page) < 0) {
+        kfree((Address)new_process);
         mem_free_page(stack_page);
         mem_free_page(task_page);
         preempt_enable();
@@ -503,25 +619,115 @@ ulong process_copy_thread(Flags flags, Address program_addr, Pointer arg) {
     }
 
     new_task->flags = flags;
+    new_task->process = new_process;
     new_task->priority = current_task->priority;
-    new_task->state = TASK_RUNNING;
+    new_task->state = TASK_READY;
     new_task->counter = new_task->priority;
-    // Spread freshly created runnable work across online secondary CPUs first.
-    new_task->cpu_affinity = percpu_select_target_cpu();
+    // Keep task execution on the caller CPU while secondary context handling is stabilized.
+    new_task->cpu_affinity = task_cpu_index();
     new_task->preempt_count = 1; // disable preemtion until schedule_tail
 
     new_task->cpu_context.pc = (ULong)start_thread_context;
     new_task->cpu_context.sp = (ULong)childregs; // new thread's SP is right below the reg struct
 
-    int pid = nr_tasks++;
-    new_task->id = pid;
-    tasks[pid] = new_task;
+    new_task->id = slot;
+    scheduler_lock_acquire();
+    tasks[slot] = new_task;
+    processes[new_process->id] = new_process;
+    nr_tasks++;
+    nr_processes++;
+    process_attach_thread(new_task, new_process);
+    scheduler_lock_release();
 
     // If the task landed on a sleeping secondary, send an event so WFE exits quickly.
     percpu_kick_cpu(new_task->cpu_affinity);
 
     preempt_enable();
-    return pid;
+    return new_process->id;
+}
+
+ulong process_copy_thread(Flags flags, Address program_addr, Pointer arg) {
+    preempt_disable();
+    Task* new_task;
+    Process* owner = current_process;
+    int slot;
+
+    Address task_page = mem_alloc_page();
+    Address stack_page;
+
+    if (!task_page) {
+        preempt_enable();
+        return -1;
+    }
+
+    stack_page = mem_alloc_page();
+    if (!stack_page) {
+        mem_free_page(task_page);
+        preempt_enable();
+        return -1;
+    }
+
+    memzero(task_page + VA_START, PAGE_SIZE);
+    new_task = (struct task_struct*)(task_page + VA_START);
+    new_task->kernel_stack_page = stack_page;
+    slot = process_allocate_thread_slot();
+    if (slot < 0) {
+        mem_free_page(stack_page);
+        mem_free_page(task_page);
+        preempt_enable();
+        return -1;
+    }
+    struct pt_regs* childregs = task_pt_regs(new_task);
+    new_task->mm.kernel_pages_count = 0;
+    new_task->mm.user_pages_count = 0;
+    new_task->mm.heap_next = USER_HEAP_BASE;
+    new_task->mm.dll_local_next = USER_SHARED_LIBRARY_LOCAL_BASE;
+    new_task->name = (Buffer)new_task->thread_name;
+    new_task->thread_name[0] = '\0';
+
+    memzero((Address)new_task->mm.heap_allocs, sizeof(new_task->mm.heap_allocs));
+    memzero((Address)new_task->mm.dll_locals, sizeof(new_task->mm.dll_locals));
+    if (process_track_kernel_page(new_task, task_page) < 0 || process_track_kernel_page(new_task, stack_page) < 0) {
+        mem_free_page(stack_page);
+        mem_free_page(task_page);
+        preempt_enable();
+        return -1;
+    }
+
+    _trace("Forking new thread. Address: 0x%lx. SP: 0x%lX\n", (ulong)new_task, childregs);
+
+    if (flags & PF_KTHREAD) {
+        new_task->cpu_context.x19 = (ULong)program_addr;
+        new_task->cpu_context.x20 = (ULong)arg;
+        new_task->mm.pgd = get_pgd();
+    }
+    else {
+        _trace("Copying new user thread");
+        kerror("Implement this!");
+    }
+
+    new_task->flags = flags;
+    new_task->process = owner;
+    new_task->priority = current_task->priority;
+    new_task->state = TASK_READY;
+    new_task->counter = new_task->priority;
+    // Keep task execution on the caller CPU while secondary context handling is stabilized.
+    new_task->cpu_affinity = task_cpu_index();
+    new_task->preempt_count = 1;
+
+    new_task->cpu_context.pc = (ULong)start_thread_context;
+    new_task->cpu_context.sp = (ULong)childregs;
+    new_task->id = slot;
+
+    scheduler_lock_acquire();
+    tasks[slot] = new_task;
+    nr_tasks++;
+    process_attach_thread(new_task, owner);
+    scheduler_lock_release();
+
+    percpu_kick_cpu(new_task->cpu_affinity);
+    preempt_enable();
+    return slot;
 }
 
 /**
@@ -534,6 +740,7 @@ ulong process_copy_thread(Flags flags, Address program_addr, Pointer arg) {
  *   Nothing.
  */
 void process_dump_task_struct(Task* task) {
+    Process* process = task ? task->process : 0;
     const char* state_name = "ZOMBIE";
     const char* state_color = "\x1b[31m";
 
@@ -541,19 +748,29 @@ void process_dump_task_struct(Task* task) {
         state_name = "RUN";
         state_color = "\x1b[32m";
     }
+    else if (task->state == TASK_READY) {
+        state_name = "READY";
+        state_color = "\x1b[36m";
+    }
     else if (task->state == TASK_SLEEPING) {
         state_name = "SLEEP";
         state_color = "\x1b[33m";
     }
+    else if (task->state == TASK_BLOCKED) {
+        state_name = "BLOCK";
+        state_color = "\x1b[35m";
+    }
 
     kprint("\x1b[2;37m-------------------------------------------------------------------------------\x1b[0m\n");
-    kprint("\x1b[1;36mTask Details\x1b[0m\n");
+    kprint("\x1b[1;36mThread Details\x1b[0m\n");
     kprint("\x1b[2;37m-------------------------------------------------------------------------------\x1b[0m\n");
-    kprint("  \x1b[1;34mtask          \x1b[0m \x1b[2;37m|\x1b[0m \x1b[97m%d\x1b[0m\n", task->id);
-    kprint("  \x1b[1;34mparent        \x1b[0m \x1b[2;37m|\x1b[0m \x1b[97m%d\x1b[0m\n", task->parent_pid);
+    kprint("  \x1b[1;34mthread        \x1b[0m \x1b[2;37m|\x1b[0m \x1b[97m%d\x1b[0m\n", task->id);
+    kprint("  \x1b[1;34mprocess       \x1b[0m \x1b[2;37m|\x1b[0m \x1b[97m%ld\x1b[0m\n", task_process_id(task));
+    kprint("  \x1b[1;34mparent proc   \x1b[0m \x1b[2;37m|\x1b[0m \x1b[97m%ld\x1b[0m\n", process ? process->parent_process_id : -1L);
     kprint("  \x1b[1;34mname          \x1b[0m \x1b[2;37m|\x1b[0m \x1b[97m%s\x1b[0m\n", task->name ? (char*)task->name : "<none>");
-    kprint("  \x1b[1;34mprogram path  \x1b[0m \x1b[2;37m|\x1b[0m \x1b[36m%s\x1b[0m\n", task->user_program_path[0] ? task->user_program_path : "<none>");
-    kprint("  \x1b[1;34mlaunch args   \x1b[0m \x1b[2;37m|\x1b[0m \x1b[97m%s\x1b[0m\n", task->user_launch_args[0] ? task->user_launch_args : "<none>");
+    kprint("  \x1b[1;34mprogram path  \x1b[0m \x1b[2;37m|\x1b[0m \x1b[36m%s\x1b[0m\n", process && process->program_path[0] ? process->program_path : "<none>");
+    kprint("  \x1b[1;34mlaunch args   \x1b[0m \x1b[2;37m|\x1b[0m \x1b[97m%s\x1b[0m\n", process && process->launch_args[0] ? process->launch_args : "<none>");
+    kprint("  \x1b[1;34mthreads       \x1b[0m \x1b[2;37m|\x1b[0m \x1b[97m%ld\x1b[0m\n", process ? process->thread_count : 0L);
     kprint("  \x1b[1;34mstate         \x1b[0m \x1b[2;37m|\x1b[0m %s%s\x1b[0m\n", state_color, state_name);
     kprint("  \x1b[1;34mcounter       \x1b[0m \x1b[2;37m|\x1b[0m \x1b[97m%d\x1b[0m\n", task->counter);
     kprint("  \x1b[1;34mpriority      \x1b[0m \x1b[2;37m|\x1b[0m \x1b[97m%d\x1b[0m\n", task->priority);

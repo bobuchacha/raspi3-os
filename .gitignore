@@ -1,5 +1,6 @@
 /objs/
 /out/
+/output/
 /build/objs/
 /_raspberry-pi-os/
 /build/kernel8.elf
@@ -13,3 +14,4 @@
 *.d
 *.disk
 *.disk*
+fat32.img
