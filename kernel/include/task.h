@@ -45,7 +45,7 @@ typedef struct cpu_context {
 
 } CPUContext;
 
-#define MAX_PROCESS_PAGES 32
+#define MAX_PROCESS_PAGES 64
 #define MAX_USER_HEAP_ALLOCS 16
 #define USER_HEAP_BASE 0x100000
 #define USER_HEAP_LIMIT 0x800000
@@ -194,6 +194,11 @@ typedef struct task_struct {
 #define NR_CPUS 4
 #define NR_TASKS 64
 #define NR_PROCESSES NR_TASKS
+#if defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L)
+_Static_assert(sizeof(Task) <= THREAD_SIZE, "Task struct must fit in one thread page");
+#else
+typedef char task_struct_must_fit_thread_page[(sizeof(Task) <= THREAD_SIZE) ? 1 : -1];
+#endif
 #define FIRST_TASK tasks[0]
 #define LAST_TASK tasks[nr_tasks - 1]
 #define PF_KTHREAD 0x00000002

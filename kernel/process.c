@@ -8,6 +8,7 @@
 #include "percpu.h"
 #include "task.h"
 #include "utils.h"
+#include "my-loader/ldr_kernel.h"
 
 // entry.S
 extern unsigned long start_thread_context();
@@ -305,6 +306,9 @@ void cleanup_zombie_processes() {
             int user_page_count = process_clamp_page_count("user page", t->id, t->mm.user_pages_count);
 
             _trace("Preparing to clean up process %d", i);
+
+            // Ensure bridge-owned modules are detached before raw page reclamation.
+            (void)ldr_kernel_release_user_modules_for_task((void*)t);
 
             for (int j = 0; j < kernel_page_count; j++) {
                 kernel_pages[j] = process_normalize_page_address(t->mm.kernel_pages[j]);
@@ -647,10 +651,13 @@ ulong process_create_main_thread(Flags flags, Address program_addr, Pointer arg)
 }
 
 ulong process_copy_thread(Flags flags, Address program_addr, Pointer arg) {
+    log_info("Copying thread with flags 0x%lX, program_addr: 0x%lX, arg: 0x%lX", flags, program_addr, (ulong)arg);
+
     preempt_disable();
     Task* new_task;
     Process* owner = current_process;
     int slot;
+
 
     Address task_page = mem_alloc_page();
     Address stack_page;

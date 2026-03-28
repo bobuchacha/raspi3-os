@@ -6,14 +6,12 @@
 #include "memory.h"
 #include "hal/hal.h"
 #include "module.h"
-#include "module/module_format.h"
 #include "percpu.h"
 #include "printf.h"
 #include "ros.h"
 #include "task.h"
 #include "timer.h"
 #include "touch.h"
-#include "user-exe.h"
 #include "utils.h"
 
 #define SHELL_INPUT_MAX 128
@@ -58,8 +56,6 @@ static const char shell_prompt[] = SHELL_COLOR_PROMPT "ros> " SHELL_COLOR_RESET;
 
 static int shell_parse_ulong(const char* text, unsigned long* value);
 static char* shell_next_token(char** cursor);
-int module_read_header(struct FileDesc* fd, ModuleBundleHeader* header);
-int module_validate_header(const ModuleBundleHeader* header);
 
 static void shell_forward_gui_key(char ch) {
     long result = 0;

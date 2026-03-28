@@ -13,5 +13,5 @@ New direction:
 - `.sys` is a kernel module bundle, not a user executable
 - each module uses `module.json`, not `extension.json`
 - each module exposes one manifest-defined entry symbol
-- modules are built as PIC shared ELF images and then wrapped by `tools/pack_kernel_module.py`
+- modules are built as PIC shared ELF images and then packed as LRD0 `.sys` images by `tools/my-loader/ldr_build.py --pack-elf`
 - any userspace-facing ABI should be registered explicitly through the kernel, not by directly invoking arbitrary module symbols

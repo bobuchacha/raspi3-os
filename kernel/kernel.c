@@ -11,12 +11,14 @@
 #include "log.h"
 #include "memory.h"
 #include "module.h"
+#include "percpu.h"
 #include "platform/cpu/debug_uart.h"
 #include "printf.h"
 #include "task.h"
 #include "timer.h"
 #include "touch.h"
 #include "user-exe.h"
+#include "utils.h"
 #include "secondary.h"
 
 // file.c
@@ -25,9 +27,10 @@ Buffer file_read(PFileDesc f, int position, int length);
 PFileDesc file_open(char* path, int mode);
 
 extern int file_last_status;
+void kernel_shell_main(Pointer arg);
 
 /**
- * Kernel thread entry that loads the default init executable into the current task.
+ * Kernel thread entry that loads the default core executable into the current task.
  *
  * Args:
  *   None.
@@ -38,16 +41,15 @@ extern int file_last_status;
 void kernel_load_user_program() {
     // Replace this kernel thread's task image with the configured init executable.
     module_load_boot_modules();
-    log_info("Boot modules loaded; executing /bin/init.exe");
+    log_info("Boot modules loaded; executing /bin/core.exe");
 
-    if (exec_user_program("/bin/init.exe") != 0) {
-        log_error("Unable to load /bin/init.exe");
-
-        // Terminate the thread if the first userspace image cannot be started.
+    if (spawn_user_program("/bin/core.exe", "core", "") < 0) {
+        log_warning("Unable to spawn /bin/core.exe; falling back to kernel shell");
+        kernel_shell_main(0);
         exit_current_process(-1);
     }
 
-    log_info("/bin/init.exe image committed; returning to EL0");
+    log_info("/bin/core.exe spawn requested; returning to scheduler");
 }
 
 static void kernel_draw_boot_graphics(void) {
@@ -114,7 +116,6 @@ static void kernel_update_touch_demo(void) {
 
     last_pressed = touch_state->pressed;
 }
-void kernel_shell_main(Pointer arg);
 /**
  * Main kernel entry point after low-level platform setup completes.
  *
@@ -128,6 +129,9 @@ void kernel_main() {
     // Bring up the HAL abstraction before touching board devices or memory services.
     hal_init();
 
+    // CPU0 needs a valid idle context once PID 1 starts yielding in userspace.
+    percpu_init_idle_task(0);
+
     // Initialize console-capable devices so later logging becomes visible.
     device_init();
     // init memory management
@@ -135,6 +139,7 @@ void kernel_main() {
     // Build page allocation and heap state before higher-level subsystems allocate memory.
     log_info("Enabling memory management...\n");
     init_memory_management();
+    current_task->mm.pgd = get_pgd();
 
     log_info("Initializing module subsystem...\n");
     module_subsystem_init();
@@ -155,9 +160,8 @@ void kernel_main() {
     log_info("Initializing touch input...\n");
     device_init_touch();
 
-    // Bring secondary CPUs online before we start placing runnable work on them.
-    log_info("Waking secondary CPUs...\n");
-    wake_secondary_cores();
+    // Keep secondaries parked until the bootloader-owned secondary trampoline is stable.
+    log_info("Skipping secondary CPU wake while SMP handoff is unstable...\n");
 
     // Spawn the primary kernel thread that loads the first userspace program.
     log_info("Spawning init thread...\n");

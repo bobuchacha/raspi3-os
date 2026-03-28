@@ -1,7 +1,7 @@
 # Default macOS/Linux toolchain path (override in environment as needed)
-#ARMGNU ?= /Applications/ArmGNUToolchain/12.3.Rel1/aarch64-none-elf/bin/aarch64-none-elf
-#ARMGNU ?= /Applications/ArmGNUToolchain/13.2.Rel1/aarch64-none-elf/bin/aarch64-none-elf
-ARMGNU ?= E:\Nextcloud\raspo3b-os/toolchain/Windows/arm-gnu-toolchain-13.2.Rel1-mingw-w64-i686-aarch64-none-elf/bin/aarch64-none-elf
+ARMGNU ?= /Applications/ArmGNUToolchain/12.3.Rel1/aarch64-none-elf/bin/aarch64-none-elf
+# ARMGNU ?= /Applications/ArmGNUToolchain/13.2.Rel1/aarch64-none-elf/bin/aarch64-none-elf
+# ARMGNU ?= E:\Nextcloud\raspo3b-os/toolchain/Windows/arm-gnu-toolchain-13.2.Rel1-mingw-w64-i686-aarch64-none-elf/bin/aarch64-none-elf
 #ARMGNU ?= C:\Users\bobuc\Nextcloud\raspo3b-os/toolchain/Windows/arm-gnu-toolchain-13.2.Rel1-mingw-w64-i686-aarch64-none-elf/bin/aarch64-none-elf
 #ARMGNU ?= aarch64-none-elf
 # QEMU default. On Windows, prefer explicit .exe when running native cmd shells.
@@ -62,12 +62,11 @@ PLATFORM_CPPFLAGS += -DROS_QEMU_USB_ENABLED=$(QEMU_USB)
 BUILD_DIR = output
 SRC_DIR = kernel
 LOADER_DIR = kernel-loader
-USR_DIR = applications
-USR_INCLUDE_DIR = $(USR_DIR)/include
-USR_COMMON_DIR = $(USR_DIR)/common
-USR_LIB_DIR = $(USR_DIR)/lib
-USR_DLLS_DIR = $(USR_DIR)/dlls
-USR_PROGRAMS_DIR = $(USR_DIR)/programs
+APP_ROOT = applications
+APP_INCLUDE_DIR = $(APP_ROOT)/include
+APP_APPS_DIR = $(APP_ROOT)/apps
+APP_LIBS_DIR = $(APP_ROOT)/libs
+APP_DRIVERS_DIR = $(APP_ROOT)/drivers
 INCLUDE_DIR = $(SRC_DIR)/include
 OBJS_DIR = $(BUILD_DIR)/objs
 KERNEL_ELF = $(BUILD_DIR)/kernel8.elf
@@ -82,9 +81,9 @@ COPS = -g -Werror -nostdlib -nostartfiles -ffreestanding -fno-omit-frame-pointer
 ASMOPS = -g -I. -I$(INCLUDE_DIR) $(PLATFORM_CPPFLAGS)
 LOADER_COPS = -g -Werror -nostdlib -nostartfiles -ffreestanding -fno-omit-frame-pointer -I. -I$(LOADER_DIR)/include -I$(LOADER_DIR) -mgeneral-regs-only $(PLATFORM_CPPFLAGS)
 LOADER_ASMOPS = -g -I. -I$(LOADER_DIR)/include -I$(LOADER_DIR) $(PLATFORM_CPPFLAGS)
-USER_COPS = -g -Werror -nostdlib -nostartfiles -ffreestanding -fno-omit-frame-pointer -I$(USR_INCLUDE_DIR) -mgeneral-regs-only
+USER_COPS = -g -Werror -nostdlib -nostartfiles -ffreestanding -fno-omit-frame-pointer -I$(APP_INCLUDE_DIR) -mgeneral-regs-only
 USER_CXXOPS = $(USER_COPS) -fno-exceptions -fno-rtti -fno-threadsafe-statics -fno-use-cxa-atexit
-USER_ASMOPS = -g -I$(USR_INCLUDE_DIR)
+USER_ASMOPS = -g -I$(APP_INCLUDE_DIR)
 
 all: applications-vfs $(KERNEL_IMG)
 
@@ -134,7 +133,9 @@ $(FONT_SFN_OBJ): $(FONT_SFN_SRC)
 	@$(ARMGNU)-ld -r -b binary -o $(FONT_SFN_OBJ) $(FONT_SFN_SRC)
 
 #C_FILES = $(wildcard $(SRC_DIR)/*.c)
-SOURCE_FIND = find $(SRC_DIR) -type d -name '_*' -prune -o -type f
+SOURCE_FIND = find $(SRC_DIR) \
+	-type d \( -name '_*' -o -name examples -o -name tests -o -name documents -o -name tools -o -name __pycache__ \) -prune \
+	-o -type f
 # Run the find once and filter in Make to avoid multiple shell spawns
 SOURCE_FILES := $(shell $(SOURCE_FIND) -print)
 C_FILES := $(filter %.c,$(SOURCE_FILES))
@@ -165,218 +166,68 @@ MAIN_KERNEL_OBJ_FILES = $(filter-out $(OBJS_DIR)/arch/cortex-a53/boot/% $(OBJS_D
 
 #######################################################################################################
 USER_BUILD_DIR = $(BUILD_DIR)/applications
-USER_OBJS_DIR = $(USER_BUILD_DIR)/objs
-USER_DLL_OBJ_DIR = $(USER_BUILD_DIR)/dll-objs
-USER_PROGRAM_ELF_DIR = $(USER_BUILD_DIR)/elf
-USER_PROGRAM_EXE_DIR = $(USER_BUILD_DIR)/programs
-USER_DLL_ELF_DIR = $(USER_BUILD_DIR)/dll-elf
-USER_DLL_DIR = $(USER_BUILD_DIR)/dll
 USER_VFS_MOUNT_DIR = $(USER_BUILD_DIR)/fat32mnt
 USER_VFS_MOUNT_DIR_ABS = $(abspath $(USER_VFS_MOUNT_DIR))
 USER_VFS_BIN_DIR = $(USER_VFS_MOUNT_DIR)/bin
 USER_VFS_LIB_DIR = $(USER_VFS_MOUNT_DIR)/lib
 USER_VFS_DEV_FILE = $(USER_BUILD_DIR)/fat32.dev
 USER_VFS_ATTACH = hdiutil attach -imagekey diskimage-class=CRawDiskImage -nomount -readwrite fat32.img
-USER_LINKER_SCRIPT = $(USR_COMMON_DIR)/link.ld
-USER_DLL_LINKER_SCRIPT = $(USR_COMMON_DIR)/dll.ld
-USER_PACKER = python3 tools/pack_user_exe.py
-USER_DLL_PACKER = python3 tools/pack_user_dll.py
-USER_MODULE_PACKER = python3 tools/pack_kernel_module.py
-MAIN_KERNEL_PACKER = python3 tools/pack_roskrnl.py
-USER_TEMPLATE_DIR = $(USR_DIR)/_templates
-USER_SOURCE_FIND = find $(USR_DIR) -type d -name '_*' -prune -o -type f
-.PHONY: all clean applications applications-vfs user user-vfs new-app new-dll new-sys new-app-pair new-user-app new-user-dll new-user-sys new-user-pair fat32-mount fat32-umount fat32-list fat32-read fat32-hexdump run debug asm dump diasm gdb kernel8.img
-# Cache all user-space files once, then derive per-directory lists with filters
-USER_SOURCE_FILES := $(shell $(USER_SOURCE_FIND) -print)
-USER_C_FILES := $(filter %.c,$(USER_SOURCE_FILES))
-USER_CPP_FILES := $(filter %.cpp,$(USER_SOURCE_FILES))
-USER_ASM_FILES := $(filter %.S,$(USER_SOURCE_FILES))
-USER_OBJ_FILES = $(USER_C_FILES:$(USR_DIR)/%.c=$(USER_OBJS_DIR)/%_c.o)
-USER_OBJ_FILES += $(USER_CPP_FILES:$(USR_DIR)/%.cpp=$(USER_OBJS_DIR)/%_cpp.o)
-USER_OBJ_FILES += $(USER_ASM_FILES:$(USR_DIR)/%.S=$(USER_OBJS_DIR)/%_s.o)
-USER_DEP_FILES = $(USER_OBJ_FILES:%.o=%.d)
-USER_PROGRAMS = $(sort $(notdir $(shell find $(USR_PROGRAMS_DIR) -mindepth 1 -maxdepth 1 -type d)))
-# Common and lib lists derived from cached USER_SOURCE_FILES to avoid extra find calls
-USER_COMMON_FILES := $(filter $(USR_COMMON_DIR)/%,$(USER_SOURCE_FILES))
-USER_COMMON_C_FILES := $(filter %.c,$(USER_COMMON_FILES))
-USER_COMMON_CPP_FILES := $(filter %.cpp,$(USER_COMMON_FILES))
-USER_COMMON_ASM_FILES := $(filter %.S,$(USER_COMMON_FILES))
-USER_COMMON_OBJ_FILES = $(USER_COMMON_C_FILES:$(USR_DIR)/%.c=$(USER_OBJS_DIR)/%_c.o)
-USER_COMMON_OBJ_FILES += $(USER_COMMON_CPP_FILES:$(USR_DIR)/%.cpp=$(USER_OBJS_DIR)/%_cpp.o)
-USER_COMMON_OBJ_FILES += $(USER_COMMON_ASM_FILES:$(USR_DIR)/%.S=$(USER_OBJS_DIR)/%_s.o)
-USER_LIB_FILES := $(filter $(USR_LIB_DIR)/%,$(USER_SOURCE_FILES))
-USER_LIB_C_FILES := $(filter %.c,$(USER_LIB_FILES))
-USER_LIB_CPP_FILES := $(filter %.cpp,$(USER_LIB_FILES))
-USER_LIB_ASM_FILES := $(filter %.S,$(USER_LIB_FILES))
-USER_LIB_OBJ_FILES = $(USER_LIB_C_FILES:$(USR_DIR)/%.c=$(USER_OBJS_DIR)/%_c.o)
-USER_LIB_OBJ_FILES += $(USER_LIB_CPP_FILES:$(USR_DIR)/%.cpp=$(USER_OBJS_DIR)/%_cpp.o)
-USER_LIB_OBJ_FILES += $(USER_LIB_ASM_FILES:$(USR_DIR)/%.S=$(USER_OBJS_DIR)/%_s.o)
-USER_DLL_COPS = $(USER_COPS) -fPIC
-USER_DLL_CXXOPS = $(USER_CXXOPS) -fPIC
-USER_DLL_ASMOPS = $(USER_ASMOPS)
-USER_DLL_DEP_FILES =
-USER_DLL_COMMON_C_FILES = $(filter-out $(USR_COMMON_DIR)/startup.c,$(USER_COMMON_C_FILES))
-USER_DLL_COMMON_CPP_FILES = $(filter-out $(USR_COMMON_DIR)/startup.cpp,$(USER_COMMON_CPP_FILES))
-USER_DLL_COMMON_ASM_FILES = $(filter-out $(USR_COMMON_DIR)/startup.S,$(USER_COMMON_ASM_FILES))
-USER_DLL_COMMON_OBJ_FILES = $(USER_DLL_COMMON_C_FILES:$(USR_DIR)/%.c=$(USER_DLL_OBJ_DIR)/%_c.o)
-USER_DLL_COMMON_OBJ_FILES += $(USER_DLL_COMMON_CPP_FILES:$(USR_DIR)/%.cpp=$(USER_DLL_OBJ_DIR)/%_cpp.o)
-USER_DLL_COMMON_OBJ_FILES += $(USER_DLL_COMMON_ASM_FILES:$(USR_DIR)/%.S=$(USER_DLL_OBJ_DIR)/%_s.o)
-USER_DLL_LIB_C_FILES = $(filter-out $(USR_LIB_DIR)/cxx_init.c,$(USER_LIB_C_FILES))
-USER_DLL_LIB_CPP_FILES = $(filter-out $(USR_LIB_DIR)/cxx_init.cpp,$(USER_LIB_CPP_FILES))
-USER_DLL_LIB_ASM_FILES = $(filter-out $(USR_LIB_DIR)/cxx_init.S,$(USER_LIB_ASM_FILES))
-USER_DLL_LIB_OBJ_FILES = $(USER_DLL_LIB_C_FILES:$(USR_DIR)/%.c=$(USER_DLL_OBJ_DIR)/%_c.o)
-USER_DLL_LIB_OBJ_FILES += $(USER_DLL_LIB_CPP_FILES:$(USR_DIR)/%.cpp=$(USER_DLL_OBJ_DIR)/%_cpp.o)
-USER_DLL_LIB_OBJ_FILES += $(USER_DLL_LIB_ASM_FILES:$(USR_DIR)/%.S=$(USER_DLL_OBJ_DIR)/%_s.o)
-USER_DLL_SUPPORT_OBJ_FILES = $(USER_DLL_COMMON_OBJ_FILES) $(USER_DLL_LIB_OBJ_FILES)
-USER_PROGRAM_ELFS =
-USER_PROGRAM_EXES =
-USER_DLL_ELFS =
-USER_DLLS =
-USER_SHARED_LIBRARIES = $(sort $(notdir $(shell if [ -d $(USR_DLLS_DIR) ]; then find $(USR_DLLS_DIR) -mindepth 1 -maxdepth 1 -type d; fi)))
+MAIN_KERNEL_PACKER = python3 tools/my-loader/ldr_build.py --pack-kernel
+APP_TEMPLATE_DIR = $(APP_ROOT)/_templates
+MY_LOADER_BUILDER_SCRIPT = $(MY_LOADER_TOOLS_ROOT)/ldr_build.py
+MY_LOADER_BUILDER = python3 $(MY_LOADER_BUILDER_SCRIPT)
+MY_LOADER_OUTPUT = $(BUILD_DIR)/my-loader
+MY_LOADER_TOOLS_ROOT = tools/my-loader
+MY_LOADER_COMMON_FLAGS = --project-root . --include-dir kernel/include --include-dir $(APP_INCLUDE_DIR) --define LDR_MVP=1 --cflag=-O2 --cflag=-g --cflag=-ffunction-sections --cflag=-fdata-sections --ldflag=--gc-sections --output-dir $(MY_LOADER_OUTPUT)
+APP_DIRS := $(patsubst %/,%,$(sort $(wildcard $(APP_APPS_DIR)/*/)))
+LIB_DIRS := $(patsubst %/,%,$(sort $(wildcard $(APP_LIBS_DIR)/*/)))
+DRIVER_DIRS := $(patsubst %/,%,$(sort $(wildcard $(APP_DRIVERS_DIR)/*/)))
+MY_LOADER_APP_TARGETS =
+MY_LOADER_DLL_TARGETS =
+MY_LOADER_DRIVER_TARGETS =
 
-# System extensions (.sys) support
-USR_SYSTEM_DIR = $(USR_DIR)/system
-USER_SYSTEM_OBJ_DIR = $(USER_BUILD_DIR)/system-objs
-USER_SYSTEM_ELF_DIR = $(USER_BUILD_DIR)/system-elf
-USER_SYSTEM_DIR_OUT = $(USER_BUILD_DIR)/system
-USER_SYSTEMS = $(sort $(notdir $(shell if [ -d $(USR_SYSTEM_DIR) ]; then find $(USR_SYSTEM_DIR) -mindepth 1 -maxdepth 1 -type d; fi)))
-USER_SYS_ELFS =
-USER_SYS_PACKED =
-USER_SYS_DEP_FILES =
-USER_SYS_RUNTIME_PACKED = $(USER_SYS_PACKED)
+define BUILD_APP_ARTIFACT
+APP_$(1)_SOURCES := $$(sort $$(wildcard $(APP_APPS_DIR)/$(1)/*.c) $$(wildcard $(APP_APPS_DIR)/$(1)/*.cpp) $$(wildcard $(APP_APPS_DIR)/$(1)/*.S))
+MY_LOADER_APP_TARGETS += $(MY_LOADER_OUTPUT)/$(1).exe
 
-MODULE_COPS = $(USER_COPS) -fPIC
-MODULE_CXXOPS = $(USER_CXXOPS) -fPIC
-MODULE_ASMOPS = $(USER_ASMOPS)
-
-$(USER_OBJS_DIR)/%_c.o: $(USR_DIR)/%.c
-	@echo "-> $@..."
-	@mkdir -p $(@D)
-	@$(ARMGNU)-gcc $(USER_COPS) -MMD -c $< -o $@
-$(USER_OBJS_DIR)/%_cpp.o: $(USR_DIR)/%.cpp
-	@echo "-> $@..."
-	@mkdir -p $(@D)
-	@$(ARMGNU)-g++ $(USER_CXXOPS) -MMD -c $< -o $@
-$(USER_OBJS_DIR)/%_s.o: $(USR_DIR)/%.S
-	@echo "-> $@..."
-	@mkdir -p $(@D)
-	@$(ARMGNU)-gcc $(USER_ASMOPS) -MMD -c $< -o $@
-
-$(USER_DLL_OBJ_DIR)/%_c.o: $(USR_DIR)/%.c
-	@echo "-> $@..."
-	@mkdir -p $(@D)
-	@$(ARMGNU)-gcc $(USER_DLL_COPS) -MMD -c $< -o $@
-$(USER_DLL_OBJ_DIR)/%_cpp.o: $(USR_DIR)/%.cpp
-	@echo "-> $@..."
-	@mkdir -p $(@D)
-	@$(ARMGNU)-g++ $(USER_DLL_CXXOPS) -MMD -c $< -o $@
-$(USER_DLL_OBJ_DIR)/%_s.o: $(USR_DIR)/%.S
-	@echo "-> $@..."
-	@mkdir -p $(@D)
-	@$(ARMGNU)-gcc $(USER_DLL_ASMOPS) -MMD -c $< -o $@
-
-$(USER_SYSTEM_OBJ_DIR)/%_c.o: $(USR_SYSTEM_DIR)/%.c
-	@echo "-> $@..."
-	@mkdir -p $(@D)
-	@$(ARMGNU)-gcc $(MODULE_COPS) -MMD -c $< -o $@
-$(USER_SYSTEM_OBJ_DIR)/%_cpp.o: $(USR_SYSTEM_DIR)/%.cpp
-	@echo "-> $@..."
-	@mkdir -p $(@D)
-	@$(ARMGNU)-g++ $(MODULE_CXXOPS) -MMD -c $< -o $@
-$(USER_SYSTEM_OBJ_DIR)/%_s.o: $(USR_SYSTEM_DIR)/%.S
-	@echo "-> $@..."
-	@mkdir -p $(@D)
-	@$(ARMGNU)-gcc $(MODULE_ASMOPS) -MMD -c $< -o $@
-
-define BUILD_USER_PROGRAM
-USER_$(1)_FILES := $$(filter $(USR_PROGRAMS_DIR)/$(1)/%,$$(USER_SOURCE_FILES))
-USER_$(1)_C_FILES := $$(filter %.c,$$(USER_$(1)_FILES))
-USER_$(1)_CPP_FILES := $$(filter %.cpp,$$(USER_$(1)_FILES))
-USER_$(1)_ASM_FILES := $$(filter %.S,$$(USER_$(1)_FILES))
-USER_$(1)_OBJ_FILES := $$(USER_$(1)_C_FILES:$(USR_DIR)/%.c=$(USER_OBJS_DIR)/%_c.o)
-USER_$(1)_OBJ_FILES += $$(USER_$(1)_CPP_FILES:$(USR_DIR)/%.cpp=$(USER_OBJS_DIR)/%_cpp.o)
-USER_$(1)_OBJ_FILES += $$(USER_$(1)_ASM_FILES:$(USR_DIR)/%.S=$(USER_OBJS_DIR)/%_s.o)
-USER_PROGRAM_ELFS += $(USER_PROGRAM_ELF_DIR)/$(1).elf
-USER_PROGRAM_EXES += $(USER_PROGRAM_EXE_DIR)/$(1).exe
-
-$(USER_PROGRAM_ELF_DIR)/$(1).elf: $(USER_LINKER_SCRIPT) $(USER_COMMON_OBJ_FILES) $(USER_LIB_OBJ_FILES) $$(USER_$(1)_OBJ_FILES)
-	@mkdir -p $$(@D)
-	@$(ARMGNU)-ld -nostdlib -T $(USER_LINKER_SCRIPT) -o $$@ $(USER_COMMON_OBJ_FILES) $(USER_LIB_OBJ_FILES) $$(USER_$(1)_OBJ_FILES) -g
-
-$(USER_PROGRAM_EXE_DIR)/$(1).exe: $(USER_PROGRAM_ELF_DIR)/$(1).elf tools/pack_user_exe.py
-	@mkdir -p $$(@D)
-	@$(USER_PACKER) --input $$< --output $$@
+$(MY_LOADER_OUTPUT)/$(1).exe: $(MY_LOADER_BUILDER_SCRIPT) $$(APP_$(1)_SOURCES)
+	@mkdir -p $(MY_LOADER_OUTPUT)
+	@$(MY_LOADER_BUILDER) --name $(1) --kind exe $$(foreach src,$$(APP_$(1)_SOURCES),--source $$(src)) --entry-symbol AppMain $(MY_LOADER_COMMON_FLAGS)
 endef
 
-$(foreach prog,$(USER_PROGRAMS),$(eval $(call BUILD_USER_PROGRAM,$(prog))))
+define BUILD_LIB_ARTIFACT
+LIB_$(1)_SOURCES := $$(sort $$(wildcard $(APP_LIBS_DIR)/$(1)/*.c) $$(wildcard $(APP_LIBS_DIR)/$(1)/*.cpp) $$(wildcard $(APP_LIBS_DIR)/$(1)/*.S))
+MY_LOADER_DLL_TARGETS += $(MY_LOADER_OUTPUT)/$(1).dll
 
-define BUILD_USER_DLL
-USER_DLL_$(1)_FILES := $$(filter $(USR_DLLS_DIR)/$(1)/%,$$(USER_SOURCE_FILES))
-USER_DLL_$(1)_C_FILES := $$(filter %.c,$$(USER_DLL_$(1)_FILES))
-USER_DLL_$(1)_CPP_FILES := $$(filter %.cpp,$$(USER_DLL_$(1)_FILES))
-USER_DLL_$(1)_ASM_FILES := $$(filter %.S,$$(USER_DLL_$(1)_FILES))
-USER_DLL_$(1)_OBJ_FILES := $$(USER_DLL_$(1)_C_FILES:$(USR_DIR)/%.c=$(USER_DLL_OBJ_DIR)/%_c.o)
-USER_DLL_$(1)_OBJ_FILES += $$(USER_DLL_$(1)_CPP_FILES:$(USR_DIR)/%.cpp=$(USER_DLL_OBJ_DIR)/%_cpp.o)
-USER_DLL_$(1)_OBJ_FILES += $$(USER_DLL_$(1)_ASM_FILES:$(USR_DIR)/%.S=$(USER_DLL_OBJ_DIR)/%_s.o)
-USER_DLL_DEP_FILES += $$(USER_DLL_$(1)_OBJ_FILES:%.o=%.d)
-USER_DLL_ELFS += $(USER_DLL_ELF_DIR)/$(1).elf
-USER_DLLS += $(USER_DLL_DIR)/$(1).dll
-
-$(USER_DLL_ELF_DIR)/$(1).elf: $(USER_DLL_SUPPORT_OBJ_FILES) $$(USER_DLL_$(1)_OBJ_FILES)
-	@mkdir -p $$(@D)
-	@$(ARMGNU)-ld -shared -o $$@ $(USER_DLL_SUPPORT_OBJ_FILES) $$(USER_DLL_$(1)_OBJ_FILES) -g
-
-$(USER_DLL_DIR)/$(1).dll: $(USER_DLL_ELF_DIR)/$(1).elf tools/pack_user_dll.py
-	@mkdir -p $$(@D)
-	@$(USER_DLL_PACKER) --input $$< --output $$@
+$(MY_LOADER_OUTPUT)/$(1).dll: $(MY_LOADER_BUILDER_SCRIPT) $$(LIB_$(1)_SOURCES)
+	@mkdir -p $(MY_LOADER_OUTPUT)
+	@$(MY_LOADER_BUILDER) --name $(1) --kind dll $$(foreach src,$$(LIB_$(1)_SOURCES),--source $$(src)) --entry-symbol Init $(MY_LOADER_COMMON_FLAGS)
 endef
 
-$(foreach dll,$(USER_SHARED_LIBRARIES),$(eval $(call BUILD_USER_DLL,$(dll))))
+define BUILD_DRIVER_ARTIFACT
+DRIVER_$(1)_SOURCES := $$(sort $$(wildcard $(APP_DRIVERS_DIR)/$(1)/*.c) $$(wildcard $(APP_DRIVERS_DIR)/$(1)/*.cpp) $$(wildcard $(APP_DRIVERS_DIR)/$(1)/*.S))
+MY_LOADER_DRIVER_TARGETS += $(MY_LOADER_OUTPUT)/$(1).sys
 
-define BUILD_USER_SYS
-USER_SYS_$(1)_FILES := $$(filter $(USR_SYSTEM_DIR)/$(1)/%,$$(USER_SOURCE_FILES))
-USER_SYS_$(1)_C_FILES := $$(filter %.c,$$(USER_SYS_$(1)_FILES))
-USER_SYS_$(1)_CPP_FILES := $$(filter %.cpp,$$(USER_SYS_$(1)_FILES))
-USER_SYS_$(1)_ASM_FILES := $$(filter %.S,$$(USER_SYS_$(1)_FILES))
-USER_SYS_$(1)_OBJ_FILES := $$(USER_SYS_$(1)_C_FILES:$(USR_SYSTEM_DIR)/%.c=$(USER_SYSTEM_OBJ_DIR)/%_c.o)
-USER_SYS_$(1)_OBJ_FILES += $$(USER_SYS_$(1)_CPP_FILES:$(USR_SYSTEM_DIR)/%.cpp=$(USER_SYSTEM_OBJ_DIR)/%_cpp.o)
-USER_SYS_$(1)_OBJ_FILES += $$(USER_SYS_$(1)_ASM_FILES:$(USR_SYSTEM_DIR)/%.S=$(USER_SYSTEM_OBJ_DIR)/%_s.o)
-USER_SYS_DEP_FILES += $$(USER_SYS_$(1)_OBJ_FILES:%.o=%.d)
-USER_SYS_ELFS += $(USER_SYSTEM_ELF_DIR)/$(1).elf
-USER_SYS_PACKED += $(USER_SYSTEM_DIR_OUT)/$(1).sys
-
-$(USER_SYSTEM_ELF_DIR)/$(1).elf: $$(USER_SYS_$(1)_OBJ_FILES)
-	@mkdir -p $$(@D)
-	@$(ARMGNU)-ld -shared -o $$@ $$(USER_SYS_$(1)_OBJ_FILES) -g
-
-$(USER_SYSTEM_DIR_OUT)/$(1).sys: $(USER_SYSTEM_ELF_DIR)/$(1).elf $(wildcard $(USR_SYSTEM_DIR)/$(1)/module.json) tools/pack_kernel_module.py
-	@mkdir -p $$(@D)
-	@if [ -f "$(USR_SYSTEM_DIR)/$(1)/module.json" ]; then \
-		$(USER_MODULE_PACKER) --input $$< --manifest $(USR_SYSTEM_DIR)/$(1)/module.json --output $$@; \
-	else \
-		$(USER_MODULE_PACKER) --input $$< --output $$@; \
-	fi
+$(MY_LOADER_OUTPUT)/$(1).sys: $(MY_LOADER_BUILDER_SCRIPT) $$(DRIVER_$(1)_SOURCES)
+	@mkdir -p $(MY_LOADER_OUTPUT)
+	@$(MY_LOADER_BUILDER) --name $(1) --kind sys $$(foreach src,$$(DRIVER_$(1)_SOURCES),--source $$(src)) --entry-symbol Init $(MY_LOADER_COMMON_FLAGS)
 endef
 
-$(foreach sys,$(USER_SYSTEMS),$(eval $(call BUILD_USER_SYS,$(sys))))
+$(foreach app,$(notdir $(APP_DIRS)),$(eval $(call BUILD_APP_ARTIFACT,$(app))))
+$(foreach lib,$(notdir $(LIB_DIRS)),$(eval $(call BUILD_LIB_ARTIFACT,$(lib))))
+$(foreach driver,$(notdir $(DRIVER_DIRS)),$(eval $(call BUILD_DRIVER_ARTIFACT,$(driver))))
 
--include $(USER_DEP_FILES)
--include $(USER_DLL_DEP_FILES)
--include $(USER_SYS_DEP_FILES)
+MY_LOADER_STAGE_APP_TARGETS := $(if $(filter $(MY_LOADER_OUTPUT)/core.exe,$(MY_LOADER_APP_TARGETS)),$(filter $(MY_LOADER_OUTPUT)/core.exe,$(MY_LOADER_APP_TARGETS)),$(MY_LOADER_APP_TARGETS))
+MY_LOADER_STAGE_DLL_TARGETS := $(if $(filter $(MY_LOADER_OUTPUT)/sample_lib.dll,$(MY_LOADER_DLL_TARGETS)),$(filter $(MY_LOADER_OUTPUT)/sample_lib.dll,$(MY_LOADER_DLL_TARGETS)),$(MY_LOADER_DLL_TARGETS))
+MY_LOADER_STAGE_DRIVER_TARGETS := $(if $(filter $(MY_LOADER_OUTPUT)/sample_driver.sys,$(MY_LOADER_DRIVER_TARGETS)),$(filter $(MY_LOADER_OUTPUT)/sample_driver.sys,$(MY_LOADER_DRIVER_TARGETS)),$(MY_LOADER_DRIVER_TARGETS))
 
-applications: $(USER_PROGRAM_EXES) $(USER_DLLS) $(USER_SYS_PACKED)
+my-loader-artifacts: $(MY_LOADER_APP_TARGETS) $(MY_LOADER_DLL_TARGETS) $(MY_LOADER_DRIVER_TARGETS)
+
+applications: my-loader-artifacts
 
 user: applications
 
-new-app: new-user-app
-
-new-dll: new-user-dll
-
-new-sys: new-user-sys
-
-new-app-pair: new-user-pair
-
-new-user-app:
+new-app:
 	@set -e; \
 	if [ -z "$(NAME)" ]; then \
 		echo "Usage: make new-app NAME=<app_name> [APP_LANG=c|cpp]"; \
@@ -387,26 +238,21 @@ new-user-app:
 		exit 1; \
 	fi; \
 	LANG_CHOICE="$(APP_LANG)"; \
-	if [ -z "$$LANG_CHOICE" ]; then \
-		case "$(LANG)" in \
-			c|cpp|c++) LANG_CHOICE="$(LANG)" ;; \
-			*) LANG_CHOICE=c ;; \
-		esac; \
-	fi; \
+	if [ -z "$$LANG_CHOICE" ]; then LANG_CHOICE=c; fi; \
 	case "$$LANG_CHOICE" in \
-		c) TEMPLATE="$(USER_TEMPLATE_DIR)/program-c/main.c"; DEST="$(USR_PROGRAMS_DIR)/$(NAME)/main.c" ;; \
-		cpp|c++) TEMPLATE="$(USER_TEMPLATE_DIR)/program-cpp/main.cpp"; DEST="$(USR_PROGRAMS_DIR)/$(NAME)/main.cpp" ;; \
+		c) TEMPLATE="$(APP_TEMPLATE_DIR)/program-c/main.c"; DEST="$(APP_APPS_DIR)/$(NAME)/main.c" ;; \
+		cpp|c++) TEMPLATE="$(APP_TEMPLATE_DIR)/program-cpp/main.cpp"; DEST="$(APP_APPS_DIR)/$(NAME)/main.cpp" ;; \
 		*) echo "APP_LANG must be c or cpp"; exit 1 ;; \
 	esac; \
-	if [ -e "$(USR_PROGRAMS_DIR)/$(NAME)" ]; then \
-		echo "Program already exists: $(USR_PROGRAMS_DIR)/$(NAME)"; \
+	if [ -e "$(APP_APPS_DIR)/$(NAME)" ]; then \
+		echo "Application already exists: $(APP_APPS_DIR)/$(NAME)"; \
 		exit 1; \
 	fi; \
-	mkdir -p "$(USR_PROGRAMS_DIR)/$(NAME)"; \
+	mkdir -p "$(APP_APPS_DIR)/$(NAME)"; \
 	sed -e 's/__APP_NAME__/$(NAME)/g' "$$TEMPLATE" > "$$DEST"; \
 	echo "Created $$DEST"
 
-new-user-dll:
+new-dll:
 	@set -e; \
 	if [ -z "$(NAME)" ]; then \
 		echo "Usage: make new-dll NAME=<dll_name>"; \
@@ -416,80 +262,40 @@ new-user-dll:
 		echo "NAME must be a C identifier: letters, digits, and underscores only, not starting with a digit"; \
 		exit 1; \
 	fi; \
-	DLL_NAME_UPPER=$$(printf '%s' "$(NAME)" | tr '[:lower:]' '[:upper:]'); \
-	if [ -e "$(USR_DLLS_DIR)/$(NAME)" ] || [ -e "$(USR_INCLUDE_DIR)/app/$(NAME).h" ]; then \
-		echo "DLL already exists: $(NAME)"; \
+	if [ -e "$(APP_LIBS_DIR)/$(NAME)" ]; then \
+		echo "Library already exists: $(APP_LIBS_DIR)/$(NAME)"; \
 		exit 1; \
 	fi; \
-	mkdir -p "$(USR_DLLS_DIR)/$(NAME)" "$(USR_INCLUDE_DIR)/app"; \
-	sed \
-		-e 's/__DLL_NAME__/$(NAME)/g' \
-		-e "s/__DLL_NAME_UPPER__/$$DLL_NAME_UPPER/g" \
-		"$(USER_TEMPLATE_DIR)/dll/include/app/template-dll.h" > "$(USR_INCLUDE_DIR)/app/$(NAME).h"; \
-	sed \
-		-e 's/__DLL_NAME__/$(NAME)/g' \
-		-e "s/__DLL_NAME_UPPER__/$$DLL_NAME_UPPER/g" \
-		"$(USER_TEMPLATE_DIR)/dll/main.c" > "$(USR_DLLS_DIR)/$(NAME)/main.c"; \
-	echo "Created $(USR_INCLUDE_DIR)/app/$(NAME).h"; \
-	echo "Created $(USR_DLLS_DIR)/$(NAME)/main.c"
+	mkdir -p "$(APP_LIBS_DIR)/$(NAME)"; \
+	sed -e 's/__DLL_NAME__/$(NAME)/g' "$(APP_TEMPLATE_DIR)/dll/main.c" > "$(APP_LIBS_DIR)/$(NAME)/main.c"; \
+	echo "Created $(APP_LIBS_DIR)/$(NAME)/main.c"
 
-new-user-sys:
+new-sys:
 	@set -e; \
 	if [ -z "$(NAME)" ]; then \
-		echo "Usage: make new-sys NAME=<sys_name>"; \
+		echo "Usage: make new-sys NAME=<driver_name>"; \
 		exit 1; \
 	fi; \
 	if ! printf '%s' "$(NAME)" | grep -Eq '^[A-Za-z_][A-Za-z0-9_]*$$'; then \
 		echo "NAME must be a C identifier: letters, digits, and underscores only, not starting with a digit"; \
 		exit 1; \
 	fi; \
-	if [ -e "$(USR_SYSTEM_DIR)/$(NAME)" ]; then \
-		echo "System extension already exists: $(USR_SYSTEM_DIR)/$(NAME)"; \
+	if [ -e "$(APP_DRIVERS_DIR)/$(NAME)" ]; then \
+		echo "Driver already exists: $(APP_DRIVERS_DIR)/$(NAME)"; \
 		exit 1; \
 	fi; \
-	mkdir -p "$(USR_SYSTEM_DIR)/$(NAME)"; \
-	sed -e 's/__SYS_NAME__/$(NAME)/g' "$(USER_TEMPLATE_DIR)/system/module.c" > "$(USR_SYSTEM_DIR)/$(NAME)/module.c"; \
-	sed -e 's/__SYS_NAME__/$(NAME)/g' "$(USER_TEMPLATE_DIR)/system/module.json" > "$(USR_SYSTEM_DIR)/$(NAME)/module.json"; \
-	echo "Created $(USR_SYSTEM_DIR)/$(NAME)/module.c"; \
-	echo "Created $(USR_SYSTEM_DIR)/$(NAME)/module.json"
+	mkdir -p "$(APP_DRIVERS_DIR)/$(NAME)"; \
+	sed -e 's/__SYS_NAME__/$(NAME)/g' "$(APP_TEMPLATE_DIR)/system/module.c" > "$(APP_DRIVERS_DIR)/$(NAME)/main.c"; \
+	echo "Created $(APP_DRIVERS_DIR)/$(NAME)/main.c"
 
-new-user-pair:
+new-app-pair:
 	@set -e; \
 	if [ -z "$(APP_NAME)" ] || [ -z "$(DLL_NAME)" ]; then \
 		echo "Usage: make new-app-pair APP_NAME=<app_name> DLL_NAME=<dll_name>"; \
 		exit 1; \
 	fi; \
-	if ! printf '%s' "$(APP_NAME)" | grep -Eq '^[A-Za-z_][A-Za-z0-9_]*$$'; then \
-		echo "APP_NAME must be a C identifier: letters, digits, and underscores only, not starting with a digit"; \
-		exit 1; \
-	fi; \
-	if ! printf '%s' "$(DLL_NAME)" | grep -Eq '^[A-Za-z_][A-Za-z0-9_]*$$'; then \
-		echo "DLL_NAME must be a C identifier: letters, digits, and underscores only, not starting with a digit"; \
-		exit 1; \
-	fi; \
-	DLL_NAME_UPPER=$$(printf '%s' "$(DLL_NAME)" | tr '[:lower:]' '[:upper:]'); \
-	if [ -e "$(USR_PROGRAMS_DIR)/$(APP_NAME)" ] || [ -e "$(USR_DLLS_DIR)/$(DLL_NAME)" ] || [ -e "$(USR_INCLUDE_DIR)/app/$(DLL_NAME).h" ]; then \
-		echo "Paired scaffold target already exists"; \
-		exit 1; \
-	fi; \
-	mkdir -p "$(USR_PROGRAMS_DIR)/$(APP_NAME)" "$(USR_DLLS_DIR)/$(DLL_NAME)" "$(USR_INCLUDE_DIR)/app"; \
-	sed \
-		-e 's/__APP_NAME__/$(APP_NAME)/g' \
-		-e 's/__DLL_NAME__/$(DLL_NAME)/g' \
-		-e "s/__DLL_NAME_UPPER__/$$DLL_NAME_UPPER/g" \
-		"$(USER_TEMPLATE_DIR)/paired/app/main.c" > "$(USR_PROGRAMS_DIR)/$(APP_NAME)/main.c"; \
-	sed \
-		-e 's/__DLL_NAME__/$(DLL_NAME)/g' \
-		-e "s/__DLL_NAME_UPPER__/$$DLL_NAME_UPPER/g" \
-		"$(USER_TEMPLATE_DIR)/paired/dll/include/app/template-dll.h" > "$(USR_INCLUDE_DIR)/app/$(DLL_NAME).h"; \
-	sed \
-		-e 's/__APP_NAME__/$(APP_NAME)/g' \
-		-e 's/__DLL_NAME__/$(DLL_NAME)/g' \
-		-e "s/__DLL_NAME_UPPER__/$$DLL_NAME_UPPER/g" \
-		"$(USER_TEMPLATE_DIR)/paired/dll/main.c" > "$(USR_DLLS_DIR)/$(DLL_NAME)/main.c"; \
-	echo "Created $(USR_PROGRAMS_DIR)/$(APP_NAME)/main.c"; \
-	echo "Created $(USR_INCLUDE_DIR)/app/$(DLL_NAME).h"; \
-	echo "Created $(USR_DLLS_DIR)/$(DLL_NAME)/main.c"
+	$(MAKE) new-app NAME="$(APP_NAME)"; \
+	$(MAKE) new-dll NAME="$(DLL_NAME)"
 
 ifeq ($(IS_WINDOWS),1)
 applications-vfs:
@@ -524,19 +330,15 @@ applications-vfs: applications $(MAIN_KERNEL_IMAGE)
 	DEV=$$($(USER_VFS_ATTACH) | awk 'NR==1 { print $$1 }'); \
 	if [ -z "$$DEV" ]; then echo "Failed to attach fat32.img"; exit 1; fi; \
 	trap 'umount -f $(USER_VFS_MOUNT_DIR_ABS) >/dev/null 2>&1 || true; hdiutil detach -force "'"'$$DEV'"'" >/dev/null 2>&1 || true' EXIT; \
+	newfs_msdos -F 32 -O ROS -S 512 -c 1 -n 2 -v ROSROOT "$$DEV" >/dev/null; \
 	mount -t msdos "$$DEV" $(USER_VFS_MOUNT_DIR_ABS); \
 	mkdir -p $(USER_VFS_BIN_DIR); \
 	mkdir -p $(USER_VFS_LIB_DIR); \
 	mkdir -p $(USER_VFS_MOUNT_DIR)/system; \
-	rm -f $(USER_VFS_MOUNT_DIR)/$(ROSKRNL_NAME); \
-	rm -f $(USER_VFS_MOUNT_DIR)/user.exe; \
-	find $(USER_VFS_BIN_DIR) -maxdepth 1 -type f \( -name '*.elf' -o -name '*.exe' \) -delete; \
-	find $(USER_VFS_LIB_DIR) -maxdepth 1 -type f -name '*.dll' -delete; \
-	find $(USER_VFS_MOUNT_DIR)/system -maxdepth 1 -type f -name '*.sys' -delete; \
 	cp "$(MAIN_KERNEL_IMAGE)" $(USER_VFS_MOUNT_DIR)/$(ROSKRNL_NAME); \
-	for exe in $(USER_PROGRAM_EXES); do cp "$${exe}" $(USER_VFS_BIN_DIR)/$$(basename "$$exe"); done; \
-	for dll in $(USER_DLLS); do cp "$${dll}" $(USER_VFS_LIB_DIR)/$$(basename "$$dll"); done; \
-	for sys in $(USER_SYS_RUNTIME_PACKED); do cp "$${sys}" $(USER_VFS_MOUNT_DIR)/system/$$(basename "$$sys"); done; \
+	for exe in $(MY_LOADER_STAGE_APP_TARGETS); do cp "$${exe}" $(USER_VFS_BIN_DIR)/$$(basename "$$exe"); done; \
+	for dll in $(MY_LOADER_STAGE_DLL_TARGETS); do cp "$${dll}" $(USER_VFS_LIB_DIR)/$$(basename "$$dll"); done; \
+	for sys in $(MY_LOADER_STAGE_DRIVER_TARGETS); do cp "$${sys}" $(USER_VFS_MOUNT_DIR)/system/$$(basename "$$sys"); done; \
 	echo "FAT32 image contents after sync:"; \
 	find $(USER_VFS_MOUNT_DIR_ABS) -mindepth 1 -maxdepth 2 -print | sed 's#^$(USER_VFS_MOUNT_DIR_ABS)##' | LC_ALL=C sort; \
 	umount -f $(USER_VFS_MOUNT_DIR_ABS); \
@@ -668,7 +470,7 @@ $(MAIN_KERNEL_ELF): $(MAIN_KERNEL_LINKER_SCRIPT) $(MAIN_KERNEL_OBJ_FILES)
 	@mkdir -p $(BUILD_DIR)
 	@$(ARMGNU)-ld -nostdlib -T $(MAIN_KERNEL_LINKER_SCRIPT) -o $(MAIN_KERNEL_ELF) $(MAIN_KERNEL_OBJ_FILES) -g
 
-$(MAIN_KERNEL_IMAGE): $(MAIN_KERNEL_ELF) tools/pack_roskrnl.py
+$(MAIN_KERNEL_IMAGE): $(MAIN_KERNEL_ELF) tools/my-loader/ldr_build.py
 	@mkdir -p $(BUILD_DIR)
 	@$(MAIN_KERNEL_PACKER) --input $(MAIN_KERNEL_ELF) --output $(MAIN_KERNEL_IMAGE)
 
@@ -688,7 +490,7 @@ run: QEMU_GUI=0
 run: kernel8.img
 	@echo "Running on Windows: --------------------------------------------------------------------- "
 	@echo "Using QEMU: $(QEMU)"
-	"$(QEMU)" -M $(QEMU_MACHINE) -smp $(QEMU_CPUS) -kernel "$(KERNEL_IMG)" -serial stdio $(QEMU_DISPLAY_ARGS) $(QEMU_USB_ARGS) -drive file=fat32.img,if=sd,format=raw
+	"$(QEMU)" -M $(QEMU_MACHINE) -smp $(QEMU_CPUS) -kernel "$(KERNEL_IMG)" -serial stdio $(QEMU_USB_ARGS) -drive file=fat32.img,if=sd,format=raw
 else
 run: QEMU_GUI=0
 run: kernel8.img
@@ -702,6 +504,11 @@ run-gfx: kernel8.img
 run-headless: kernel8.img
 	@echo "Running headless ------------------------------------------------------------------------- "
 	@$(QEMU) -M $(QEMU_MACHINE) -smp $(QEMU_CPUS) -kernel $(KERNEL_IMG) -serial stdio -display none -drive file=fat32.img,if=sd,format=raw
+
+# One-command bridge regression smoke test for /bin/myldr-user_app.exe.
+smoke-myldr-user-app: kernel8.img
+	@bash tools/my-loader/smoke_user_app.sh
+
 debug: kernel8.img
 	@echo "QEMU starting. Remember to start gdb------------------------------------------------------ "
 	# @$(QEMU) -M $(QEMU_MACHINE) -kernel $(KERNEL_IMG) -serial null -serial stdio -display none -s -S -d trace:bcm2835_systmr*

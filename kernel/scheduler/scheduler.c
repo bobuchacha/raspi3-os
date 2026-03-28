@@ -190,7 +190,7 @@ void _schedule(void) {
 	struct task_struct* next_task;
 
 	idle_task = percpu_idle_task(cpu);
-	fallback = schedler_task_matches_cpu(current_task, cpu) && current_task->state == TASK_RUNNING
+	fallback = schedler_task_matches_cpu(current_task, cpu) && (current_task->state == TASK_RUNNING || current_task->state == TASK_READY)
 		? current_task
 		: (schedler_task_matches_cpu(idle_task, cpu) && (idle_task->state == TASK_RUNNING || idle_task->state == TASK_READY) ? idle_task : 0);
 	while (1) {
@@ -282,6 +282,7 @@ void schedler_schedule(void) {
 	}
 	current_task->counter = 0;
 	scheduler_lock_release();
+	enable_irq();
 	_schedule();
 }
 
@@ -407,5 +408,4 @@ void schedler_timer_tick() {
 	scheduler_lock_release();
 	enable_irq();
 	_schedule();
-	disable_irq();
 }

@@ -6,6 +6,9 @@
 /* Number of supported CPU cores (matches the boot secondary slots). */
 #define MAX_CPUS NR_CPUS
 
+/* Initialize the minimal idle task used when a CPU has no runnable work. */
+void percpu_init_idle_task(unsigned int cpu_index);
+
 /* Initialize per-CPU data for the given secondary CPU index. */
 void percpu_init_secondary(unsigned int cpu_index);
 

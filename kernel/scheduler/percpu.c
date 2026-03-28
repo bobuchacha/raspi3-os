@@ -109,6 +109,29 @@ Task* percpu_idle_task(unsigned int cpu_index) {
     return &idle_tasks[cpu_index];
 }
 
+void percpu_init_idle_task(unsigned int cpu_index) {
+    if (cpu_index >= MAX_CPUS) return;
+
+    Task* t = &idle_tasks[cpu_index];
+
+    for (unsigned int i = 0; i < sizeof(Task) / sizeof(unsigned long); ++i) {
+        ((unsigned long*)t)[i] = 0;
+    }
+
+    t->id = cpu_index;
+    t->state = TASK_READY;
+    t->counter = 0;
+    t->priority = PRIORITY_NORMAL;
+    t->cpu_affinity = cpu_index;
+    t->preempt_count = 0;
+    t->flags = PF_KTHREAD;
+    t->process = processes[0];
+    t->kernel_stack_page = 0;
+    t->mm.pgd = get_pgd();
+    t->name = (Buffer)"KERNEL IDLE";
+    t->cpu_context.sp = percpu_stack_top(cpu_index);
+}
+
 /**
  * percpu_stack_top
  *
@@ -135,28 +158,8 @@ unsigned long percpu_stack_top(unsigned int cpu_index) {
 void percpu_init_secondary(unsigned int cpu_index) {
     if (cpu_index == 0 || cpu_index >= MAX_CPUS) return;
 
-    Task* t = &idle_tasks[cpu_index];
-    // Zero the task struct then initialize key fields.
-    for (unsigned int i = 0; i < sizeof(Task) / sizeof(unsigned long); ++i) {
-        ((unsigned long*)t)[i] = 0;
-    }
-
-    // Initialize basic scheduler-visible fields.
-    t->id = cpu_index;
-    t->state = TASK_RUNNING;
-    t->counter = 0;
-    t->priority = PRIORITY_NORMAL;
-    t->cpu_affinity = cpu_index;
-    t->preempt_count = 0;
-    t->flags = PF_KTHREAD;
-    t->process = processes[0];
-    t->kernel_stack_page = 0;
-    t->mm.pgd = get_pgd();
-    t->name = (Buffer)"KERNEL IDLE";
-
-    // Set the saved kernel SP in the task's cpu_context so switching to
-    // this task will restore the correct stack pointer.
-    t->cpu_context.sp = percpu_stack_top(cpu_index);
+    percpu_init_idle_task(cpu_index);
+    idle_tasks[cpu_index].state = TASK_RUNNING;
 
     // Keep secondary idle tasks private to their CPUs for now. They are not
     // inserted into the global scheduler task table until true per-CPU

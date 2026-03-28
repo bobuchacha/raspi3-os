@@ -8,6 +8,7 @@
 #define USER_EXE_HEADER_SIZE 512U
 #define USER_EXE_SEGMENT_TABLE_OFFSET 56U
 #define USER_EXE_MAX_SEGMENTS 8U
+
 #define USER_SHARED_LIBRARY_BASE 0x200000UL
 #define USER_SHARED_LIBRARY_LIMIT 0x800000UL
 #define USER_SHARED_LIBRARY_PATH_MAX 96U
@@ -19,7 +20,6 @@
 #define USER_SHARED_LIBRARY_LOCAL_LIMIT 0xC00000UL
 #define USER_SHARED_LIBRARY_MAX_TASK_LOCALS 4U
 #define USER_EXEC_PATH_MAX 128U
-#define USER_DLL_VERSION 2U
 
 typedef enum {
     USER_EXE_SEGMENT_READ = 0x1,
@@ -65,44 +65,6 @@ typedef struct __attribute__((packed)) {
 } UserExeHeader;
 
 typedef char UserExeHeaderSizeCheck[(sizeof(UserExeHeader) == USER_EXE_HEADER_SIZE) ? 1 : -1];
-
-typedef struct __attribute__((packed)) {
-    char magic[8];
-    UInt version;
-    UInt machine;
-    UInt flags;
-    UInt header_size;
-    UInt section_count;
-    UInt reloc_count;
-    UInt export_count;
-    UInt entry_section;
-    ULong entry_offset;
-    ULong image_size;
-    ULong align;
-} UserDllHeader;
-
-typedef struct __attribute__((packed)) {
-    UInt type;
-    UInt flags;
-    ULong runtime_offset;
-    ULong file_offset;
-    ULong file_size;
-    ULong mem_size;
-    ULong align;
-} UserDllSection;
-
-typedef struct __attribute__((packed)) {
-    UInt type;
-    UInt section;
-    ULong offset;
-    ULong addend;
-} UserDllReloc;
-
-typedef struct __attribute__((packed)) {
-    char name[USER_SHARED_LIBRARY_EXPORT_NAME_MAX];
-    UInt section;
-    ULong offset;
-} UserDllExport;
 
 typedef struct {
     Bool used;

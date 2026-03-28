@@ -76,18 +76,42 @@ def load_kernel_segment(data: bytes):
             }
         )
 
-    if len(load_segments) != 1:
-        raise ValueError(f"expected exactly one PT_LOAD segment, found {len(load_segments)}")
+    if not load_segments:
+        raise ValueError("expected at least one PT_LOAD segment")
 
-    segment = load_segments[0]
+    load_segments.sort(key=lambda segment: segment["paddr"])
+    base_segment = load_segments[0]
+    base_delta = base_segment["paddr"] - base_segment["vaddr"]
+    merged_filesz = 0
+    merged_memsz = 0
+    merged_align = 0
+
+    for index, segment in enumerate(load_segments):
+        if segment["paddr"] - segment["vaddr"] != base_delta:
+            raise ValueError(f"PT_LOAD segment {index} uses a different phys/virt bias")
+
+        file_end = (segment["paddr"] - base_segment["paddr"]) + segment["filesz"]
+        mem_end = (segment["paddr"] - base_segment["paddr"]) + segment["memsz"]
+        if file_end > merged_filesz:
+            merged_filesz = file_end
+        if mem_end > merged_memsz:
+            merged_memsz = mem_end
+        if segment["align"] > merged_align:
+            merged_align = segment["align"]
+
+    merged_payload = bytearray(merged_filesz)
+    for segment in load_segments:
+        payload_offset = segment["paddr"] - base_segment["paddr"]
+        merged_payload[payload_offset : payload_offset + segment["filesz"]] = segment["payload"]
+
     return {
         "entry": e_entry,
-        "vaddr": segment["vaddr"],
-        "paddr": segment["paddr"],
-        "filesz": segment["filesz"],
-        "memsz": segment["memsz"],
-        "align": segment["align"],
-        "payload": segment["payload"],
+        "vaddr": base_segment["vaddr"],
+        "paddr": base_segment["paddr"],
+        "filesz": merged_filesz,
+        "memsz": merged_memsz,
+        "align": merged_align,
+        "payload": bytes(merged_payload),
     }
 
 def build_roskrnl_image(kernel_segment: dict) -> bytes:

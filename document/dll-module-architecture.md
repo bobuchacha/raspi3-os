@@ -215,7 +215,7 @@ Do the redesign in this order.
 ### Step 2: Introduce embedded metadata
 
 - Add source-embedded metadata sections for kernel modules first.
-- Make `tools/pack_kernel_module.py` accept either JSON or embedded metadata.
+- Keep system-module metadata embedded in `.ros.module.meta` and pack the linked ELF with `tools/my-loader/ldr_build.py --pack-elf`.
 
 ### Step 3: Add a dedicated relocatable DLL format
 
