@@ -179,6 +179,8 @@ void kernel_main() {
     // Keep reclaiming zombies and handing CPU time to runnable tasks forever.
 
     log_info("Entering main scheduler loop...\n");
+    int boot_spawn_counter = 3; /* scheduler iterations before auto-spawn */
+    Bool boot_spawned = false;
     while (1) {
         //  kinfo("Printing from thread %s. Yeilding...", current_task->name);
 
@@ -192,6 +194,18 @@ void kernel_main() {
 
         // Yield to the scheduler so runnable kernel or user tasks can execute.
         schedler_schedule();
+
+        if (!boot_spawned) {
+            if (--boot_spawn_counter <= 0) {
+                log_info("Boot delay elapsed; spawning /bin/core.exe now...");
+                if (spawn_user_program("/bin/core.exe", "core", "") < 0) {
+                    log_warning("Unable to spawn /bin/core.exe from scheduler loop; falling back to kernel shell");
+                    kernel_shell_main(0);
+                }
+                boot_spawned = true;
+            }
+        }
+
         // delay(1000000000);
     }
 }
