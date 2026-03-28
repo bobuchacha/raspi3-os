@@ -707,6 +707,7 @@ static void user_loader_spawn_bootstrap(Pointer arg) {
         return;
     }
 
+    log_info("user_loader_spawn_bootstrap: spawning %s (name='%s')", request->path, request->name[0] ? request->name : "<none>");
     user_loader_fill_process_metadata(current_task, request->path, request->name, request->args);
     if (exec_user_program(request->path) != 0) {
         log_error("spawn bootstrap failed for %s", request->path);
@@ -714,6 +715,8 @@ static void user_loader_spawn_bootstrap(Pointer arg) {
         exit_current_process(-1);
         return;
     }
+
+    log_info("user_loader_spawn_bootstrap: exec_user_program returned for %s", request->path);
 
     kfree((Address)request);
 }
