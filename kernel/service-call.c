@@ -240,7 +240,9 @@ long sys_sleep(unsigned long msec) {
     }
 
     // Yield through the scheduler so another runnable task can execute while we sleep.
+    log_info("sys_sleep: task=%d sleeping for %lu ms (%lu ticks)", current_task ? current_task->id : -1, msec, ticks);
     schedler_sleep_ticks(ticks);
+    log_info("sys_sleep: task=%d woke", current_task ? current_task->id : -1);
     return 0;
 }
 
