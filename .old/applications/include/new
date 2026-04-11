@@ -1,0 +1,38 @@
+#ifndef ROS_CPP_NEW
+#define ROS_CPP_NEW
+
+#include <cstddef>
+
+namespace std {
+    struct nothrow_t {
+    };
+
+    extern const nothrow_t nothrow;
+}
+
+void* operator new(std::size_t size);
+void* operator new[](std::size_t size);
+void* operator new(std::size_t size, const std::nothrow_t&) noexcept;
+void* operator new[](std::size_t size, const std::nothrow_t&) noexcept;
+void operator delete(void* ptr) noexcept;
+void operator delete[](void* ptr) noexcept;
+void operator delete(void* ptr, std::size_t size) noexcept;
+void operator delete[](void* ptr, std::size_t size) noexcept;
+void operator delete(void* ptr, const std::nothrow_t&) noexcept;
+void operator delete[](void* ptr, const std::nothrow_t&) noexcept;
+
+inline void* operator new(std::size_t, void* ptr) noexcept {
+    return ptr;
+}
+
+inline void* operator new[](std::size_t, void* ptr) noexcept {
+    return ptr;
+}
+
+inline void operator delete(void*, void*) noexcept {
+}
+
+inline void operator delete[](void*, void*) noexcept {
+}
+
+#endif

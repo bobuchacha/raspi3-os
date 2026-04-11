@@ -1,0 +1,9 @@
+#ifndef ROS_LOADER_VIRT_PERIPHERAL_BASE_H
+#define ROS_LOADER_VIRT_PERIPHERAL_BASE_H
+
+#include "memory.h"
+
+#define DEVICE_BASE 0x08000000UL
+#define PBASE (DEVICE_BASE + VA_START)
+
+#endif

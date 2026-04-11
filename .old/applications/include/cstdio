@@ -1,0 +1,14 @@
+#ifndef ROS_CPP_CSTDIO
+#define ROS_CPP_CSTDIO
+
+#include "stdio.h"
+
+namespace std {
+    using ::printf;
+    using ::puts;
+    using ::size_t;
+    using ::snprintf;
+    using ::vsnprintf;
+}
+
+#endif

@@ -1,0 +1,127 @@
+%% WINCE300 Detailed Loader Workflow (Mermaid)
+%% Includes EXE/DLL/Driver load paths, reservations, relocations, paging, imports, and kernel vs user mapping
+flowchart TD
+    %% Entry
+    OEM["OEM / Kernel boot or runtime syscall"] --> UserAction["API call or system boot: Load EXE / DLL / Driver"]
+
+    subgraph FileOpen [Open / detect image]
+        UserAction --> OpenExe["OpenExecutable / OpenADll"]
+        OpenExe --> FileType["Determine file type: FT_OBJSTORE / FT_ROMIMAGE / FT_EXTIMAGE / FT_EXTXIP"]
+        FileType --> CheckXIP["FA_DIRECTROM / FA_XIP / FA_PREFIXUP flags -> XIP handling? "]
+        FileType --> CheckOID["Is OID (object store) -> ceOid handling"]
+        OpenExe -->|if absolute/relative| PathSearch["search: same-dir / \Windows / PATH / ROMChain"]
+    end
+
+    subgraph VerifyAndTrust [Verify & Trust checks]
+        OpenExe --> VerifyBinary["VerifyBinary(hFile, phTok) \n- CertVerify()\n- pOEMLoadInit / pOEMLoadModule legacy hooks\n-> set pCurProc->bTrustLevel"]
+        VerifyBinary -->|fail| Reject["Reject load (NTE_BAD_SIGNATURE / ERROR)"]
+    end
+
+    subgraph ROM_Reservation [ROM / Slot reservation]
+        KernelInitCall["SetROMDllBase(cbSize, pInfo)"] -->|called by filesys| ReserveSlots["Reserve slot0 (ROMDllLoadBase) and slot1 (SharedDllBase) via VirtualAlloc(MEM_RESERVE|MEM_IMAGE)"]
+        ReserveSlots --> ForAllProcs["Reserve R/W areas for existing processes"]
+    end
+
+    subgraph EXE_flow [EXE Load Path]
+        OpenExe --> LoadE32["LoadE32 (parse e32 header) -> e32_lite"]
+        LoadE32 --> DecideBase["Preferred base = e32.e32_vbase; if RELOCS_STRIPPED -> must use base"]
+        DecideBase --> ReserveVM["VirtualAlloc(BasePtr, e32_vsize, MEM_RESERVE|MEM_IMAGE)"]
+        ReserveVM --> ReserveDllRW["ReserveDllRW(dwVMBase) to reserve ROM RW ranges (calls ROMChain or g_pROMInfo)"]
+        ReserveVM --> LoadO32["LoadO32 -> o32_lite[] (determine o32 flags, access)"]
+        LoadO32 --> ReadSection["ReadSection(): XIP -> VirtualCopy / EXT XIP -> IOCTL_BIN_GET_XIP_PAGES; File -> ReadFileIntoCommittedMem"]
+        ReadSection --> AdjustRegions["AdjustRegions(): set protections; decommit discardable; handle PAGEABLE sections"]
+        AdjustRegions --> DoImportsExe["DoImports(eptr,o32_ptr,BaseAddr) -> for each imp DLL: LoadOneLibraryW -> ResolveImp* -> write IAT"]
+        DoImportsExe -->|IAT write| IATWrite["If idata readonly: VirtualFree/VirtualProtect to make writable, patch, restore"]
+        DoImportsExe --> MaybeRelocate["If not pageable and not stripped -> Relocate(eptr,oarray,BasePtr)"]
+        MaybeRelocate --> CalcStack["CalcStackSize / allocate TLS & stack (VirtualAlloc on proc VM)"]
+        CalcStack --> LaunchExe["FindEntryPoint / _CorExeMain -> BlockWithHelperAlloc(LoadSwitch,FinishLoadSwitch)"]
+    end
+
+    subgraph DLL_flow [DLL Load Path]
+        UserAction --> LoadOneLibrary["LoadOneLibraryW(name, flags)"]
+        LoadOneLibrary --> OpenADll["OpenADll (try name, name.dll) -> OpenExecutable"]
+        OpenADll --> VerifyDLL["VerifyBinary -> trust level check"]
+        VerifyDLL --> LoadE32_DLL["LoadE32 -> e32_lite"]
+        LoadE32_DLL --> ChooseVM_DLL["If FA_PREFIXUP && secure slot conditions -> map in secure slot; else VirtualAlloc reserve"]
+        ChooseVM_DLL --> LoadO32_DLL["LoadO32: set o32_access, flags; handle IMAGE_SCN_MEM_* flags"]
+        LoadO32_DLL --> ReadSection_DLL["ReadSection/VirtualCopy/XIP logic"]
+        ReadSection_DLL --> DoImportsDLL["DoImports for DLL -> may recursively LoadOneLibraryW"]
+        DoImportsDLL --> InitModule["InitModule: CallDLLEntry(DLL_PROCESS_ATTACH) / CallKDllMain if kernel"]
+        InitModule --> ReturnHandle["Return module handle to caller; IncRefCount / mark inuse"]
+    end
+
+    subgraph Driver_flow [Driver / Kernel module]
+        UserAction --> InstallDriver["DevMgr or Kernel API requests driver load"]
+        InstallDriver --> LoadDrvPath["Kernel loader path: LoadOneLibraryW with K flag / LO32_IN_KERNEL"]
+        LoadDrvPath --> VerifyDrv["VerifyBinary: must meet K Trust (Cert or OEM) "]
+        VerifyDrv --> LoadE32_Drv["LoadE32/LoadO32 into kernel VA (IsKernelVa Base) "]
+        LoadE32_Drv --> ReadSection_Drv["ReadSection -> likely non-pageable; commit RO/RW in kernel space"]
+        ReadSection_Drv --> CallKDllMain["CallKDllMain(module,DLL_PROCESS_ATTACH) -> DriverEntry equivalent"]
+        CallKDllMain --> RegisterDevice["Driver registers device interfaces / IOCTL handlers"]
+    end
+
+    %% Paging & on-demand page-in
+    subgraph Paging [Paging & Relocation on page-in]
+        PageRequest["Page fault / PageIn request"] --> PageInModule["PageInModule(pMod, addr)"]
+        PageInModule --> GetPagingPage["GetPagingPage (paging pool) if needed"]
+        PageInModule -->|from ROM| PageInFromROM["PageInFromROM -> decompress or read into temp -> VirtualCopy to destination"]
+        PageInModule -->|from RAM| PageInFromRAM["PageInFromRAM -> PageInPage -> RelocatePage if needed -> VirtualCopy"]
+        RelocatePage["RelocatePage(eptr,optr,BasePtr,BaseAdj,pMem,pData,prevdw)"] -->|handles| ArchCases["x86: HIGHLOW split fixes; MIPS: JMPADDR16 cross-page handling; ARM: HIGH/LOW/HIGHADJ"]
+        PageInModule --> AddPageToQueue["AddPageToQueue on success / AddPageToFreeList on fail"]
+    end
+
+    %% Shared mapping & copy regions
+    subgraph SharedCopy [CopyRegions / Shared mapping across processes]
+        LoadOneLibrary --> CopyRegions["CopyRegions(pMod, &pfMemReserved) when new proc needs same module mapping"]
+        CopyRegions -->|for RO sections| VirtualCopy_RO["VirtualCopy(BasePtr+o32_rva <- pMod->o32_realaddr)"]
+        CopyRegions -->|for RW non-shared| CommitRW["VirtualAlloc commit & memcpy for RW sections or VirtualCopy from secure slot"]
+        CopyRegions -->|on fail| Rollback["VirtualFree reserved VM / decommit RW"]
+    end
+
+    %% Import resolution recursion and AddrFromEat
+    subgraph ImportResolve [Import resolution details]
+        DoImportsDLL --> ForEachImp["For each ImpHdr: load/import DLL -> ltptr (lookup table) -> atptr (IAT)"]
+        ForEachImp --> ResolveImpOrd["ResolveImpOrd -> expptr, eat -> AddrFromEat if needed"]
+        ForEachImp --> ResolveImpStr["ResolveImpStr/ResolveImpHintStr -> find symbol by name/hint -> AddrFromEat"]
+        AddrFromEat["AddrFromEat(pMod,eat)"] -->|if eat points to another module| LoadDep["LoadOneLibraryW(depname) -> return address"]
+    end
+
+    %% Trust & OEM hooks
+    subgraph Trust
+        VerifyBinary --> CertVerify["CertVerify(hFile, &hTok)"]
+        CertVerify --> OEMLegacy["If OEM hooks set -> pOEMLoadInit / pOEMLoadModule stream-based check"]
+        VerifyBinary --> SetTrust["set bTrustLevel on module / proc"]
+    end
+
+    %% Kernel vs User notes
+    subgraph KernelUser
+        IsKernelVa["IsKernelVa(BasePtr)?"]
+        IsSecure["IsCommittedSecureSlot(addr)?"]
+        KernelPaths["Kernel-mode modules: non-pageable, CallKDllMain, can't be freed easily"]
+        UserPaths["User-mode modules: per-process refs, virtual copies, paging"]
+    end
+
+    %% Links
+    InitModule --> IsKernelVa
+    IsKernelVa -->|yes| KernelPaths
+    IsKernelVa -->|no| UserPaths
+
+    %% Fail paths
+    Reject --> End["Load failed: bail out, close handles"]
+    RejectDll --> End
+    RejectDrv --> End
+
+    style FileOpen fill:#fdfbf6,stroke:#333
+    style EXE_flow fill:#efe,stroke:#333
+    style DLL_flow fill:#eef,stroke:#333
+    style Driver_flow fill:#ffe,stroke:#333
+    style Paging fill:#fff0f0,stroke:#333
+    style ImportResolve fill:#f0f8ff,stroke:#333
+
+    %% Legend (compact)
+    classDef note fill:#fff,stroke:#333,stroke-dasharray: 5 5
+    subgraph Legend[Notes]
+      N1["ROM slots: slot0 (secure) / slot1 (shared)"]
+      N2["Preferred base: e32.e32_vbase; RELOCS_STRIPPED forces this base"]
+      N3["VirtualAlloc(..., MEM_RESERVE|MEM_IMAGE) used to reserve address space"]
+    end

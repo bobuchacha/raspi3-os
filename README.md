@@ -1,75 +1,63 @@
 # raspi3-os
 
-Hobby operating system kernel for Raspberry Pi 3, with the active codebase now split cleanly between `kernel/` and `applications/`.
+Clean-room rewrite of a small 64-bit operating system for multiple embedded boards and emulated targets.
 
-## Active Source Layout
+## Goals
 
-Only the top-level `kernel/`, `applications/`, and build files participate in the active build. Folders whose names start with `_` are archived experiments and are intentionally ignored.
+- Keep the kernel permanently mapped in the higher half of the virtual address space.
+- Keep user mappings in the lower half so service calls do not need a separate syscall remap window.
+- Separate ISA-level code from board and CPU-family bring-up.
+- Keep the second-stage bootloader independent from the kernel binary while storing its sources inside the kernel tree.
+- Make public kernel interfaces easy to include and private headers easy to contain.
+
+## Repository Layout
+
+```text
+docs/               design notes for boot flow and memory layout
+kernel/             higher-half kernel sources and second-stage bootloader
+tools/              image packing, flashing, emulation, and inspection helpers
+.old/               archived code kept only as reference during the rewrite
+```
+
+## Kernel Layout
 
 ```text
 kernel/
-|---- include/
-|     |---- platform/           board selectors and CPU wrapper headers
-|     |---- arch/               architecture and CPU implementation headers
-|     |---- device/             board and peripheral headers
-|     |---- ...                 kernel public headers
-|---- arch/                     architecture and CPU implementation code
-|---- device/                   reusable peripheral and board device drivers
-|---- platform/
-|     |---- board/              board bring-up and board composition code
-|---- filesystem/
-|---- hal/
-|---- mm/
-|---- scheduler/
-|---- ...                       generic kernel subsystems
-
-applications/
-|---- include/                  application SDK, libc subset, and logger
-|---- common/                   shared app linker scripts and startup
-|---- lib/                      shared application runtime support
-|---- programs/                 one program per folder
-|---- dlls/                     one shared library per folder
+|-- bootloader/             second-stage bootloader sources and handoff contracts
+|-- include/
+|   |-- types.h             shared scalar and address-space types
+|   |-- arch.h              architecture interface
+|   |-- device.h            device subsystem interface
+|   |-- filesystem.h        filesystem driver interface
+|   |-- vfs.h               virtual filesystem interface
+|   |-- scheduler.h         scheduler interface
+|   |-- loader.h            executable and module loader interface
+|   |-- mm.h                memory-management interface and VA split
+|   |-- heap.h              heap allocator interface
+|   |-- platform.h          board and CPU composition interface
+|   `-- internal/           subsystem-private headers
+|-- arch/                   ISA-specific entry, traps, and low-level helpers
+|-- device/                 device core and reusable drivers
+|-- filesystem/             on-disk filesystem drivers
+|-- heap/                   kernel heap allocator implementations
+|-- loader/                 executable and module loading
+|-- mm/                     physical and virtual memory management
+|-- platform/
+|   |-- board/              board-family bring-up
+|   `-- cpu/                CPU-family quirks, timers, and errata hooks
+|-- scheduler/              thread and run-queue management
+|-- service/                service call entry and dispatch
+`-- vfs/                    namespace and file-handle layer
 ```
 
-## Target Selection
+## Boot Flow
 
-```sh
-make BOARD=raspi3b CPU=cortex-a53 ARCH=aarch64
-make run QEMU_MACHINE=raspi3b
-```
+The expected boot chain is:
 
-To port the kernel to another board or CPU, add a new board wrapper under `kernel/include/platform/board/`, add CPU wrappers under `kernel/include/platform/cpu/`, and add a board bring-up file under `kernel/platform/board/`.
+1. Board firmware or emulator entry.
+2. Custom second-stage bootloader in `kernel/bootloader/`.
+3. Bootloader loads the kernel image, prepares a handoff block, and jumps into the higher-half kernel entry.
+4. Kernel initializes architecture, memory management, platform, devices, VFS, loader, and scheduler.
+5. User code enters the kernel through service calls.
 
-## Applications
-
-Applications now build against their own freestanding SDK under `applications/include/`.
-
-- `stdio.h`, `stdlib.h`, and `string.h` provide a small custom libc surface.
-- `logger.h` provides TRACE/DEBUG/INFO/WARN/ERROR logging.
-- `app/kernel.h` and `app/kernel.hpp` wrap syscalls for C and C++ applications.
-- `app/*.h` is the place to publish shared ABI headers that programs and DLLs consume.
-
-Every directory directly under `applications/programs/` is linked into an intermediate ELF, then packed into a final `.exe` image. Every directory directly under `applications/dlls/` is linked as a PIC shared ELF and then packed into a flat relocatable `.dll` image. The build mounts `fat32.img`, copies program images into `/bin`, and copies shared libraries into `/lib` inside the FAT filesystem so they are available through VFS at boot.
-
-See `applications/README.md` for the application-side layout, scaffolding, and SDK details.
-
-## Build Output
-
-All active build artifacts now land under `output/`:
-
-- `output/kernel8.elf`
-- `output/kernel8.img`
-- `output/applications/programs/*.exe`
-- `output/applications/dll/*.dll`
-
-The compatibility Make targets `make user` and `make user-vfs` still work, but the preferred names are `make applications` and `make applications-vfs`.
-
-## Scaffolding
-
-Copy-ready templates live under `applications/_templates/`.
-
-- `make new-app NAME=my_app [APP_LANG=c|cpp]`
-- `make new-dll NAME=my_dll`
-- `make new-app-pair APP_NAME=my_app DLL_NAME=my_dll`
-
-The current default first application is `/bin/init.exe`.
+See [docs/boot-flow.md](docs/boot-flow.md) and [docs/memory-layout.md](docs/memory-layout.md) for the current baseline rules.

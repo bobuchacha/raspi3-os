@@ -1,0 +1,43 @@
+sequenceDiagram
+    participant C as Caller
+    participant L as Loader
+    participant K as Kernel API
+    participant G as Module Graph
+
+    C->>L: ldr_load_exe/dll/driver(req)
+    L->>K: vfs_open + vfs_size + vfs_read_at
+    K-->>L: full image bytes
+
+    L->>L: ldr_parse_image
+    Note right of L: Validate magic/version and parse\nsections/imports/exports/relocs
+
+    L->>K: vm_reserve(preferred,size,flags)
+    K-->>L: base
+    L->>K: vm_commit(base,size,RW)
+    L->>L: ldr_sections_load
+    Note right of L: Copy section bytes, zero BSS,\nset vm_protect by section flags
+
+    L->>L: ldr_imports_bind
+    Note right of L: Find dependency module by name,\nresolve export by symbol, write IAT slot
+
+    L->>L: ldr_reloc_apply
+    Note right of L: ABS64 patch: *(base+rva)=base+addend
+
+    L->>G: ldr_module_register
+    L->>L: ldr_call_init(base)
+
+    alt EXE
+        L->>K: proc_add_module + proc_set_entry
+    else SYS
+        L->>L: ldr_driver_finalize_load
+    else DLL
+        Note right of L: No process bootstrap step
+    end
+
+    L-->>C: module handle
+
+    C->>L: ldr_unload_module(module)
+    L->>L: ldr_call_deinit(base)
+    L->>G: ldr_module_unregister
+    L->>K: vm_release(base,size)
+    L-->>C: unload complete

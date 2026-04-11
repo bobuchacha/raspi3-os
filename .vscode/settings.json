@@ -67,5 +67,8 @@
         "atomic": "c",
         "memory": "c"
     },
-    "chatgpt.openOnStartup": false
+    "chatgpt.openOnStartup": false,
+    "workbench.editorAssociations": {
+        "*.md": "markdown-preview-enhanced"
+    }
 }

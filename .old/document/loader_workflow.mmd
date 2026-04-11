@@ -1,0 +1,72 @@
+%% Windows CE 3.0 Loader Workflow — EXE / DLL / Driver interactions (Mermaid)
+flowchart TD
+    %% Start
+    OEM["OEM / Kernel boot or runtime syscall"] --> UserAction["User/API requests: run EXE / load DLL / install driver"]
+
+    %% EXE load path
+    UserAction --> EXELoad["Load EXE"]
+    subgraph EXE_Load
+        OpenExe["OpenAnExe / OpenExecutable"] --> VerifyExe["VerifyBinary (Cert/OEM) -> set trust"]
+        VerifyExe --> LoadE32["LoadE32 (parse e32 header)"]
+        LoadE32 --> ReserveVM["VirtualAlloc Reserve image / ReserveDllRW"]
+        ReserveVM --> LoadO32["LoadO32 (read o32 sections)"]
+        LoadO32 --> ReadSections["ReadSection(s) / XIP handling"]
+        ReadSections --> MaybeReloc{"Relocations stripped?"}
+        MaybeReloc -- yes --> Relocate["Relocate / RelocatePage"]
+        MaybeReloc -- no --> SkipReloc["No runtime reloc required"]
+        Relocate --> AllocStack["CalcStackSize & allocate stack / TLS init"]
+        SkipReloc --> AllocStack
+        AllocStack --> InjectCore["LoadOneLibraryW('coredll.dll') (inject runtime)"]
+        InjectCore --> DoImportsExe["DoImports (resolve imports -> ResolveImp*/AddrFromEat)"]
+        DoImportsExe --> AdjustRegions["AdjustRegions (protect, decommit discardable)"]
+        AdjustRegions --> FindEntry["FindEntryPoint or _CorExeMain"]
+        FindEntry --> StartUserThread["BlockWithHelperAlloc(LoadSwitch/FinishLoadSwitch) -> user thread runs"]
+    end
+
+    %% DLL load path (explicit LoadLibrary or implicit via EXE DoImports)
+    UserAction --> DLLLoad["Load DLL"]
+    subgraph DLL_Load
+        CallLoadLib["LoadOneLibraryW(name, flags)"] --> OpenDll["OpenADll / OpenExecutable"]
+        OpenDll --> VerifyDll["VerifyBinary / trust"]
+        VerifyDll --> LoadE32_DLL["LoadE32 (e32 header)"]
+        LoadE32_DLL --> ReserveVM_DLL["Reserve/Map VM or slot reservation (ROM/XIP)"]
+        ReserveVM_DLL --> LoadO32_DLL["LoadO32 (sections)"]
+        LoadO32_DLL --> ReadSections_DLL["ReadSection or VirtualCopy for XIP"]
+        ReadSections_DLL --> DoImportsDll["DoImports (resolve this DLL's imports)"]
+        DoImportsDll --> InitModule["InitModule / CallDLLEntry(DLL_PROCESS_ATTACH)"]
+        InitModule --> ReturnHandle["Return module handle to caller"]
+    end
+
+    %% Driver load path (kernel-mode DLL or device driver)
+    UserAction --> DriverLoad["Install/Load Driver"]
+    subgraph Driver_Load
+        InstallReq["Install/Driver load request (e.g., device install) "] --> LoaderDispatch["Kernel loader path or DevMgr -> LoadOneLibrary (kernel flag)"]
+        LoaderDispatch --> VerifyDrv["VerifyBinary (may require kernel trust)"]
+        VerifyDrv --> LoadE32_DRV["LoadE32/LoadO32 (may load into kernel address space)"]
+        LoadE32_DRV --> InitDriver["DriverEntry / Init routine called (kernel context)"]
+        InitDriver --> RegDevice["RegisterDevice/IOCTL handlers / expose device interface"]
+        RegDevice --> DriverReady["Driver ready; user mode apps talk via Device APIs (CreateFile/DeviceIoControl)"]
+    end
+
+    %% EXE loads DLL during DoImports
+    DoImportsExe -->|needs DLL| CallLoadLib
+    CallLoadLib --> InitModule
+
+    %% Runtime interaction: EXE -> DLL function call
+    subgraph Runtime_Call
+        UserThread["User EXE thread"] --> IAT_Call["Call via IAT (function ptr set by DoImports)"]
+        IAT_Call --> DLLFunc["DLL function (in DLL module) executes in process context"]
+    end
+
+    %% EXE <-> Driver interaction path
+    Runtime_Call -->|Open device / IOCTL| DeviceAPICall["CreateFile(\\.\Device), DeviceIoControl -> Kernel" ]
+    DeviceAPICall --> DriverReady
+
+    %% Notes and error handling
+    VerifyExe -->|fail| RejectExe["Load rejected (NTE_BAD_SIGNATURE / ERROR) "]
+    VerifyDll -->|fail| RejectDll["DLL load rejected"]
+    VerifyDrv -->|fail| RejectDrv["Driver not loaded / requires trust"]
+
+    style EXE_Load fill:#f9f,stroke:#333,stroke-width:1px
+    style DLL_Load fill:#9ff,stroke:#333,stroke-width:1px
+    style Driver_Load fill:#ff9,stroke:#333,stroke-width:1px

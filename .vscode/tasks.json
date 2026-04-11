@@ -1,0 +1,184 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "build-user-sdk",
+			"type": "shell",
+			"command": "make",
+			"args": [
+				"-j2"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "build-virt-gui-object",
+			"type": "shell",
+			"command": "make",
+			"args": [
+				"BOARD=virt",
+				"output/boards/virt/objs/platform/board/virt/gui_c.o"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "build-virt-gui-object",
+			"type": "shell",
+			"command": "make",
+			"args": [
+				"BOARD=virt",
+				"output/boards/virt/objs/platform/board/virt/gui_c.o"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "build-virt-gui-object-fastpath",
+			"type": "shell",
+			"command": "make",
+			"args": [
+				"BOARD=virt",
+				"output/boards/virt/objs/platform/board/virt/gui_c.o"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "build-virt-gui-object-fastpath",
+			"type": "shell",
+			"command": "make",
+			"args": [
+				"BOARD=virt",
+				"output/boards/virt/objs/platform/board/virt/gui_c.o"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "build-virt-full",
+			"type": "shell",
+			"command": "make",
+			"args": [
+				"BOARD=virt",
+				"-j2"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "build-virt-full",
+			"type": "shell",
+			"command": "make",
+			"args": [
+				"BOARD=virt",
+				"-j2"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "build-virt-full",
+			"type": "shell",
+			"command": "make",
+			"args": [
+				"BOARD=virt",
+				"-j2"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "build-virt-full",
+			"type": "shell",
+			"command": "make",
+			"args": [
+				"BOARD=virt",
+				"-j2"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "build-virt-full",
+			"type": "shell",
+			"command": "make",
+			"args": [
+				"BOARD=virt",
+				"-j2"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "build-virt-full",
+			"type": "shell",
+			"command": "make",
+			"args": [
+				"BOARD=virt",
+				"-j2"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "build-widgetdemo-tahoma",
+			"type": "shell",
+			"command": "make",
+			"args": [
+				"BOARD=virt",
+				"output/my-loader/widgetdemo.exe",
+				"output/my-loader/gdi.dll"
+			],
+			"isBackground": false,
+			"group": "build"
+		},
+		{
+			"label": "build-widgetdemo-tahoma-correct",
+			"type": "shell",
+			"command": "make",
+			"args": [
+				"BOARD=virt",
+				"output/boards/virt/userspace/widgetdemo.exe",
+				"output/boards/virt/userspace/gdi.dll"
+			],
+			"isBackground": false,
+			"group": "build"
+		},
+		{
+			"label": "stage-virt-widgetdemo-tahoma",
+			"type": "shell",
+			"command": "make",
+			"args": [
+				"BOARD=virt",
+				"applications-vfs"
+			],
+			"isBackground": false,
+			"group": "build"
+		},
+		{
+			"label": "probe-widgetdemo-tahoma-headless",
+			"type": "shell",
+			"command": "zsh",
+			"args": [
+				"-lc",
+				"printf '\\nstart widgetdemo\\n' | make BOARD=virt run-virt-headless > /tmp/widgetdemo_tahoma.log 2>&1 || true"
+			],
+			"isBackground": false,
+			"group": "test"
+		},
+		{
+			"label": "probe-widgetdemo-tahoma-headless-safe",
+			"type": "shell",
+			"command": "sh",
+			"args": [
+				"-lc",
+				"printf \"%s\\n\" \"\" \"start widgetdemo\" | make BOARD=virt run-virt-headless > /tmp/widgetdemo_tahoma.log 2>&1 || true"
+			],
+			"isBackground": false,
+			"group": "test"
+		},
+		{
+			"label": "build-widgetdemo-tahoma-retest",
+			"type": "shell",
+			"command": "make",
+			"args": [
+				"BOARD=virt",
+				"output/boards/virt/userspace/widgetdemo.exe",
+				"output/boards/virt/userspace/gdi.dll",
+				"applications-vfs"
+			],
+			"isBackground": false,
+			"group": "build"
+		}
+	]
+}

@@ -1,0 +1,13 @@
+stateDiagram-v2
+    [*] --> Created
+    Created --> Suspended: THRDCreate
+    Suspended --> Runnable: THRDResume or MakeRun
+    Runnable --> Running: selected by scheduler
+    Running --> Runnable: quantum expires or thread yields
+    Running --> Blocked: wait on object
+    Running --> Sleeping: NKSleep or timed wait
+    Blocked --> Runnable: object signaled or timeout path completes
+    Sleeping --> Runnable: wakeup time reached
+    Running --> Dying: NKExitThread or KillOneThread
+    Dying --> Dead: final cleanup and removal
+    Dead --> [*]

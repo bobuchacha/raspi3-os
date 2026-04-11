@@ -1,0 +1,20 @@
+flowchart TD
+    Req["Load request (.exe/.dll/.sys)"] --> Read["`ldr_read_file`\nRead full artifact"]
+    Read --> Parse["`ldr_parse_image`\nParse header/tables"]
+    Parse --> VM["`ldr_vm_map_image`\nReserve+Commit VM"]
+    VM --> Sec["`ldr_sections_load`\nCopy sections + zero BSS + protect"]
+    Sec --> Imp["`ldr_imports_bind`\nResolve IAT from loaded module exports"]
+    Imp --> Rel["`ldr_reloc_apply`\nPatch ABS64 relocations"]
+    Rel --> Reg["`ldr_module_register`\nTrack module graph"]
+    Reg --> Init["`ldr_call_init(base)`"]
+    Init --> Kind{"Image kind?"}
+    Kind -->|EXE| Proc["`ldr_process_prepare_exe`\nSet entry + stack"]
+    Kind -->|DLL| Done["Loaded"]
+    Kind -->|SYS| Drv["`ldr_driver_finalize_load`"]
+    Proc --> Done
+    Drv --> Done
+
+    Done --> Unload["`ldr_unload_module`"]
+    Unload --> Deinit["`ldr_call_deinit(base)`"]
+    Deinit --> Unreg["`ldr_module_unregister`"]
+    Unreg --> Release["`vm_release` + free metadata"]

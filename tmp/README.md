@@ -1,0 +1,1 @@
+This folder contains temporary files for diagnostic, build, runtime, log and agent temp file

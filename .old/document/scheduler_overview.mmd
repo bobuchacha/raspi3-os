@@ -1,0 +1,27 @@
+flowchart TD
+    A["Event source<br/>timer tick, interrupt, unblock, yield"] --> B["Scheduler housekeeping<br/>consume pending events<br/>wake expired sleepers<br/>finish deferred unblocks"]
+    B --> C{"Reschedule needed"}
+    C -->|No| D["Keep current thread"]
+    C -->|Yes| E["Select best runnable thread"]
+
+    M["Ready queues<br/>one queue per priority"] --> E
+    N["Sleep queue<br/>ordered by wake time"] --> B
+    O["Wait queues<br/>event, mutex, semaphore, critical section"] --> B
+    P["Per-thread accounting<br/>quantum left, kernel time, user time"] --> B
+
+    E --> F{"Higher-priority thread ready"}
+    F -->|Yes| G["Preempt current thread<br/>re-enqueue if still runnable"]
+    F -->|No| H{"Same priority and quantum expired"}
+    H -->|Yes| I["Rotate current thread to tail"]
+    H -->|No| D
+
+    G --> J["Context switch<br/>save state, change current thread,<br/>restore state"]
+    I --> J
+    D --> K["Update next reschedule deadline"]
+    J --> K
+
+    style A fill:#eef7ff,stroke:#356a95
+    style B fill:#fff5e8,stroke:#a86800
+    style E fill:#eefbe9,stroke:#2f7d32
+    style J fill:#f8efff,stroke:#6c3aa8
+    style K fill:#f3f3f3,stroke:#6a6a6a

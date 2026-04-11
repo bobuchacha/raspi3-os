@@ -2,8 +2,8 @@
 """
 ldr_build.py
 
-Build helper that compiles AArch64 sources and packs loader artifacts
-into custom `.exe`, `.dll`, and `.sys` files for the MVP loader.
+Build helper that compiles AArch64 sources and packs loader artifacts into a
+Windows-like custom `.exe`, `.dll`, and `.sys` image format.
 """
 
 from __future__ import annotations
@@ -20,8 +20,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Dict, Any, Tuple
 
-MAGIC = 0x3044524C  # "LRD0"
-VERSION = 1
+MAGIC = 0x304C4C44  # "DLL0"
+VERSION_MAJOR = 1
+VERSION_MINOR = 0
+DLL_MACHINE_AARCH64 = 0xAA64
+DLL_SECTION_ALIGNMENT = 0x1000
+DLL_FILE_ALIGNMENT = 0x200
+DLL_DEFAULT_EXE_BASE = 0x00200000
+DLL_DEFAULT_DLL_BASE = 0x00600000
+DLL_DEFAULT_SYS_BASE = 0x01600000
 
 ELF_MAGIC = b"\x7fELF"
 ELF_CLASS_64 = 2
@@ -45,9 +52,9 @@ R_AARCH64_JUMP_SLOT = 1026
 R_AARCH64_RELATIVE = 1027
 PT_LOAD = 1
 
-ROSKRNL_MAGIC = b"ROSKRNL\x00"
-ROSKRNL_VERSION = 1
-ROSKRNL_HEADER_FORMAT = struct.Struct("<8sIIIIQQQQQQQ")
+KERNEL_IMAGE_MAGIC = b"KERNEL\x00\x00"
+KERNEL_IMAGE_VERSION = 1
+KERNEL_IMAGE_HEADER_FORMAT = struct.Struct("<8sIIIIQQQQQQQ")
 
 ELF_HEADER_FORMAT = struct.Struct("<16sHHIQQQIHHHHHH")
 PROGRAM_HEADER_FORMAT = struct.Struct("<IIQQQQQQ")
@@ -55,14 +62,15 @@ SECTION_HEADER_FORMAT = struct.Struct("<IIQQQQIIQQ")
 SYMBOL_FORMAT = struct.Struct("<IBBHQQ")
 RELA_FORMAT = struct.Struct("<QQq")
 
-LDR_META_VERSION = 1
+LDR_META_VERSION = 2
 LDR_META_KIND_IMPORT = 1
 LDR_META_KIND_EXPORT = 2
 LDR_META_NAME_MAX = 64
 LDR_META_IMPORT_SECTION = ".ldrmeta.imports"
 LDR_META_EXPORT_SECTION = ".ldrmeta.exports"
 LDR_IMPORT_META_FORMAT = struct.Struct(f"<HH{LDR_META_NAME_MAX}s{LDR_META_NAME_MAX}s{LDR_META_NAME_MAX}s")
-LDR_EXPORT_META_FORMAT = struct.Struct(f"<HH{LDR_META_NAME_MAX}s")
+LDR_EXPORT_META_V1_FORMAT = struct.Struct(f"<HH{LDR_META_NAME_MAX}s")
+LDR_EXPORT_META_FORMAT = struct.Struct(f"<HH{LDR_META_NAME_MAX}s{LDR_META_NAME_MAX}s")
 
 KERNEL_MODULE_METADATA_SECTION = ".ros.module.meta"
 KERNEL_MODULE_METADATA_MAGIC = b"ROSKMETA"
@@ -80,6 +88,15 @@ KIND_MAP = {
     "dll": 2,
     "sys": 3,
 }
+
+DLL_HEADER_FORMAT = struct.Struct("<IHHHHIQQQQQQIIIIIIIIIIIIII")
+DLL_SECTION_FORMAT = struct.Struct("<8sQQQQII")
+DLL_IMPORT_MODULE_FORMAT = struct.Struct("<IIII")
+DLL_IMPORT_SYMBOL_FORMAT = struct.Struct("<IIII")
+DLL_EXPORT_FORMAT = struct.Struct("<IIQ")
+DLL_RELOCATION_FORMAT = struct.Struct("<IIQ")
+DLL_RELOC_ABS64 = 1
+DLL_RELOC_ABS32 = 2
 
 
 @dataclass
@@ -279,6 +296,23 @@ def run(cmd: List[str], cwd: Path | None = None) -> None:
         raise RuntimeError(f"command failed with exit={proc.returncode}: {' '.join(cmd)}")
 
 
+def write_bytes_atomic(path: Path, data: bytes) -> None:
+    """
+    Atomically replace one output file.
+
+    This keeps interrupted pack/link runs from leaving truncated artifacts that
+    later look up to date to `make` but are no longer loadable.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.tmp")
+    try:
+        temp_path.write_bytes(data)
+        temp_path.replace(path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
+
+
 def build_config_from_args(args: argparse.Namespace) -> BuildConfig:
     """
     Build config from direct CLI flags.
@@ -388,6 +422,97 @@ def resolve_compiler() -> List[str]:
     raise RuntimeError("no AArch64 compiler found: expected aarch64-none-elf-gcc or clang")
 
 
+def resolve_cxx_compiler() -> List[str]:
+    """
+    Resolve compiler command for AArch64 freestanding C++ objects.
+
+    Args:
+        None.
+
+    Returns:
+        Command prefix list for subprocess execution.
+    """
+    gxx = find_armgnu_prefixed("g++")
+    if gxx:
+        return [gxx]
+
+    gcc = find_armgnu_prefixed("gcc")
+    if gcc:
+        return [gcc]
+
+    clangxx = first_tool("clang++")
+    if clangxx:
+        return [clangxx, "--target=aarch64-none-elf"]
+
+    clang = first_tool("clang")
+    if clang:
+        return [clang, "--target=aarch64-none-elf"]
+
+    raise RuntimeError("no AArch64 C++ compiler found: expected aarch64-none-elf-g++ or clang++")
+
+
+def is_cxx_source(path: Path) -> bool:
+    """
+    Check whether one source path should be compiled as C++.
+
+    Args:
+        path: Source file path.
+
+    Returns:
+        True when the file suffix is a known C++ extension.
+    """
+    return path.suffix.lower() in (".cpp", ".cc", ".cxx")
+
+
+def is_runtime_support_source(source_path: Path, project_root: Path) -> bool:
+    """
+    Check whether one source belongs to the injected userspace runtime layer.
+
+    Runtime support objects are linked into apps/DLLs/SYS modules for libc-like
+    helpers, but they are not part of the module's public ABI and must not be
+    auto-exported.
+    """
+    try:
+        relative_path = source_path.resolve().relative_to(project_root.resolve())
+    except ValueError:
+        return False
+
+    return relative_path.parts[:2] == ("applications", "runtime")
+
+
+def object_path_for_source(project_root: Path, build_dir: Path, source_path: Path) -> Path:
+    """
+    Derive one stable unique object path for a source file.
+
+    The builder injects support sources like `applications/runtime/ros_support.c`
+    into many targets. Using only `stem + .o` makes source-to-object mapping
+    ambiguous and risks collisions when different directories reuse `main.c`.
+    """
+    try:
+        relative_path = source_path.resolve().relative_to(project_root.resolve())
+        stem = "__".join(relative_path.with_suffix("").parts)
+    except ValueError:
+        stem = source_path.stem
+
+    return build_dir / f"{stem}.o"
+
+
+def module_object_paths(cfg: BuildConfig, project_root: Path, build_dir: Path) -> List[Path]:
+    """
+    Return object files that belong to the module itself, excluding injected
+    runtime support sources.
+    """
+    objects: List[Path] = []
+
+    for src in cfg.sources:
+        source_path = (project_root / src).resolve()
+        if is_runtime_support_source(source_path, project_root):
+            continue
+        objects.append(object_path_for_source(project_root, build_dir, source_path))
+
+    return objects
+
+
 def resolve_linker() -> List[str] | None:
     """
     Resolve standalone linker command for AArch64 ELF images.
@@ -419,19 +544,27 @@ def compile_sources(cfg: BuildConfig, project_root: Path, build_dir: Path) -> Li
     objects: List[Path] = []
 
     # Build common compiler arguments once and reuse for every source.
-    common: List[str] = resolve_compiler() + ["-c", "-ffreestanding", "-fno-builtin", "-fno-stack-protector"]
-    common.extend(cfg.cflags)
+    common_flags: List[str] = ["-c", "-ffreestanding", "-fno-builtin", "-fno-stack-protector"]
+    common_flags.extend(cfg.cflags)
     for inc in cfg.include_dirs:
-        common.extend(["-I", str((project_root / inc).resolve())])
+        common_flags.extend(["-I", str((project_root / inc).resolve())])
     for define in cfg.defines:
-        common.append(f"-D{define}")
+        common_flags.append(f"-D{define}")
 
     for src in cfg.sources:
         src_path = (project_root / src).resolve()
-        obj_path = build_dir / (src_path.stem + ".o")
+        obj_path = object_path_for_source(project_root, build_dir, src_path)
+        compiler = resolve_cxx_compiler() if is_cxx_source(src_path) else resolve_compiler()
+        source_flags = list(common_flags)
+
+        if cfg.kind == "dll":
+            source_flags.append("-fPIC")
+
+        if is_cxx_source(src_path):
+            source_flags.extend(["-fno-exceptions", "-fno-rtti", "-fno-threadsafe-statics", "-fno-use-cxa-atexit"])
 
         # Compile each source independently so diagnostics map to a single file.
-        cmd = common + [str(src_path), "-o", str(obj_path)]
+        cmd = compiler + source_flags + [str(src_path), "-o", str(obj_path)]
         run(cmd)
         objects.append(obj_path)
 
@@ -451,24 +584,35 @@ def link_elf(cfg: BuildConfig, objects: List[Path], build_dir: Path) -> Path:
         Path to linked ELF image.
     """
     elf_path = build_dir / f"{cfg.name}.elf"
+    temp_elf_path = build_dir / f".{cfg.name}.elf.tmp"
 
     linker = resolve_linker()
     if linker:
         # Link with explicit entry symbol so runtime starts at expected function.
         cmd = linker + ["-nostdlib", "-e", cfg.entry_symbol]
+        if cfg.kind == "dll":
+            # Prefer the GNU linker when it is present so DLL builds work even on
+            # toolchains that do not ship an lld-compatible compiler driver.
+            cmd.append("-shared")
         for export_spec in cfg.exports:
             export_symbol = str(export_spec.get("symbol", "")).strip()
             if export_symbol:
                 cmd.extend(["--undefined", export_symbol])
         cmd.extend(cfg.ldflags)
         cmd.extend(str(o) for o in objects)
-        cmd.extend(["-o", str(elf_path)])
+        cmd.extend(["-o", str(temp_elf_path)])
         run(cmd)
+        temp_elf_path.replace(elf_path)
         return elf_path
 
     # Fallback: use compiler driver + lld when GNU ld is unavailable.
-    driver = resolve_compiler()
-    cmd = driver + ["-nostdlib", "-fuse-ld=lld", f"-Wl,-e,{cfg.entry_symbol}"]
+    driver = resolve_cxx_compiler() if any(Path(source).suffix.lower() in (".cpp", ".cc", ".cxx") for source in cfg.sources) else resolve_compiler()
+    cmd = driver + ["-nostdlib", "-fuse-ld=lld"]
+    if cfg.kind == "dll":
+        cmd.append("-shared")
+        cmd.append(f"-Wl,-e,{cfg.entry_symbol}")
+    else:
+        cmd.append(f"-Wl,-e,{cfg.entry_symbol}")
     for export_spec in cfg.exports:
         export_symbol = str(export_spec.get("symbol", "")).strip()
         if export_symbol:
@@ -476,8 +620,9 @@ def link_elf(cfg: BuildConfig, objects: List[Path], build_dir: Path) -> Path:
     for flag in cfg.ldflags:
         cmd.append(f"-Wl,{flag}")
     cmd.extend(str(o) for o in objects)
-    cmd.extend(["-o", str(elf_path)])
+    cmd.extend(["-o", str(temp_elf_path)])
     run(cmd)
+    temp_elf_path.replace(elf_path)
     return elf_path
 
 
@@ -495,6 +640,22 @@ def align_up(value: int, align: int) -> int:
     if align <= 1:
         return value
     return (value + align - 1) & ~(align - 1)
+
+
+def align_down(value: int, align: int) -> int:
+    """
+    Align integer downward to the specified power-of-two boundary.
+
+    Args:
+        value: Current offset or address.
+        align: Alignment requirement.
+
+    Returns:
+        Aligned value.
+    """
+    if align <= 1:
+        return value
+    return value & ~(align - 1)
 
 
 def read_c_string(blob: bytes, off: int) -> str:
@@ -576,6 +737,23 @@ def load_elf_symbols(elf_path: Path) -> List[RawSymbolInfo]:
             )
 
     return symbols
+
+
+def find_elf_symbol_value(elf_path: Path, symbol_name: str) -> int | None:
+    """
+    Return the value of one named ELF symbol when present.
+
+    Args:
+        elf_path: ELF file to inspect.
+        symbol_name: Exact symbol to find.
+
+    Returns:
+        Symbol value, or None when the symbol is absent.
+    """
+    for symbol in load_elf_symbols(elf_path):
+        if symbol.name == symbol_name:
+            return symbol.value
+    return None
 
 
 def synthesize_exports_from_elf(elf_path: Path) -> List[Dict[str, str]]:
@@ -795,7 +973,7 @@ def extract_kernel_module_metadata_from_elf(elf_path: Path) -> Dict[str, Any] | 
 
 def synthesize_sys_exports_from_metadata(elf_path: Path, metadata: Dict[str, Any]) -> List[Dict[str, str]]:
     """
-    Convert embedded kernel-module metadata into LRD0 exports.
+    Convert embedded kernel-module metadata into DLL0 exports.
 
     Args:
         elf_path: ELF file used only for diagnostics.
@@ -830,7 +1008,7 @@ def extract_relocations_from_elf(
     relocatable: bool,
 ) -> Tuple[List[RelocationInfo], List[Dict[str, Any]]]:
     """
-    Extract supported AArch64 RELA records and translate them into LRD0 reloc entries.
+    Extract supported AArch64 RELA records and translate them into DLL0 reloc entries.
 
     Args:
         elf_path: ELF executable, shared object, or relocatable object.
@@ -873,7 +1051,7 @@ def extract_relocations_from_elf(
 
     def resolve_symbol_rva(symbol_value: int, section_index: int) -> int:
         if section_index == SHN_ABS:
-            raise RuntimeError("absolute-symbol relocations are not supported in LRD0 images")
+            raise RuntimeError("absolute-symbol relocations are not supported in DLL0 images")
         if relocatable:
             if section_index not in section_rva_by_index:
                 raise RuntimeError(f"relocation references unmapped section index {section_index}")
@@ -1017,24 +1195,44 @@ def extract_inline_metadata_from_elf(elf_path: Path) -> Tuple[List[Dict[str, str
 
     export_blob = raw_sections.get(LDR_META_EXPORT_SECTION, b"")
     if export_blob:
-        if len(export_blob) % LDR_EXPORT_META_FORMAT.size != 0:
+        source = f"{elf_path.name} inline export"
+        if len(export_blob) % LDR_EXPORT_META_FORMAT.size == 0:
+            for index in range(len(export_blob) // LDR_EXPORT_META_FORMAT.size):
+                offset = index * LDR_EXPORT_META_FORMAT.size
+                version, kind, export_name_raw, symbol_raw = LDR_EXPORT_META_FORMAT.unpack_from(export_blob, offset)
+                if version != LDR_META_VERSION or kind != LDR_META_KIND_EXPORT:
+                    raise RuntimeError(f"{source}[{index}] has unsupported version or kind")
+
+                spec = {
+                    "name": read_meta_string(export_name_raw, "name", f"{source}[{index}]"),
+                    "symbol": read_meta_string(symbol_raw, "symbol", f"{source}[{index}]"),
+                }
+                export_name, export_symbol = normalize_export_spec(index, spec, source=source)
+                if export_symbol not in symbols:
+                    raise RuntimeError(f"{source}[{index}] unresolved export symbol: {export_symbol}")
+                exports.append({
+                    "name": export_name,
+                    "symbol": export_symbol,
+                })
+        elif len(export_blob) % LDR_EXPORT_META_V1_FORMAT.size == 0:
+            for index in range(len(export_blob) // LDR_EXPORT_META_V1_FORMAT.size):
+                offset = index * LDR_EXPORT_META_V1_FORMAT.size
+                version, kind, symbol_raw = LDR_EXPORT_META_V1_FORMAT.unpack_from(export_blob, offset)
+                if version not in (1, LDR_META_VERSION) or kind != LDR_META_KIND_EXPORT:
+                    raise RuntimeError(f"{source}[{index}] has unsupported legacy version or kind")
+
+                spec = {
+                    "symbol": read_meta_string(symbol_raw, "symbol", f"{source}[{index}]"),
+                }
+                export_name, export_symbol = normalize_export_spec(index, spec, source=source)
+                if export_symbol not in symbols:
+                    raise RuntimeError(f"{source}[{index}] unresolved export symbol: {export_symbol}")
+                exports.append({
+                    "name": export_name,
+                    "symbol": export_symbol,
+                })
+        else:
             raise RuntimeError(f"{elf_path.name}: inline export section has invalid size")
-        for index in range(len(export_blob) // LDR_EXPORT_META_FORMAT.size):
-            offset = index * LDR_EXPORT_META_FORMAT.size
-            version, kind, symbol_raw = LDR_EXPORT_META_FORMAT.unpack_from(export_blob, offset)
-            source = f"{elf_path.name} inline export"
-            if version != LDR_META_VERSION or kind != LDR_META_KIND_EXPORT:
-                raise RuntimeError(f"{source}[{index}] has unsupported version or kind")
-            spec = {
-                "symbol": read_meta_string(symbol_raw, "symbol", f"{source}[{index}]"),
-            }
-            export_name, export_symbol = normalize_export_spec(index, spec, source=source)
-            if export_symbol not in symbols:
-                raise RuntimeError(f"{source}[{index}] unresolved export symbol: {export_symbol}")
-            exports.append({
-                "name": export_name,
-                "symbol": export_symbol,
-            })
 
     return imports, exports
 
@@ -1089,7 +1287,7 @@ def pack_image(
     entry_symbol: str,
 ) -> None:
     """
-    Pack custom loader image from ELF metadata + raw ELF-backed section bytes.
+    Pack one Windows-like DLL0 image from ELF metadata and section payloads.
 
     Args:
         cfg: Build recipe.
@@ -1104,23 +1302,44 @@ def pack_image(
     elf_data = elf_path.read_bytes()
     _parsed_sections, parsed_entry, symbols, relocatable, _raw_sections = parse_elf_metadata(elf_path)
 
-    # Keep only allocatable sections and deterministic order by RVA.
-    alloc_sections = [s for s in sections if s.rva != 0 and s.virt_size != 0]
+    alloc_sections = [s for s in sections if s.virt_size != 0]
 
-    # In relocatable objects, section VMAs are zero. Synthesize stable RVAs.
     if not alloc_sections and relocatable:
         alloc_sections = [s for s in _parsed_sections if s.virt_size != 0]
 
     if relocatable:
-        page_size = 0x1000
-        next_rva = page_size
+        next_rva = 0
         for sec in sorted(alloc_sections, key=lambda s: (s.file_off, s.section_index)):
-            sec_align = max(sec.align, page_size)
+            sec_align = max(sec.align, DLL_SECTION_ALIGNMENT)
             next_rva = align_up(next_rva, sec_align)
             sec.rva = next_rva
-            next_rva += align_up(sec.virt_size, page_size)
+            next_rva += align_up(sec.virt_size, DLL_SECTION_ALIGNMENT)
+
+    if not alloc_sections:
+        raise RuntimeError(f"no allocatable sections found in ELF: {elf_path}")
 
     alloc_sections.sort(key=lambda s: s.rva)
+
+    min_rva = min((s.rva for s in alloc_sections), default=0)
+    # Keep the packed image page-relative layout aligned with the ELF view so
+    # AArch64 ADRP/ADD pairs continue to resolve nearby symbols after packing.
+    # Using the exact first-section RVA can introduce a sub-page shift for DLLs
+    # that start with `.hash`/`.dynsym` metadata, which corrupts intra-image
+    # references even though every section payload is copied correctly.
+    rva_bias = align_down(min_rva, DLL_SECTION_ALIGNMENT)
+    image_span = max((s.rva + s.virt_size for s in alloc_sections), default=0) - rva_bias
+    packed_sections: List[Dict[str, Any]] = []
+    section_by_index: Dict[int, SectionInfo] = {}
+
+    for sec in alloc_sections:
+        packed_sections.append(
+            {
+                "info": sec,
+                "packed_rva": sec.rva - rva_bias,
+                "payload": bytearray(elf_data[sec.file_off : sec.file_off + sec.file_size] if sec.file_size else b""),
+            }
+        )
+        section_by_index[sec.section_index] = sec
 
     string_pool = bytearray()
     name_offsets: Dict[str, int] = {}
@@ -1133,43 +1352,9 @@ def pack_image(
         name_offsets[value] = off
         return off
 
-    # Build header and metadata tables first, then append section payloads.
-    section_table = bytearray()
-    payload = bytearray()
-    payload_cursor = 0
+    section_rva_by_index: Dict[int, int] = {section.section_index: (section.rva - rva_bias) for section in alloc_sections}
 
-    # Rebase the packed image so the lowest loadable section starts at RVA 0.
-    # This preserves all intra-module relative distances while avoiding oversized
-    # user images caused by default ELF link bases such as 0x400000.
-    min_rva = min((s.rva for s in alloc_sections), default=0)
-    rva_bias = min_rva
-    max_end = max((s.rva + s.virt_size for s in alloc_sections), default=0)
-    image_size = max_end - rva_bias
     entry_rva = 0
-    if parsed_entry >= rva_bias and parsed_entry < max_end and parsed_entry != 0:
-        entry_rva = parsed_entry - rva_bias
-
-    for s in alloc_sections:
-        name_off = add_str(s.name)
-        sec_data = elf_data[s.file_off : s.file_off + s.file_size] if s.file_size else b""
-
-        file_off_in_payload = payload_cursor
-        payload.extend(sec_data)
-        payload_cursor += len(sec_data)
-
-        # Descriptor fields align with ldr_section_desc_t packing.
-        section_table.extend(struct.pack(
-            "<IIQQQQ",
-            name_off,
-            s.flags,
-            s.rva - rva_bias,
-            file_off_in_payload,  # rebased to payload start; loader re-adds payload base
-            s.file_size,
-            s.virt_size,
-        ))
-
-    section_rva_by_index: Dict[int, int] = {s.section_index: (s.rva - rva_bias) for s in alloc_sections}
-    section_by_index: Dict[int, SectionInfo] = {s.section_index: s for s in alloc_sections}
 
     def resolve_symbol_rva(symbol_name: str) -> int:
         sym = symbols.get(symbol_name)
@@ -1179,7 +1364,7 @@ def pack_image(
             if sym.section_index not in section_rva_by_index:
                 raise RuntimeError(f"symbol section not mapped in image: {symbol_name}")
             return section_rva_by_index[sym.section_index] + sym.value
-        if sym.value >= rva_bias and sym.value < max_end:
+        if sym.value >= rva_bias and sym.value < (rva_bias + image_span):
             return sym.value - rva_bias
         if sym.section_index in section_by_index:
             section = section_by_index[sym.section_index]
@@ -1187,131 +1372,317 @@ def pack_image(
                 return (section.rva - rva_bias) + (sym.value - section.rva)
         raise RuntimeError(f"cannot resolve RVA for symbol: {symbol_name}")
 
-    if (entry_rva == 0 or entry_rva >= image_size) and entry_symbol in symbols:
+    if entry_symbol in symbols:
         entry_rva = resolve_symbol_rva(entry_symbol)
+    elif parsed_entry >= rva_bias and parsed_entry < (rva_bias + image_span) and parsed_entry != 0:
+        entry_rva = parsed_entry - rva_bias
 
-    import_entries: List[Tuple[int, int, int]] = []
+    if entry_rva >= image_span:
+        raise RuntimeError(f"entry symbol resolves outside packed image span: {entry_symbol}")
+
+    import_entries: List[Dict[str, Any]] = []
     for i, raw_import in enumerate(cfg.imports):
         module_name, symbol_name, slot_symbol = normalize_import_spec(i, raw_import)
         module_off = add_str(module_name)
         symbol_off = add_str(symbol_name)
         iat_rva = resolve_symbol_rva(slot_symbol)
-        if iat_rva + 8 > image_size:
+        if iat_rva + 8 > image_span:
             raise RuntimeError(f"import slot outside image for symbol: {slot_symbol}")
-        import_entries.append((module_off, symbol_off, iat_rva))
+        import_entries.append(
+            {
+                "module": module_name,
+                "symbol": symbol_name,
+                "module_off": module_off,
+                "symbol_off": symbol_off,
+                "iat_rva": iat_rva,
+            }
+        )
 
-    export_entries: List[Tuple[int, int]] = []
+    export_entries: List[Dict[str, Any]] = []
     for i, raw_export in enumerate(cfg.exports):
         export_name, export_symbol = normalize_export_spec(i, raw_export)
         symbol_off = add_str(export_name)
         symbol_rva = resolve_symbol_rva(export_symbol)
-        if symbol_rva >= image_size:
+        if symbol_rva >= image_span:
             raise RuntimeError(f"export symbol outside image for symbol: {export_symbol}")
-        export_entries.append((symbol_off, symbol_rva))
+        export_entries.append(
+            {
+                "name": export_name,
+                "symbol_off": symbol_off,
+                "symbol_rva": symbol_rva,
+            }
+        )
 
     reloc_entries, synthesized_imports = extract_relocations_from_elf(
         elf_path,
         alloc_sections,
         section_rva_by_index,
         rva_bias,
-        image_size,
+        image_span,
         relocatable,
     )
     for synthesized_import in synthesized_imports:
         module_off = add_str(str(synthesized_import["module"]))
         symbol_off = add_str(str(synthesized_import["symbol"]))
         iat_rva = int(synthesized_import["iat_rva"])
-        if iat_rva + 8 > image_size:
+        if iat_rva + 8 > image_span:
             raise RuntimeError(f"import slot outside image for symbol: {synthesized_import['symbol']}")
-        import_entries.append((module_off, symbol_off, iat_rva))
+        import_entries.append(
+            {
+                "module": str(synthesized_import["module"]),
+                "symbol": str(synthesized_import["symbol"]),
+                "module_off": module_off,
+                "symbol_off": symbol_off,
+                "iat_rva": iat_rva,
+            }
+        )
 
-    reloc_table = bytearray()
+    grouped_imports: List[Dict[str, Any]] = []
+    grouped_import_lookup: Dict[int, int] = {}
+    import_symbols: List[Dict[str, Any]] = []
+    for import_entry in import_entries:
+        module_key = int(import_entry["module_off"])
+        if module_key not in grouped_import_lookup:
+            grouped_import_lookup[module_key] = len(grouped_imports)
+            grouped_imports.append(
+                {
+                    "module": import_entry["module"],
+                    "module_off": module_key,
+                    "first_symbol_index": len(import_symbols),
+                    "symbol_count": 0,
+                }
+            )
+        import_symbols.append(
+            {
+                "symbol": import_entry["symbol"],
+                "symbol_off": int(import_entry["symbol_off"]),
+                "iat_rva": int(import_entry["iat_rva"]),
+            }
+        )
+        grouped_imports[grouped_import_lookup[module_key]]["symbol_count"] += 1
+
+    preferred_base = DLL_DEFAULT_EXE_BASE
+    if cfg.kind == "dll":
+        preferred_base = DLL_DEFAULT_DLL_BASE
+    elif cfg.kind == "sys":
+        preferred_base = DLL_DEFAULT_SYS_BASE
+
+    abs_reloc_count = 0
     for reloc in reloc_entries:
-        reloc_table.extend(struct.pack("<QIIq", reloc.patch_rva, reloc.type, 0, reloc.addend))
+        if reloc.type == 1:
+            abs_reloc_count += 1
+        elif reloc.type != 2:
+            raise RuntimeError(f"unsupported packed relocation type: {reloc.type}")
 
-    import_table = bytearray()
-    for module_off, symbol_off, iat_rva in import_entries:
-        import_table.extend(struct.pack("<IIQ", module_off, symbol_off, iat_rva))
+    header_size_unaligned = (
+        DLL_HEADER_FORMAT.size
+        + (len(packed_sections) * DLL_SECTION_FORMAT.size)
+        + (len(grouped_imports) * DLL_IMPORT_MODULE_FORMAT.size)
+        + (len(import_symbols) * DLL_IMPORT_SYMBOL_FORMAT.size)
+        + (len(export_entries) * DLL_EXPORT_FORMAT.size)
+        + (abs_reloc_count * DLL_RELOCATION_FORMAT.size)
+        + len(string_pool)
+    )
+    header_size = align_up(header_size_unaligned, DLL_SECTION_ALIGNMENT)
+    rva_shift = header_size
+    image_size = align_up(rva_shift + image_span, DLL_SECTION_ALIGNMENT)
+    if entry_rva != 0:
+        entry_rva += rva_shift
+
+    def patch_section_u64(patch_rva: int, value: int) -> None:
+        for packed_section in packed_sections:
+            start = int(packed_section["packed_rva"])
+            payload = packed_section["payload"]
+            end = start + len(payload)
+
+            if patch_rva >= start and patch_rva + 8 <= end:
+                struct.pack_into("<Q", payload, patch_rva - start, value & 0xFFFFFFFFFFFFFFFF)
+                return
+        raise RuntimeError(f"relocation patch falls outside raw section data: 0x{patch_rva:x}")
+
+    def patch_section_i64(patch_rva: int, value: int) -> None:
+        for packed_section in packed_sections:
+            start = int(packed_section["packed_rva"])
+            payload = packed_section["payload"]
+            end = start + len(payload)
+
+            if patch_rva >= start and patch_rva + 8 <= end:
+                struct.pack_into("<q", payload, patch_rva - start, value)
+                return
+        raise RuntimeError(f"relocation patch falls outside raw section data: 0x{patch_rva:x}")
+
+    for import_symbol in import_symbols:
+        patch_section_u64(int(import_symbol["iat_rva"]), 0)
+
+    final_relocations: List[Dict[str, int]] = []
+    for reloc in reloc_entries:
+        shifted_patch_rva = rva_shift + reloc.patch_rva
+        shifted_target_rva = rva_shift + reloc.addend
+
+        if reloc.type == 1:
+            patch_section_u64(reloc.patch_rva, preferred_base + shifted_target_rva)
+            final_relocations.append({"type": DLL_RELOC_ABS64, "target_rva": shifted_patch_rva})
+            continue
+
+        patch_section_i64(reloc.patch_rva, shifted_target_rva - shifted_patch_rva)
+
+    section_table_offset = DLL_HEADER_FORMAT.size
+    import_module_table_offset = section_table_offset + (len(packed_sections) * DLL_SECTION_FORMAT.size)
+    import_symbol_table_offset = import_module_table_offset + (len(grouped_imports) * DLL_IMPORT_MODULE_FORMAT.size)
+    export_table_offset = import_symbol_table_offset + (len(import_symbols) * DLL_IMPORT_SYMBOL_FORMAT.size)
+    relocation_table_offset = export_table_offset + (len(export_entries) * DLL_EXPORT_FORMAT.size)
+    string_table_offset = relocation_table_offset + (len(final_relocations) * DLL_RELOCATION_FORMAT.size)
+
+    section_table = bytearray()
+    payload = bytearray()
+    current_file_offset = header_size
+    manifest_sections: List[Dict[str, Any]] = []
+
+    for packed_section in packed_sections:
+        section_info = packed_section["info"]
+        section_payload = packed_section["payload"]
+        section_name = section_info.name.encode("ascii", errors="ignore")[:8].ljust(8, b"\x00")
+
+        current_file_offset = align_up(current_file_offset, DLL_FILE_ALIGNMENT)
+        while header_size + len(payload) < current_file_offset:
+            payload.extend(b"\x00")
+
+        section_table.extend(
+            DLL_SECTION_FORMAT.pack(
+                section_name,
+                rva_shift + int(packed_section["packed_rva"]),
+                section_info.virt_size,
+                current_file_offset,
+                len(section_payload),
+                section_info.flags,
+                0,
+            )
+        )
+        manifest_sections.append(
+            {
+                "name": section_info.name,
+                "rva": rva_shift + int(packed_section["packed_rva"]),
+                "file_size": len(section_payload),
+                "virt_size": section_info.virt_size,
+                "flags": section_info.flags,
+            }
+        )
+        payload.extend(section_payload)
+        current_file_offset += len(section_payload)
+
+    import_module_table = bytearray()
+    for import_module in grouped_imports:
+        import_module_table.extend(
+            DLL_IMPORT_MODULE_FORMAT.pack(
+                int(import_module["module_off"]),
+                int(import_module["first_symbol_index"]),
+                int(import_module["symbol_count"]),
+                0,
+            )
+        )
+
+    import_symbol_table = bytearray()
+    for import_symbol in import_symbols:
+        import_symbol_table.extend(
+            DLL_IMPORT_SYMBOL_FORMAT.pack(
+                int(import_symbol["symbol_off"]),
+                rva_shift + int(import_symbol["iat_rva"]),
+                0,
+                0,
+            )
+        )
 
     export_table = bytearray()
-    for symbol_off, symbol_rva in export_entries:
-        export_table.extend(struct.pack("<IIQ", symbol_off, 0, symbol_rva))
+    for export_entry in export_entries:
+        export_table.extend(
+            DLL_EXPORT_FORMAT.pack(
+                int(export_entry["symbol_off"]),
+                0,
+                rva_shift + int(export_entry["symbol_rva"]),
+            )
+        )
 
-    header = struct.pack(
-        "<IHHIQQQIIIII I",
+    relocation_table = bytearray()
+    for relocation in final_relocations:
+        relocation_table.extend(
+            DLL_RELOCATION_FORMAT.pack(
+                int(relocation["type"]),
+                0,
+                int(relocation["target_rva"]),
+            )
+        )
+
+    header = DLL_HEADER_FORMAT.pack(
         MAGIC,
-        VERSION,
+        VERSION_MAJOR,
+        VERSION_MINOR,
+        DLL_MACHINE_AARCH64,
         KIND_MAP[cfg.kind],
-        0,  # image flags
-        image_size,
-        0,  # preferred base for MVP
+        0,
+        preferred_base,
         entry_rva,
-        len(alloc_sections),
-        len(reloc_entries),
-        len(import_entries),
+        image_size,
+        header_size,
+        DLL_SECTION_ALIGNMENT,
+        DLL_FILE_ALIGNMENT,
+        len(packed_sections),
+        section_table_offset,
+        import_module_table_offset,
+        len(grouped_imports),
+        import_symbol_table_offset,
+        len(import_symbols),
+        export_table_offset,
         len(export_entries),
+        relocation_table_offset,
+        len(final_relocations),
+        string_table_offset,
         len(string_pool),
-        0,  # reserved
+        0,
+        0,
     )
 
     blob = bytearray()
     blob.extend(header)
     blob.extend(section_table)
-    blob.extend(reloc_table)
-    blob.extend(import_table)
+    blob.extend(import_module_table)
+    blob.extend(import_symbol_table)
     blob.extend(export_table)
+    blob.extend(relocation_table)
     blob.extend(string_pool)
-
-    payload_base = len(blob)
-
-    # Rewrite section file offsets from payload-relative to absolute file offsets.
-    for i, s in enumerate(alloc_sections):
-        desc_off = len(header) + i * struct.calcsize("<IIQQQQ")
-        # Skip name_off(4)+flags(4)+rva(8) to patch file_off field.
-        file_off_field = desc_off + 4 + 4 + 8
-        struct.pack_into("<Q", blob, file_off_field, payload_base + sum(x.file_size for x in alloc_sections[:i]))
-
+    if len(blob) < header_size:
+        blob.extend(b"\x00" * (header_size - len(blob)))
     blob.extend(payload)
-    out_file.write_bytes(blob)
+    write_bytes_atomic(out_file, bytes(blob))
 
-    # Emit manifest for debug/repro: section RVAs and sizes.
     manifest = {
         "name": cfg.name,
         "kind": cfg.kind,
+        "image_base": preferred_base,
+        "header_size": header_size,
         "entry_rva": entry_rva,
         "image_size": image_size,
-        "sections": [
-            {
-                "name": s.name,
-                "rva": s.rva - rva_bias,
-                "file_size": s.file_size,
-                "virt_size": s.virt_size,
-                "flags": s.flags,
-            }
-            for s in alloc_sections
-        ],
+        "sections": manifest_sections,
         "imports": [
             {
-                "module": next((k for k, v in name_offsets.items() if v == module_off), ""),
-                "symbol": next((k for k, v in name_offsets.items() if v == symbol_off), ""),
-                "iat_rva": iat_rva,
+                "module": str(import_entry["module"]),
+                "symbol": str(import_entry["symbol"]),
+                "iat_rva": rva_shift + int(import_entry["iat_rva"]),
             }
-            for module_off, symbol_off, iat_rva in import_entries
+            for import_entry in import_entries
         ],
         "relocations": [
             {
-                "patch_rva": reloc.patch_rva,
-                "type": reloc.type,
-                "addend": reloc.addend,
+                "target_rva": int(relocation["target_rva"]),
+                "type": int(relocation["type"]),
             }
-            for reloc in reloc_entries
+            for relocation in final_relocations
         ],
         "exports": [
             {
-                "symbol": next((k for k, v in name_offsets.items() if v == symbol_off), ""),
-                "symbol_rva": symbol_rva,
+                "symbol": str(export_entry["name"]),
+                "symbol_rva": rva_shift + int(export_entry["symbol_rva"]),
             }
-            for symbol_off, symbol_rva in export_entries
+            for export_entry in export_entries
         ],
     }
     out_file.with_suffix(out_file.suffix + ".manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
@@ -1319,7 +1690,7 @@ def pack_image(
 
 def load_kernel_segment(data: bytes) -> Dict[str, Any]:
     """
-    Parse kernel ELF and merge all PT_LOAD segments into one ROSKRNL payload.
+    Parse kernel ELF and merge all PT_LOAD segments into one packed kernel-image payload.
     """
     if len(data) < ELF_HEADER_FORMAT.size:
         raise ValueError("ELF file is too small")
@@ -1410,14 +1781,14 @@ def load_kernel_segment(data: bytes) -> Dict[str, Any]:
     }
 
 
-def build_roskrnl_image(kernel_segment: Dict[str, Any]) -> bytes:
+def build_kernel_image(kernel_segment: Dict[str, Any]) -> bytes:
     """
-    Serialize one kernel ELF load segment into ROSKRNL transport format.
+    Serialize one kernel ELF load segment into the boot kernel-image format.
     """
-    header_size = ROSKRNL_HEADER_FORMAT.size
-    header = ROSKRNL_HEADER_FORMAT.pack(
-        ROSKRNL_MAGIC,
-        ROSKRNL_VERSION,
+    header_size = KERNEL_IMAGE_HEADER_FORMAT.size
+    header = KERNEL_IMAGE_HEADER_FORMAT.pack(
+        KERNEL_IMAGE_MAGIC,
+        KERNEL_IMAGE_VERSION,
         header_size,
         ELF_MACHINE_AARCH64,
         0,
@@ -1434,12 +1805,16 @@ def build_roskrnl_image(kernel_segment: Dict[str, Any]) -> bytes:
 
 def pack_kernel_image(input_path: Path, output_path: Path) -> None:
     """
-    Pack the linked kernel ELF into ROSKRNL format used by boot handoff.
+    Pack the linked kernel ELF into the boot kernel-image format.
     """
     kernel_segment = load_kernel_segment(input_path.read_bytes())
-    image = build_roskrnl_image(kernel_segment)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_bytes(image)
+    real_load = find_elf_symbol_value(input_path, "real_load")
+
+    if real_load is not None:
+        kernel_segment["paddr"] = real_load
+
+    image = build_kernel_image(kernel_segment)
+    write_bytes_atomic(output_path, image)
 
 
 def build_pack_only_config(args: argparse.Namespace) -> BuildConfig:
@@ -1497,8 +1872,8 @@ def main(argv: List[str]) -> int:
     parser.add_argument("--ldflag", action="append", help="Extra linker flag, repeatable")
     parser.add_argument("--entry-symbol", default="Init", help="Entry symbol name")
     parser.add_argument("--output-dir", default="build", help="Output directory for generated artifacts")
-    parser.add_argument("--pack-elf", action="store_true", help="Pack an existing ELF image into an LRD0 artifact")
-    parser.add_argument("--pack-kernel", action="store_true", help="Pack kernel ELF input into ROSKRNL output")
+    parser.add_argument("--pack-elf", action="store_true", help="Pack an existing ELF image into a DLL0 artifact")
+    parser.add_argument("--pack-kernel", action="store_true", help="Pack kernel ELF input into boot kernel-image output")
     parser.add_argument("--input", help="Input file path for kernel packing mode")
     parser.add_argument("--output", help="Output file path for kernel packing mode")
     parser.add_argument("--project-root", default=".", help="Root directory for relative source paths")
@@ -1525,15 +1900,21 @@ def main(argv: List[str]) -> int:
                 if inline_exports:
                     cfg.exports = inline_exports
                 else:
-                    cfg.exports = synthesize_exports_from_elf(elf)
-                    if cfg.exports:
-                        print(f"[meta] synthesized {len(cfg.exports)} DLL exports from ELF globals")
+                    raise RuntimeError(f"{elf.name}: DLL exports must be declared with inline export metadata")
             elif cfg.kind == "sys":
                 metadata = extract_kernel_module_metadata_from_elf(elf)
                 if metadata:
                     cfg.name = str(metadata.get("name", cfg.name)).strip() or cfg.name
                     cfg.exports = synthesize_sys_exports_from_metadata(elf, metadata)
                     print(f"[meta] synthesized {len(cfg.exports)} SYS exports from embedded module metadata")
+                else:
+                    inline_imports, inline_exports = extract_inline_metadata_from_elf(elf)
+                    if inline_imports:
+                        cfg.imports = inline_imports
+                    if inline_exports:
+                        cfg.exports = inline_exports
+                    else:
+                        raise RuntimeError(f"{elf.name}: SYS exports must be declared with metadata")
 
             pack_image(cfg, elf, sections, entry, out_file, cfg.entry_symbol)
             print(f"[ok] wrote {out_file}")
@@ -1546,11 +1927,10 @@ def main(argv: List[str]) -> int:
 
         # Compile and link AArch64 objects into one ELF.
         objs = compile_sources(cfg, project_root, build_dir)
-        apply_inline_metadata(cfg, objs)
+        module_objs = module_object_paths(cfg, project_root, build_dir)
+        apply_inline_metadata(cfg, module_objs)
         if cfg.kind == "dll" and not cfg.exports:
-            cfg.exports = synthesize_exports_from_objects(objs)
-            if cfg.exports:
-                print(f"[meta] synthesized {len(cfg.exports)} DLL exports from ELF globals")
+            raise RuntimeError(f"{cfg.name}: DLL exports must be declared with ROS_DLL_EXPORT metadata")
         if cfg.kind == "sys" and not cfg.exports:
             metadata = extract_kernel_module_metadata_from_elf(objs[0]) if len(objs) == 1 else None
             if metadata:
@@ -1558,9 +1938,7 @@ def main(argv: List[str]) -> int:
                 cfg.exports = synthesize_sys_exports_from_metadata(objs[0], metadata)
                 print(f"[meta] synthesized {len(cfg.exports)} SYS exports from embedded module metadata")
             else:
-                cfg.exports = synthesize_exports_from_objects(objs)
-                if cfg.exports:
-                    print(f"[meta] synthesized {len(cfg.exports)} SYS exports from ELF globals")
+                raise RuntimeError(f"{cfg.name}: SYS exports must be declared with metadata")
         try:
             elf = link_elf(cfg, objs, build_dir)
         except RuntimeError:

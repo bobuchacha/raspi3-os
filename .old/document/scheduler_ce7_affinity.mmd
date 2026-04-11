@@ -1,0 +1,29 @@
+flowchart LR
+    A["Thread created"] --> B{"Affinity or BC process rule"}
+    B -->|Explicit CPU affinity| C["Assign thread pRunQ to CPU affinity queue"]
+    B -->|Legacy BC process| D["Assign thread pRunQ to process ProcReadyQ"]
+    B -->|Normal global case| E["Assign thread pRunQ to global RunList"]
+
+    C --> F["CPU0 affinityQ"]
+    C --> G["CPU1 affinityQ"]
+    D --> H["Process stub thread"]
+    H --> I["ProcReadyQ holds per-process runnable threads"]
+    H --> J["Stub thread enters global RunList"]
+    E --> J
+
+    J --> K["Global dispatch chooses best runnable entity"]
+    F --> L["CPU local dispatch"]
+    G --> M["CPU local dispatch"]
+    K --> N{"Selected entity is stub thread"}
+    N -->|Yes| O["Dequeue head of ProcReadyQ\nand run real process thread"]
+    N -->|No| P["Run selected thread directly"]
+
+    O --> Q["Per-process compatibility preserved"]
+    P --> R["Per-CPU or global runnable thread runs"]
+
+    style A fill:#eef7ff,stroke:#356a95
+    style C fill:#eefbe9,stroke:#2f7d32
+    style D fill:#fff5e8,stroke:#a86800
+    style E fill:#f3f3f3,stroke:#6a6a6a
+    style H fill:#f8efff,stroke:#6c3aa8
+    style K fill:#eef7ff,stroke:#356a95

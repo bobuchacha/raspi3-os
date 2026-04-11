@@ -1,0 +1,13 @@
+ROSFONT1
+# Default UI fallback font derived from the shared 3x5 glyph set.
+# The renderer supersamples those glyphs into a softer 7x11 body face.
+family=System UI
+source=mini
+design_height=14
+glyph_width=7
+glyph_height=11
+advance=8
+line_height=14
+ascent=11
+descent=3
+sample_grid=4

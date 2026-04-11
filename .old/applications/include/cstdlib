@@ -1,0 +1,15 @@
+#ifndef ROS_CPP_CSTDLIB
+#define ROS_CPP_CSTDLIB
+
+#include "stdlib.h"
+
+namespace std {
+    using ::abort;
+    using ::calloc;
+    using ::exit;
+    using ::free;
+    using ::malloc;
+    using ::size_t;
+}
+
+#endif
