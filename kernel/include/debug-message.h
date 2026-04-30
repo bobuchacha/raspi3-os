@@ -131,6 +131,16 @@ extern "C" {
      */
     bool kernel_debug_should_emit(U32 zone_mask, const char* path);
 
+    /*
+     * Report the current kernel uptime used in debug-log prefixes.
+     *
+     * Logs emitted before the scheduler tick starts simply report zero, which
+     * keeps the prefix stable across early boot and later runtime diagnostics.
+     *
+     * @return Millisecond uptime used in log timestamps.
+     */
+    U64 kernel_debug_timestamp_msec(void);
+
 #ifdef __cplusplus
 }
 #endif
@@ -186,7 +196,7 @@ extern "C" {
 #define KDEBUG(zone, fmt, ...) \
     do { \
         if (kernel_debug_should_emit((U32)(zone), __FILE__)) { \
-            DEBUGMSG((zone), (KDBG_COLOR_DEBUG "[DBG] %s:%d: " fmt KDBG_COLOR_RESET, kernel_debug_short_file(__FILE__), __LINE__, ##__VA_ARGS__)); \
+            DEBUGMSG((zone), (KDBG_COLOR_DEBUG "[%010llums] [DBG] %s:%d: " fmt KDBG_COLOR_RESET, static_cast<unsigned long long>(kernel_debug_timestamp_msec()), kernel_debug_short_file(__FILE__), __LINE__, ##__VA_ARGS__)); \
         } \
     } while (0)
 
@@ -195,9 +205,9 @@ extern "C" {
 #endif
 
 #define KRETAIL(fmt, ...) \
-    RETAILMSG(1, (KDBG_COLOR_RETAIL "[LOG] %s:%d: " fmt KDBG_COLOR_RESET, kernel_debug_short_file(__FILE__), __LINE__, ##__VA_ARGS__))
+    RETAILMSG(1, (KDBG_COLOR_RETAIL "[%010llums] [LOG] %s:%d: " fmt KDBG_COLOR_RESET, static_cast<unsigned long long>(kernel_debug_timestamp_msec()), kernel_debug_short_file(__FILE__), __LINE__, ##__VA_ARGS__))
 
 #define KERROR(fmt, ...) \
-    ERRORMSG(1, (KDBG_COLOR_ERROR "[ERR] %s:%d: " fmt KDBG_COLOR_RESET, kernel_debug_short_file(__FILE__), __LINE__, ##__VA_ARGS__))
+    ERRORMSG(1, (KDBG_COLOR_ERROR "[%010llums] [ERR] %s:%d: " fmt KDBG_COLOR_RESET, static_cast<unsigned long long>(kernel_debug_timestamp_msec()), kernel_debug_short_file(__FILE__), __LINE__, ##__VA_ARGS__))
 
 #endif

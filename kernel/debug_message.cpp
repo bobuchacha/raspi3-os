@@ -1,5 +1,7 @@
 #include "debug-message.h"
 
+#include "kernel_time.h"
+#include "scheduler.h"
 #include "serial.h"
 
 #include <stdarg.h>
@@ -626,6 +628,20 @@ extern "C" {
         }
 
         return true;
+    }
+
+    /*
+     * Convert the live scheduler tick count into a millisecond log prefix.
+     *
+     * Using the scheduler-backed uptime keeps every debug line on one shared
+     * relative timeline without forcing each caller to add its own timestamp.
+     * During the earliest boot window the tick count is still zero, which is a
+     * safe and explicit prefix until the periodic timer starts running.
+     *
+     * @return Millisecond uptime used in debug-log prefixes.
+     */
+    U64 kernel_debug_timestamp_msec(void) {
+        return KernelTime::ticks_to_milliseconds(Scheduler::tick_count());
     }
 
 }

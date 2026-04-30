@@ -8,6 +8,32 @@ namespace board {
 
     class BlockStorage final {
     public:
+        /**
+         * Drain one pending virtio-blk completion without blocking.
+         *
+         * The current driver still presents a synchronous block-device API, but
+         * later async file I/O work needs the completion path to exist as a
+         * separate step that a board poll hook or IRQ path can call. This
+         * helper only tries the driver lock once so an IRQ or scheduler poll
+         * cannot deadlock if it interrupts a thread already preparing or
+         * waiting on a request.
+         *
+         * @return Nothing.
+         */
+        static void poll(void) {
+            VirtioBlockState* state = &State;
+
+            if ((state == NULL) || !state->ready || !state->request_in_flight) {
+                return;
+            }
+            if (!try_lock(&state->lock_word)) {
+                return;
+            }
+
+            (void)drain_request_completion_locked(state);
+            unlock(state);
+        }
+
         static DeviceDriver* driver(void) {
             return &Driver;
         }
@@ -101,9 +127,14 @@ namespace board {
 
         typedef struct VirtioBlockState {
             bool ready;
+            bool completion_ready;
+            bool request_in_flight;
             U16 last_used_idx;
             U32 slot_index;
+            Status completion_status;
+            U32 request_type;
             U64 sector_count;
+            U64 request_sector;
             volatile U32 lock_word;
         } VirtioBlockState;
 
@@ -253,11 +284,20 @@ namespace board {
             return StatusOK;
         }
 
-        static Status submit_request(VirtioBlockState* state, U32 request_type, U64 sector, void* buffer) {
-            U32 polls = PollLimit;
-
-            lock(state);
-
+        /**
+         * Populate the fixed single-request descriptor chain.
+         *
+         * The active `virt` backend still owns one shared request header,
+         * status byte, and descriptor ring. Keeping the descriptor fill logic
+         * in one helper makes the future async service reuse the exact same MMIO
+         * layout while separating submission from completion draining.
+         *
+         * @param request_type Virtio block request opcode.
+         * @param sector Device sector number.
+         * @param buffer Sector-sized transfer buffer.
+         * @return Nothing.
+         */
+        static void populate_request_descriptors(U32 request_type, U64 sector, void* buffer) {
             RequestHeader.type = request_type;
             RequestHeader.reserved = 0U;
             RequestHeader.sector = sector;
@@ -277,6 +317,31 @@ namespace board {
             DescTable.entries[2].len = sizeof(StatusByte);
             DescTable.entries[2].flags = VirtqDescFlagWrite;
             DescTable.entries[2].next = 0U;
+        }
+
+        /**
+         * Submit one request to the shared virtio-blk queue.
+         *
+         * This helper deliberately stops after queue notification. Completion is
+         * now drained by a separate helper so future async callers can submit a
+         * request, release the lock, and observe the used ring later from a poll
+         * hook or a dedicated wait path.
+         *
+         * @param state Active virtio-blk device state.
+         * @param request_type Virtio block request opcode.
+         * @param sector Device sector number.
+         * @param buffer Sector-sized transfer buffer.
+         * @return StatusOK when the queue now owns one in-flight request.
+         */
+        static Status begin_request_locked(VirtioBlockState* state, U32 request_type, U64 sector, void* buffer) {
+            if ((state == NULL) || (buffer == NULL)) {
+                return StatusInvalidArgument;
+            }
+            if (state->request_in_flight || state->completion_ready) {
+                return StatusBusy;
+            }
+
+            populate_request_descriptors(request_type, sector, buffer);
 
             AvailRing.ring[AvailRing.idx % QueueSize] = 0U;
             barrier();
@@ -284,17 +349,113 @@ namespace board {
             barrier();
             write_reg(state->slot_index, VirtioMmioQueueNotify, 0U);
 
+            state->completion_status = StatusBusy;
+            state->request_in_flight = true;
+            state->request_type = request_type;
+            state->request_sector = sector;
+            return StatusOK;
+        }
+
+        /**
+         * Consume one completed request from the shared used ring.
+         *
+         * Returning `StatusBusy` means the request is still in flight rather
+         * than that the device failed. That distinction lets the synchronous
+         * wrapper keep polling without collapsing the future async seam back
+         * into the submission helper.
+         *
+         * @param state Active virtio-blk device state.
+         * @return StatusOK or StatusIoError on completion, or StatusBusy while
+         * the request is still pending.
+         */
+        static Status drain_request_completion_locked(VirtioBlockState* state) {
+            if (state == NULL) {
+                return StatusInvalidArgument;
+            }
+            if (state->completion_ready) {
+                return state->completion_status;
+            }
+            if (!state->request_in_flight) {
+                return StatusBusy;
+            }
+
+            barrier();
+            if (UsedRing.idx == state->last_used_idx) {
+                return StatusBusy;
+            }
+
+            state->last_used_idx = UsedRing.idx;
+            write_reg(state->slot_index, VirtioMmioInterruptAck, read_reg(state->slot_index, VirtioMmioInterruptStatus));
+            state->request_in_flight = false;
+            state->completion_ready = true;
+            state->completion_status = (StatusByte == VirtioBlkStatusOk) ? StatusOK : StatusIoError;
+            return state->completion_status;
+        }
+
+        /**
+         * Consume one latched completion result.
+         *
+         * The board poll hook can observe a used-ring update before the
+         * synchronous caller wakes up. Latching the result keeps that split
+         * correct, and this helper lets the waiter acknowledge the completion
+         * once it has seen the final status.
+         *
+         * @param state Active virtio-blk device state.
+         * @return Nothing.
+         */
+        static void consume_request_completion_locked(VirtioBlockState* state) {
+            if (state == NULL) {
+                return;
+            }
+
+            state->completion_ready = false;
+            state->completion_status = StatusBusy;
+        }
+
+        /**
+         * Preserve the current synchronous read/write behavior on top of the
+         * split submit-plus-drain helpers.
+         *
+         * The driver API is still synchronous today, so callers keep blocking
+         * until completion. The important change is that the wait loop no longer
+         * owns the MMIO submission logic, which leaves a clean insertion point
+         * for a worker thread or IRQ-driven completion path later.
+         *
+         * @param state Active virtio-blk device state.
+         * @param request_type Virtio block request opcode.
+         * @param sector Device sector number.
+         * @param buffer Sector-sized transfer buffer.
+         * @return StatusOK on completion, or an error when the request fails or
+         * the completion never arrives.
+         */
+        static Status submit_request_sync(VirtioBlockState* state, U32 request_type, U64 sector, void* buffer) {
+            U32 polls = PollLimit;
+            Status status;
+
+            lock(state);
+            status = begin_request_locked(state, request_type, sector, buffer);
+            unlock(state);
+            if (status != StatusOK) {
+                return status;
+            }
+
             while (polls-- > 0U) {
-                barrier();
-                if (UsedRing.idx != state->last_used_idx) {
-                    state->last_used_idx = UsedRing.idx;
-                    write_reg(state->slot_index, VirtioMmioInterruptAck, read_reg(state->slot_index, VirtioMmioInterruptStatus));
-                    unlock(state);
-                    return (StatusByte == VirtioBlkStatusOk) ? StatusOK : StatusIoError;
+                lock(state);
+                status = drain_request_completion_locked(state);
+                if (status != StatusBusy) {
+                    consume_request_completion_locked(state);
+                }
+                unlock(state);
+                if (status != StatusBusy) {
+                    return status;
                 }
             }
 
+            lock(state);
             state->ready = false;
+            state->completion_ready = false;
+            state->completion_status = StatusBusy;
+            state->request_in_flight = false;
             unlock(state);
             return StatusBusy;
         }
@@ -313,8 +474,13 @@ namespace board {
             memzero(&DescTable, sizeof(DescTable));
             memzero(&AvailRing, sizeof(AvailRing));
             memzero(&UsedRing, sizeof(UsedRing));
+            state->completion_ready = false;
+            state->request_in_flight = false;
             state->last_used_idx = 0U;
+            state->completion_status = StatusBusy;
+            state->request_type = 0U;
             state->sector_count = 0U;
+            state->request_sector = 0U;
             state->lock_word = 0U;
 
             status = find_device_slot(state);
@@ -355,7 +521,10 @@ namespace board {
             }
 
             write_reg(state->slot_index, VirtioMmioStatus, 0U);
+            state->completion_ready = false;
+            state->completion_status = StatusBusy;
             state->ready = false;
+            state->request_in_flight = false;
             return StatusOK;
         }
 
@@ -384,7 +553,7 @@ namespace board {
 
             sector_count = length / SectorSize;
             for (Size index = 0; index < sector_count; ++index) {
-                Status status = submit_request(state, request_type, (offset / SectorSize) + index, bytes + (index * SectorSize));
+                Status status = submit_request_sync(state, request_type, (offset / SectorSize) + index, bytes + (index * SectorSize));
 
                 if (status != StatusOK) {
                     return status;

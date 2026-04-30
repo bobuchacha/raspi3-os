@@ -1,5 +1,12 @@
 .section .text.vectors, "ax"
 
+//
+// Exception frame layout used for saving/restoring context in exception 
+// handlers.The layout is designed to be compact while also leaving some 
+// reserved space for future expansion if needed. The current size of the 
+// frame is 320 bytes, which should be sufficient to hold all necessary 
+// registers and metadata for handling exceptions on AArch64.
+//
 .equ EXC_FRAME_X0,      0
 .equ EXC_FRAME_X2,      16
 .equ EXC_FRAME_X4,      32
@@ -28,7 +35,14 @@
 .equ EXC_FRAME_SIZE,    320
 .equ ESR_ELx_EC_SHIFT, 26
 .equ ESR_ELx_EC_SVC64, 0x15
+.equ ESR_ELx_EC_DABT_LOW, 0x24
 
+//
+// Exception vector IDs for dispatching and debugging purposes. 
+// These IDs are stored in the exception frame to allow the common 
+// exception handling code to identify the source and type of the 
+// exception without
+//
 .equ VECTOR_CURRENT_SP0_SYNC,    0
 .equ VECTOR_CURRENT_SP0_IRQ,     1
 .equ VECTOR_CURRENT_SP0_FIQ,     2
@@ -54,6 +68,7 @@
 .global aarch64_exception_vectors
 .extern aarch64_handle_irq
 .extern aarch64_exception_debugger
+.extern aarch64_handle_lower_el_sync
 .extern aarch64_capture_current_user_context
 .extern aarch64_dispatch_service
 
@@ -211,8 +226,18 @@ aarch64_lower_el_sync:
     ldr x11, [sp, #EXC_FRAME_ESR]
     lsr x12, x11, #ESR_ELx_EC_SHIFT
     cmp x12, #ESR_ELx_EC_SVC64
+    b.eq aarch64_lower_el_sync_service
+    cmp x12, #ESR_ELx_EC_DABT_LOW
     b.ne aarch64_lower_el_sync_debug
 
+    mov x0, sp
+    bl aarch64_handle_lower_el_sync
+    cbz x0, aarch64_lower_el_sync_debug
+
+    RESTORE_EXCEPTION_FRAME
+    eret
+
+aarch64_lower_el_sync_service:
     // Recover the original EL0 syscall arguments from the saved frame before calling the
     // C dispatcher. ELR/SPSR were already read into scratch registers above, so reusing x0/x1
     // directly here would pass the trap metadata instead of the user pointer arguments.
@@ -237,11 +262,18 @@ aarch64_irq_common:
     SAVE_EXCEPTION_FRAME VECTOR_LOWER_A64_IRQ
 
 aarch64_irq_common_saved:
+    ldr x9, [sp, #EXC_FRAME_VECTOR]
+    cmp x9, #VECTOR_LOWER_A64_IRQ
+    b.ne 1f
+
     mrs x0, sp_el0
     ldr x1, [sp, #EXC_FRAME_ELR]
     ldr x2, [sp, #EXC_FRAME_SPSR]
     bl aarch64_capture_current_user_context
 
+1:
+
+    mov x0, sp
     bl aarch64_handle_irq
 
     RESTORE_EXCEPTION_FRAME

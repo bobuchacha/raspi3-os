@@ -4,6 +4,9 @@
 #include "debug-message.h"
 #include "heap.h"
 
+#undef KZONE_LOADER
+#define KZONE_LOADER 0
+
 namespace {
 
     inline constexpr Size KernelResourceLabelCapacity = 40U;
@@ -66,10 +69,22 @@ namespace {
             return "loader-image";
         case KernelResourceKind::LoaderModuleRecord:
             return "loader-module";
+        case KernelResourceKind::LoaderSharedImageRecord:
+            return "loader-shared-image";
         case KernelResourceKind::LoaderImageCachePayload:
             return "image-cache-payload";
         case KernelResourceKind::LoaderImageCacheRecord:
             return "image-cache-record";
+        case KernelResourceKind::UserHeapAllocationRecord:
+            return "user-heap-allocation";
+        case KernelResourceKind::UserHeapMappedPageRecord:
+            return "user-heap-page";
+        case KernelResourceKind::GuiSurfaceRecord:
+            return "gui-surface-record";
+        case KernelResourceKind::GuiSurfaceBacking:
+            return "gui-surface-backing";
+        case KernelResourceKind::FileMappingBacking:
+            return "file-mapping-backing";
         default:
             return "unknown";
         }

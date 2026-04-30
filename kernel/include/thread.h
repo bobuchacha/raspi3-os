@@ -8,6 +8,7 @@
 
 #include "types.h"
 #include "object.h"
+#include "arch/aarch64/exception_frame.h"
 
 #if !defined(__cplusplus)
 #error "thread.h requires C++"
@@ -32,7 +33,9 @@ inline constexpr U8 ThreadPriorityIdle = 31U;
 inline constexpr U8 ThreadPriorityLevelCount = 32U;
 inline constexpr U32 ThreadDefaultQuantumTicks = 1U;
 inline constexpr U64 CpuContextUserModeFlag = 1ULL << 63;
-inline constexpr U64 CpuContextProcessorStateMask = ~CpuContextUserModeFlag;
+inline constexpr U64 CpuContextResumeExceptionFrameFlag = 1ULL << 62;
+inline constexpr U64 CpuContextSchedulerFlagsMask = CpuContextUserModeFlag | CpuContextResumeExceptionFrameFlag;
+inline constexpr U64 CpuContextProcessorStateMask = ~CpuContextSchedulerFlagsMask;
 
 struct CpuContext {
     U64 general_registers[31];
@@ -40,6 +43,7 @@ struct CpuContext {
     U64 user_stack_pointer;
     U64 program_counter;
     U64 processor_state;
+    AArch64ExceptionFrame saved_exception_frame;
 };
 
 struct Thread {
@@ -56,6 +60,10 @@ struct Thread {
     U8 reserved1[7];
     Process* parent;
     VirtAddr user_stack_top;
+    void* user_stack_backing;
+    Size user_stack_bytes;
+    U32 user_stack_slot_index;
+    U32 reserved_user_stack0;
     void* kernel_stack_backing;
     VirtAddr kernel_stack_top;
     ObjectHeader* wait_object;

@@ -2,7 +2,9 @@
 
 #include "heap.h"
 #include "kernel_event_broker.h"
+#include "mm.h"
 #include "process.h"
+#include "resource_manager.h"
 #include "scheduler.h"
 
 extern "C" void aarch64_thread_entry(void);
@@ -21,6 +23,7 @@ namespace {
     static_assert(offsetof(CpuContext, user_stack_pointer) == (32U * sizeof(U64)), "CpuContext user SP offset changed");
     static_assert(offsetof(CpuContext, program_counter) == (33U * sizeof(U64)), "CpuContext PC offset changed");
     static_assert(offsetof(CpuContext, processor_state) == (34U * sizeof(U64)), "CpuContext PSTATE offset changed");
+    static_assert(offsetof(CpuContext, saved_exception_frame) == (35U * sizeof(U64)), "CpuContext saved exception frame offset changed");
 
     void copy_text(char* destination, Size capacity, const char* source, const char* fallback) {
         Size index = 0;
@@ -383,6 +386,20 @@ Status ThreadManager::destroy_thread(Thread* thread) {
 
     if (thread->parent != NULL) {
         parent = thread->parent;
+        if ((thread->user_stack_backing != NULL)
+            && (thread->user_stack_bytes != 0U)
+            && (thread->user_stack_top >= thread->user_stack_bytes)) {
+            const VirtAddr user_stack_base = thread->user_stack_top - thread->user_stack_bytes;
+
+            (void)mm::MemoryManager::unmap(&thread->parent->process_address_space, user_stack_base, thread->user_stack_bytes);
+            KernelResourceManager::release(thread->user_stack_backing);
+            thread->user_stack_backing = NULL;
+            if (thread->user_stack_slot_index < 32U) {
+                thread->parent->user_stack_slot_bitmap &= ~(1U << thread->user_stack_slot_index);
+            }
+            thread->user_stack_bytes = 0U;
+            thread->user_stack_slot_index = 0U;
+        }
         Status status = ProcessManager::detach_thread(thread->parent, thread);
         if (status != StatusOK) {
             return status;

@@ -876,11 +876,13 @@ namespace {
                 static_cast<unsigned long long>(growth_address),
                 static_cast<unsigned long long>(growth_phys),
                 static_cast<unsigned long long>(growth_bytes));
+            mm::PhysicalMemory::release_contiguous_pages(growth_phys, page_count);
             return StatusFault;
         }
 
         tail = heap_tail_segment_locked();
         if (tail == NULL) {
+            mm::PhysicalMemory::release_contiguous_pages(growth_phys, page_count);
             return StatusFault;
         }
 

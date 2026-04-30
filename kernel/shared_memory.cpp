@@ -1,16 +1,14 @@
 #include "shared_memory.h"
 
 #include "debug-message.h"
-#include "heap.h"
 #include "mm.h"
+#include "mm/physical.h"
 #include "process.h"
+#include "user_address_space_layout.h"
 
 namespace {
 
     inline constexpr Size SharedMemoryNameCapacity = 64U;
-    inline constexpr Size SharedMemorySlotBytes = mm::backend::L2BlockSize;
-    inline constexpr Size SharedMemoryViewSlotCount = 32U;
-    inline constexpr VirtAddr SharedMemoryViewBase = 80ULL * mm::backend::L2BlockSize;
     inline constexpr U32 SharedMemoryInvalidSlot = 0xFFFFFFFFU;
 
     typedef struct SharedMemoryObject {
@@ -23,6 +21,43 @@ namespace {
         U32 attachment_count;
         struct SharedMemoryObject* next;
     } SharedMemoryObject;
+
+    typedef struct SharedMemoryAttachment {
+        bool in_use;
+        Process* process;
+        SharedMemoryObject* object;
+        U32 slot_index;
+        VirtAddr view_address;
+        struct SharedMemoryAttachment* next;
+    } SharedMemoryAttachment;
+
+    typedef struct SharedMemoryRecordSlot {
+        struct SharedMemoryRecordSlot* next_free;
+    } SharedMemoryRecordSlot;
+
+    typedef struct SharedMemoryRecordPageHeader {
+        PhysAddr page_phys;
+        struct SharedMemoryRecordPageHeader* next_page;
+        U32 live_slots;
+        U32 slot_capacity;
+    } SharedMemoryRecordPageHeader;
+
+    typedef struct SharedMemoryRecordPool {
+        Size slot_bytes;
+        Size slot_alignment;
+        SharedMemoryRecordSlot* free_list;
+        SharedMemoryRecordPageHeader* pages;
+    } SharedMemoryRecordPool;
+
+    bool g_shared_memory_initialized;
+    SharedMemoryObject* g_shared_memory_objects;
+    SharedMemoryAttachment* g_shared_memory_attachments;
+    Size g_shared_memory_object_count;
+    Size g_shared_memory_object_peak;
+    Size g_shared_memory_attachment_count;
+    Size g_shared_memory_attachment_peak;
+    SharedMemoryRecordPool g_shared_memory_object_pool = {};
+    SharedMemoryRecordPool g_shared_memory_attachment_pool = {};
 
     /*
      * Round one shared-memory payload size up to page granularity.
@@ -45,22 +80,248 @@ namespace {
         return (value + mask) & ~mask;
     }
 
-    typedef struct SharedMemoryAttachment {
-        bool in_use;
-        Process* process;
-        SharedMemoryObject* object;
-        U32 slot_index;
-        VirtAddr view_address;
-        struct SharedMemoryAttachment* next;
-    } SharedMemoryAttachment;
+    /*
+     * Align one unsigned value upward to the next multiple of `alignment`.
+     *
+     * The page-backed metadata pool needs aligned slot starts so typed record
+     * access stays valid after carving slots out of raw physical pages.
+     *
+     * @param value Raw value to align.
+     * @param alignment Required power-of-two alignment.
+     * @return Aligned value, or the original value when alignment is zero.
+     */
+    Size shared_memory_align_up(Size value, Size alignment) {
+        if (alignment == 0U) {
+            return value;
+        }
 
-    bool g_shared_memory_initialized;
-    SharedMemoryObject* g_shared_memory_objects;
-    SharedMemoryAttachment* g_shared_memory_attachments;
-    Size g_shared_memory_object_count;
-    Size g_shared_memory_object_peak;
-    Size g_shared_memory_attachment_count;
-    Size g_shared_memory_attachment_peak;
+        return (value + (alignment - 1U)) & ~(alignment - 1U);
+    }
+
+    /*
+     * Initialize one shared-memory metadata pool lazily.
+     *
+     * Both object records and attachment records are fixed-size structs, so a
+     * page-backed slot pool removes the subsystem's dependency on the general
+     * heap while still allowing empty metadata pages to be reclaimed.
+     *
+     * @param pool Pool state to initialize.
+     * @param record_bytes Raw record size.
+     * @param record_alignment Natural record alignment.
+     * @return Nothing.
+     */
+    void shared_memory_record_pool_init(SharedMemoryRecordPool* pool, Size record_bytes, Size record_alignment) {
+        if ((pool == NULL) || (record_bytes == 0U) || (record_alignment == 0U)) {
+            return;
+        }
+        if (pool->slot_bytes != 0U) {
+            return;
+        }
+
+        pool->slot_alignment = record_alignment;
+        pool->slot_bytes = shared_memory_align_up(record_bytes, record_alignment);
+        if (pool->slot_bytes < sizeof(SharedMemoryRecordSlot)) {
+            pool->slot_bytes = shared_memory_align_up(sizeof(SharedMemoryRecordSlot), record_alignment);
+        }
+        pool->free_list = NULL;
+        pool->pages = NULL;
+    }
+
+    /*
+     * Return the page header that owns one metadata slot.
+     *
+     * Every metadata pool page stores its header at the start of the page and
+     * carves aligned record slots out of the remaining bytes.
+     *
+     * @param slot Slot pointer returned by the metadata pool.
+     * @return Owning page header, or NULL for invalid input.
+     */
+    SharedMemoryRecordPageHeader* shared_memory_record_page_from_slot(const void* slot) {
+        if (slot == NULL) {
+            return NULL;
+        }
+
+        return reinterpret_cast<SharedMemoryRecordPageHeader*>(
+            reinterpret_cast<Uptr>(slot) & ~(static_cast<Uptr>(mm::PageSize) - 1U));
+    }
+
+    /*
+     * Grow one shared-memory metadata pool by one physical page.
+     *
+     * The subsystem keeps metadata on direct-mapped physical pages so both the
+     * registry and the attachment list stay operational even when the kernel
+     * heap is exhausted or corrupted.
+     *
+     * @param pool Pool to extend.
+     * @return True when at least one new slot was added.
+     */
+    bool shared_memory_record_pool_grow(SharedMemoryRecordPool* pool) {
+        const PhysAddr page_phys = mm::PhysicalMemory::alloc_page();
+        U8* page_base;
+        SharedMemoryRecordPageHeader* page_header;
+        Uptr slot_start;
+        Size available_bytes;
+        Size slot_capacity;
+
+        if ((pool == NULL) || (pool->slot_bytes == 0U) || (pool->slot_alignment == 0U) || (page_phys == 0U)) {
+            return false;
+        }
+
+        page_base = reinterpret_cast<U8*>(mm::MemoryManager::physical_to_kernel(page_phys));
+        memzero(page_base, mm::PageSize);
+        page_header = reinterpret_cast<SharedMemoryRecordPageHeader*>(page_base);
+        page_header->next_page = pool->pages;
+        page_header->page_phys = page_phys;
+
+        slot_start = shared_memory_align_up(
+            reinterpret_cast<Uptr>(page_base + sizeof(SharedMemoryRecordPageHeader)),
+            pool->slot_alignment);
+        available_bytes = mm::PageSize - static_cast<Size>(slot_start - reinterpret_cast<Uptr>(page_base));
+        slot_capacity = available_bytes / pool->slot_bytes;
+        if (slot_capacity == 0U) {
+            mm::PhysicalMemory::free_page(page_phys);
+            return false;
+        }
+
+        page_header->slot_capacity = static_cast<U32>(slot_capacity);
+        pool->pages = page_header;
+
+        for (Size slot_index = 0U; slot_index < slot_capacity; ++slot_index) {
+            SharedMemoryRecordSlot* slot = reinterpret_cast<SharedMemoryRecordSlot*>(slot_start + (slot_index * pool->slot_bytes));
+
+            slot->next_free = pool->free_list;
+            pool->free_list = slot;
+        }
+
+        return true;
+    }
+
+    /*
+     * Allocate one metadata record from a page-backed pool.
+     *
+     * @param pool Pool supplying the record.
+     * @return Zeroed record slot, or NULL when the pool cannot grow.
+     */
+    void* shared_memory_record_pool_allocate(SharedMemoryRecordPool* pool) {
+        SharedMemoryRecordSlot* slot;
+        SharedMemoryRecordPageHeader* page_header;
+
+        if (pool == NULL) {
+            return NULL;
+        }
+        if ((pool->free_list == NULL) && !shared_memory_record_pool_grow(pool)) {
+            return NULL;
+        }
+
+        slot = pool->free_list;
+        pool->free_list = slot->next_free;
+        page_header = shared_memory_record_page_from_slot(slot);
+        if (page_header != NULL) {
+            page_header->live_slots += 1U;
+        }
+        memzero(slot, pool->slot_bytes);
+        return slot;
+    }
+
+    /*
+     * Remove every free-list slot that belongs to one retiring page.
+     *
+     * @param pool Pool whose free list is being filtered.
+     * @param retired_page Page that is leaving the pool.
+     * @return Nothing.
+     */
+    void shared_memory_record_pool_remove_page_slots(SharedMemoryRecordPool* pool, const SharedMemoryRecordPageHeader* retired_page) {
+        SharedMemoryRecordSlot* retained_head = NULL;
+        SharedMemoryRecordSlot* node;
+
+        if ((pool == NULL) || (retired_page == NULL)) {
+            return;
+        }
+
+        node = pool->free_list;
+        while (node != NULL) {
+            SharedMemoryRecordSlot* next = node->next_free;
+
+            if (shared_memory_record_page_from_slot(node) != retired_page) {
+                node->next_free = retained_head;
+                retained_head = node;
+            }
+            node = next;
+        }
+
+        pool->free_list = retained_head;
+    }
+
+    /*
+     * Unlink one page header from a metadata pool page chain.
+     *
+     * @param pool Pool that owns the page.
+     * @param page_header Page being unlinked.
+     * @return Nothing.
+     */
+    void shared_memory_record_pool_unlink_page(SharedMemoryRecordPool* pool, SharedMemoryRecordPageHeader* page_header) {
+        SharedMemoryRecordPageHeader* current;
+        SharedMemoryRecordPageHeader* previous = NULL;
+
+        if ((pool == NULL) || (page_header == NULL)) {
+            return;
+        }
+
+        current = pool->pages;
+        while ((current != NULL) && (current != page_header)) {
+            previous = current;
+            current = current->next_page;
+        }
+        if (current == NULL) {
+            return;
+        }
+
+        if (previous != NULL) {
+            previous->next_page = current->next_page;
+        }
+        else {
+            pool->pages = current->next_page;
+        }
+    }
+
+    /*
+     * Return one metadata record slot to its page-backed pool.
+     *
+     * Empty pages are reclaimed immediately so object churn does not leave dead
+     * metadata pages behind after the last object or attachment is released.
+     *
+     * @param pool Pool receiving the slot.
+     * @param record Slot pointer previously returned by the pool.
+     * @return Nothing.
+     */
+    void shared_memory_record_pool_free(SharedMemoryRecordPool* pool, void* record) {
+        SharedMemoryRecordPageHeader* page_header;
+        SharedMemoryRecordSlot* slot;
+
+        if ((pool == NULL) || (record == NULL)) {
+            return;
+        }
+
+        page_header = shared_memory_record_page_from_slot(record);
+        if (page_header == NULL) {
+            return;
+        }
+
+        slot = reinterpret_cast<SharedMemoryRecordSlot*>(record);
+        slot->next_free = pool->free_list;
+        pool->free_list = slot;
+
+        if (page_header->live_slots != 0U) {
+            page_header->live_slots -= 1U;
+        }
+        if (page_header->live_slots != 0U) {
+            return;
+        }
+
+        shared_memory_record_pool_remove_page_slots(pool, page_header);
+        shared_memory_record_pool_unlink_page(pool, page_header);
+        mm::PhysicalMemory::free_page(page_header->page_phys);
+    }
 
     /*
      * Emit one shared-memory registry occupancy snapshot.
@@ -85,6 +346,36 @@ namespace {
     }
 
     /*
+     * Emit one detailed object-lifecycle log line.
+     *
+     * Heap corruption is currently surfacing during process teardown after the
+     * shared-memory subsystem already released at least one attachment. Logging
+     * the object name, backing pointer, and rounded backing size at the point
+     * where the subsystem mutates ownership makes the next repro actionable
+     * without needing to reverse-map a raw heap address by hand.
+     *
+     * @param reason Short label describing the lifecycle event.
+     * @param object Shared-memory object associated with the event.
+     * @param attachment Optional process attachment associated with the event.
+     * @return Nothing.
+     */
+    void shared_memory_log_object_event(const char* reason, const SharedMemoryObject* object, const SharedMemoryAttachment* attachment) {
+        KDEBUG(
+            KZONE_MEMORY,
+            "[shm] %s name=%s requested=%lu backing=%lu ptr=%p phys=0x%llx attachments=%lu process=%lld slot=%lu view=0x%llx\n",
+            (reason != NULL) ? reason : "<none>",
+            (object != NULL) ? object->name : "<null>",
+            static_cast<unsigned long>((object != NULL) ? object->requested_size : 0U),
+            static_cast<unsigned long>((object != NULL) ? object->backing_bytes : 0U),
+            (object != NULL) ? object->backing : NULL,
+            static_cast<unsigned long long>((object != NULL) ? object->physical_base : 0U),
+            static_cast<unsigned long>((object != NULL) ? object->attachment_count : 0U),
+            static_cast<long long>(((attachment != NULL) && (attachment->process != NULL)) ? attachment->process->id : -1),
+            static_cast<unsigned long>((attachment != NULL) ? attachment->slot_index : SharedMemoryInvalidSlot),
+            static_cast<unsigned long long>((attachment != NULL) ? attachment->view_address : 0U));
+    }
+
+    /*
      * Link one live shared-memory object into the global registry.
      *
      * @param object Freshly created object record.
@@ -102,6 +393,7 @@ namespace {
             g_shared_memory_object_peak = g_shared_memory_object_count;
         }
 
+        shared_memory_log_object_event("object-alloc-detail", object, NULL);
         shared_memory_log_registry_snapshot("object-alloc");
     }
 
@@ -123,6 +415,7 @@ namespace {
             g_shared_memory_attachment_peak = g_shared_memory_attachment_count;
         }
 
+        shared_memory_log_object_event("attachment-alloc-detail", attachment->object, attachment);
         shared_memory_log_registry_snapshot("attachment-alloc");
     }
 
@@ -133,6 +426,7 @@ namespace {
      * @return Nothing.
      */
     void unlink_object(SharedMemoryObject* object) {
+        shared_memory_log_object_event("object-release-detail", object, NULL);
         for (SharedMemoryObject** link = &g_shared_memory_objects; *link != NULL; link = &((*link)->next)) {
             if (*link == object) {
                 *link = object->next;
@@ -152,6 +446,7 @@ namespace {
      * @return Nothing.
      */
     void unlink_attachment(SharedMemoryAttachment* attachment) {
+        shared_memory_log_object_event("attachment-release-detail", (attachment != NULL) ? attachment->object : NULL, attachment);
         for (SharedMemoryAttachment** link = &g_shared_memory_attachments; *link != NULL; link = &((*link)->next)) {
             if (*link == attachment) {
                 *link = attachment->next;
@@ -268,7 +563,7 @@ namespace {
      * @return Stable user virtual address for that slot.
      */
     VirtAddr shared_memory_slot_address(U32 slot_index) {
-        return SharedMemoryViewBase + (static_cast<VirtAddr>(slot_index) * SharedMemorySlotBytes);
+        return user_address_space::SharedMemoryViewBase + (static_cast<VirtAddr>(slot_index) * user_address_space::SharedMemorySlotBytes);
     }
 
     /*
@@ -294,14 +589,15 @@ namespace {
      * @return Free object record, or NULL when allocation fails.
      */
     SharedMemoryObject* reserve_object_slot(void) {
-        SharedMemoryObject* object = static_cast<SharedMemoryObject*>(Heap::alloc(sizeof(SharedMemoryObject), alignof(SharedMemoryObject)));
+        SharedMemoryObject* object;
 
+        shared_memory_record_pool_init(&g_shared_memory_object_pool, sizeof(SharedMemoryObject), alignof(SharedMemoryObject));
+        object = static_cast<SharedMemoryObject*>(shared_memory_record_pool_allocate(&g_shared_memory_object_pool));
         if (object == NULL) {
             shared_memory_log_registry_snapshot("object-alloc-failed");
             return NULL;
         }
 
-        memzero(object, sizeof(*object));
         return object;
     }
 
@@ -350,13 +646,19 @@ namespace {
     /*
      * Choose one free per-process view slot.
      *
+     * The shared-memory view arena size now comes from the central EL0 layout
+     * budget, so the allocator scans the derived slot capacity instead of one
+     * compile-time constant baked into this subsystem.
+     *
      * @param process Process receiving the mapping.
      * @return Slot index, or `SharedMemoryInvalidSlot` when none remain.
      */
     U32 find_free_slot(Process* process) {
-        for (U32 slot_index = 0U; slot_index < SharedMemoryViewSlotCount; ++slot_index) {
-            if (!process_uses_slot(process, slot_index)) {
-                return slot_index;
+        const Size slot_capacity = user_address_space::SharedMemoryViewBytes / user_address_space::SharedMemorySlotBytes;
+
+        for (Size slot_index = 0U; slot_index < slot_capacity; ++slot_index) {
+            if (!process_uses_slot(process, static_cast<U32>(slot_index))) {
+                return static_cast<U32>(slot_index);
             }
         }
 
@@ -369,14 +671,15 @@ namespace {
      * @return Free attachment record, or NULL when allocation fails.
      */
     SharedMemoryAttachment* reserve_attachment_slot(void) {
-        SharedMemoryAttachment* attachment = static_cast<SharedMemoryAttachment*>(Heap::alloc(sizeof(SharedMemoryAttachment), alignof(SharedMemoryAttachment)));
+        SharedMemoryAttachment* attachment;
 
+        shared_memory_record_pool_init(&g_shared_memory_attachment_pool, sizeof(SharedMemoryAttachment), alignof(SharedMemoryAttachment));
+        attachment = static_cast<SharedMemoryAttachment*>(shared_memory_record_pool_allocate(&g_shared_memory_attachment_pool));
         if (attachment == NULL) {
             shared_memory_log_registry_snapshot("attachment-alloc-failed");
             return NULL;
         }
 
-        memzero(attachment, sizeof(*attachment));
         return attachment;
     }
 
@@ -392,10 +695,13 @@ namespace {
         }
 
         unlink_object(object);
-        if (object->backing != NULL) {
-            Heap::free(object->backing);
+        if ((object->physical_base != 0U) && (object->backing_bytes != 0U)) {
+            const unsigned int page_count = static_cast<unsigned int>(object->backing_bytes / mm::PageSize);
+
+            mm::PhysicalMemory::release_contiguous_pages(object->physical_base, page_count);
         }
-        Heap::free(object);
+        memzero(object, sizeof(*object));
+        shared_memory_record_pool_free(&g_shared_memory_object_pool, object);
     }
 
     /*
@@ -424,7 +730,8 @@ namespace {
             --object->attachment_count;
         }
         unlink_attachment(attachment);
-        Heap::free(attachment);
+        memzero(attachment, sizeof(*attachment));
+        shared_memory_record_pool_free(&g_shared_memory_attachment_pool, attachment);
         release_object_if_unused(object);
         return StatusOK;
     }
@@ -456,7 +763,7 @@ Status SharedMemoryManager::acquire(Process* process, const char* name, Size req
     if ((process == NULL) || (name == NULL) || (address_out == NULL)) {
         return StatusInvalidArgument;
     }
-    if ((requested_size > SharedMemorySlotBytes) || !text_fits_capacity(name, SharedMemoryNameCapacity)) {
+    if ((requested_size > user_address_space::SharedMemorySlotBytes) || !text_fits_capacity(name, SharedMemoryNameCapacity)) {
         return StatusInvalidArgument;
     }
 
@@ -485,23 +792,28 @@ Status SharedMemoryManager::acquire(Process* process, const char* name, Size req
         }
 
         const Size backing_bytes = align_up_shared_memory_bytes(requested_size);
+        const unsigned int page_count = static_cast<unsigned int>(backing_bytes / mm::PageSize);
+        PhysAddr backing_phys;
 
         if (backing_bytes == 0U) {
+            shared_memory_record_pool_free(&g_shared_memory_object_pool, reserved_object);
             return StatusInvalidArgument;
         }
 
-        backing = Heap::alloc(backing_bytes, mm::PageSize);
-        if (backing == NULL) {
+        backing_phys = mm::PhysicalMemory::reserve_contiguous_pages(page_count);
+        if ((page_count == 0U) || (backing_phys == 0U)) {
+            shared_memory_record_pool_free(&g_shared_memory_object_pool, reserved_object);
             return StatusNoMemory;
         }
 
+        backing = reinterpret_cast<void*>(mm::MemoryManager::physical_to_kernel(backing_phys));
         memzero(backing, backing_bytes);
         memzero(reserved_object, sizeof(*reserved_object));
         reserved_object->in_use = true;
         reserved_object->requested_size = requested_size;
         reserved_object->backing_bytes = backing_bytes;
         reserved_object->backing = backing;
-        reserved_object->physical_base = mm::MemoryManager::kernel_to_physical(reinterpret_cast<VirtAddr>(backing));
+        reserved_object->physical_base = backing_phys;
         reserved_object->attachment_count = 0U;
         copy_text(reserved_object->name, sizeof(reserved_object->name), name);
         link_object(reserved_object);
@@ -539,7 +851,8 @@ Status SharedMemoryManager::acquire(Process* process, const char* name, Size req
 
         status = mm::MemoryManager::map(&process->process_address_space, &mapping);
         if (status != StatusOK) {
-            Heap::free(attachment);
+            memzero(attachment, sizeof(*attachment));
+            shared_memory_record_pool_free(&g_shared_memory_attachment_pool, attachment);
             if (created_object) {
                 release_object_if_unused(object);
             }

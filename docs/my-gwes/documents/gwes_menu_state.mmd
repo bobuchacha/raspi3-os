@@ -1,0 +1,27 @@
+stateDiagram-v2
+    [*] --> Idle
+
+    Idle --> Preparing: track_popup()
+    Preparing --> Visible: popup window created
+    Visible --> Tracking: capture acquired
+
+    Tracking --> Tracking: pointer move updates highlight
+    Tracking --> SubmenuPending: hover on submenu item
+    Tracking --> Executing: pointer up or Enter on command item
+    Tracking --> Dismissing: outside click
+    Tracking --> Dismissing: Escape
+    Tracking --> Dismissing: owner destroyed
+    Tracking --> Dismissing: capture lost
+
+    SubmenuPending --> Tracking: pointer leaves submenu item
+    SubmenuPending --> SubmenuOpen: open timer fires
+
+    SubmenuOpen --> Tracking: submenu closes
+    SubmenuOpen --> Executing: child command chosen
+    SubmenuOpen --> Dismissing: root dismissed
+
+    Executing --> Dismissing: command recorded or notification sent
+    Dismissing --> ReplayingClick: outside click stored
+    Dismissing --> Closed: no replay needed
+    ReplayingClick --> Closed: click forwarded to underlying target
+    Closed --> [*]

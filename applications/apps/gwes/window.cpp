@@ -1,5 +1,6 @@
 #include "render.h"
 
+#define ROS_WINDOW_NO_IMPORTS 1
 #include "user_runtime.h"
 #include "app/kernel.h"
 #include "app/kernel_gui.h"
@@ -7,7 +8,6 @@
 #include "compositor.h"
 #include "gdi_bridge.h"
 #include "jpeg_render.h"
-
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -19,7 +19,7 @@ namespace {
 #define DEBUG_ENABLE_GWES_RENDER_TRACE 1
 #endif
 
-    constexpr unsigned long kMaxWindowCount = MAX_WINDOWS;
+    constexpr unsigned long kInitialWindowCapacity = 32UL;
     constexpr unsigned long kWindowDefaultWidth = 360UL;
     constexpr unsigned long kWindowDefaultHeight = 220UL;
     constexpr unsigned long kChildDefaultWidth = 120UL;
@@ -28,9 +28,7 @@ namespace {
     constexpr unsigned long kCompositeRowCapacity = 4096UL;
     constexpr unsigned long kCompositeTileRows = 16UL;
 
-    constexpr U32 kDesktopColor = 0x00101822U;
-    constexpr U32 kDesktopSignatureText = 0x00F7FBFFU;
-    constexpr U32 kDesktopSignatureShadow = 0x00111A24U;
+    constexpr U32 kDesktopColor = 0x0087B9E8U;
     constexpr U32 kDialogFrameOuter = 0x00324D73U;
     constexpr U32 kDialogFrameInner = 0x00AEC3DDU;
     constexpr U32 kDialogFrameLight = 0x00E7F0FBU;
@@ -96,12 +94,6 @@ namespace {
     constexpr U32 kDialogCloseSize = 18U;
     constexpr U32 kDialogCloseMargin = 5U;
     constexpr U32 kDialogControlButtonGap = 4U;
-    constexpr unsigned long kDesktopSignatureMarginX = 18UL;
-    constexpr unsigned long kDesktopSignatureMarginY = 16UL;
-    constexpr unsigned long kDesktopSignatureLineGap = 2UL;
-    constexpr char kDesktopSignatureLine1[] = "Canvas Operating System";
-    constexpr char kDesktopSignatureLine2[] = "Version 0.1.0 - development";
-
     struct GwesWindowRecord {
         Window window;
         GuiWindowSurfaceView surface_view;
@@ -111,7 +103,9 @@ namespace {
         int ready;
         RosKernelGuiDisplayInfo display;
         Compositor compositor;
-        GwesWindowRecord window_records[kMaxWindowCount];
+        RosKernelGuiPresentBuffer present_buffer;
+        GuiWindowSurfaceView syscall_surface_view;
+        GwesWindowRecord* window_records;
         unsigned long cascade_index;
         struct {
             int visible;
@@ -148,12 +142,6 @@ namespace {
         GwesRasterGlyph glyphs[kGwesRasterFontGlyphCount];
     };
 
-    struct GwesRasterFontCacheEntry {
-        char* path;
-        GwesRasterFont font;
-        GwesRasterFontCacheEntry* next;
-    };
-
     struct GwesCursorAsset {
         int attempted;
         int loaded;
@@ -174,9 +162,11 @@ namespace {
     };
 
     static GwesRenderState g_render_state;
-    static GwesRasterFontCacheEntry* g_gwes_font_cache;
     static GwesCursorCacheEntry* g_gwes_cursor_cache;
+    static GwesRasterFont g_gwes_system_ui_font_storage;
     static GwesRasterFont* g_gwes_system_ui_font;
+    static unsigned long g_gwes_present_trace_budget = 4UL;
+    static int g_gwes_system_ui_font_validated;
     static U32 g_gwes_composite_tile[kCompositeRowCapacity * kCompositeTileRows];
     static U32* g_gwes_composite_row = g_gwes_composite_tile;
     static U32 gwes_encode_desktop_color(U32 color);
@@ -252,125 +242,99 @@ namespace {
     }
 
     /*
-     * Clamp one signed coordinate to the non-negative desktop range.
+     * Clamp one signed coordinate to the non-negative range.
      *
-     * @param value Signed coordinate requested by the caller.
-     * @return Zero or the original value converted to `U32`.
+     * @param value Candidate coordinate.
+     * @return Zero when the coordinate is negative.
      */
-    static U32 gwes_clamp_non_negative(long value) {
-        return value < 0 ? 0U : static_cast<U32>(value);
+    static long gwes_clamp_non_negative(long value) {
+        return value < 0L ? 0L : value;
     }
 
     /*
-     * Return whether two compositor rectangles describe the same bounds.
+     * Compare two rectangles for exact equality.
      *
      * @param lhs First rectangle.
      * @param rhs Second rectangle.
-     * @return Non-zero when all fields match exactly.
+     * @return True when both rectangles match.
      */
-    static int gwes_rect_equals(const Rect& lhs, const Rect& rhs) {
-        return lhs.x == rhs.x
-            && lhs.y == rhs.y
-            && lhs.width == rhs.width
-            && lhs.height == rhs.height;
+    static bool gwes_rect_equals(const Rect& lhs, const Rect& rhs) {
+        return lhs.x == rhs.x && lhs.y == rhs.y && lhs.width == rhs.width && lhs.height == rhs.height;
     }
 
     /*
-     * Convert one requested preview frame into a clamped desktop rectangle.
+     * Build one interaction-preview rectangle from signed coordinates.
      *
-     * The placeholder should mirror the geometry that a real move or resize
-     * commit would accept, so negative coordinates are clamped here rather than
-     * letting the preview drift outside the visible desktop.
-     *
-     * @param x Requested frame X coordinate.
-     * @param y Requested frame Y coordinate.
-     * @param width Requested frame width.
-     * @param height Requested frame height.
-     * @return Normalized preview rectangle.
+     * @param x Preview X origin.
+     * @param y Preview Y origin.
+     * @param width Preview width.
+     * @param height Preview height.
+     * @return Populated preview rectangle.
      */
     static Rect gwes_make_interaction_preview_rect(long x, long y, unsigned long width, unsigned long height) {
         return Rect{
-            gwes_clamp_non_negative(x),
-            gwes_clamp_non_negative(y),
+            static_cast<U32>(gwes_clamp_non_negative(x)),
+            static_cast<U32>(gwes_clamp_non_negative(y)),
             static_cast<U32>(width),
             static_cast<U32>(height)
         };
     }
 
     /*
-     * Return whether one point lies on the dashed placeholder frame border.
+     * Return whether one pixel lands on the preview border.
      *
-     * @param frame Preview frame in desktop coordinates.
-     * @param x Desktop X coordinate to test.
-     * @param y Desktop Y coordinate to test.
-     * @return Non-zero when the point should receive the outline color.
+     * @param rect Preview rectangle.
+     * @param absolute_x Desktop X coordinate.
+     * @param row_y Desktop Y coordinate.
+     * @return True when the point should be highlighted.
      */
-    static int gwes_preview_contains_border_pixel(const Rect& frame, U32 x, U32 y) {
-        const U32 thickness = gwes_min_ul(kInteractionPreviewThickness, gwes_min_ul(frame.width, frame.height));
+    static bool gwes_preview_contains_border_pixel(const Rect& rect, unsigned long absolute_x, unsigned long row_y) {
+        const unsigned long local_x = absolute_x >= rect.x ? (absolute_x - rect.x) : 0UL;
+        const unsigned long local_y = row_y >= rect.y ? (row_y - rect.y) : 0UL;
+        const unsigned long border_thickness = gwes_min_ul(kInteractionPreviewThickness, gwes_min_ul(rect.width, rect.height));
 
-        if (frame.is_empty()
-            || thickness == 0U
-            || x < frame.x
-            || x >= frame.right()
-            || y < frame.y
-            || y >= frame.bottom()) {
-            return 0;
+        if (rect.is_empty()) {
+            return false;
         }
 
-        return y < frame.y + thickness
-            || y >= frame.bottom() - thickness
-            || x < frame.x + thickness
-            || x >= frame.right() - thickness;
+        return local_x < border_thickness
+            || local_y < border_thickness
+            || local_x >= (rect.width - border_thickness)
+            || local_y >= (rect.height - border_thickness);
     }
 
+    static Rect gwes_clip_to_desktop(const Rect& rect);
+
     /*
-     * Blend one Win9x-style dashed preview frame into the current scanline.
+     * Overlay the interactive resize preview onto one composed scanline.
      *
-     * The outline is composited after window content so the placeholder stays
-     * visible even while the real window remains stationary underneath it.
-     *
-     * @param x Scanline chunk start X coordinate.
-     * @param width Scanline chunk width.
-     * @param row Desktop row currently being composed.
+     * @param chunk_x Desktop X coordinate of the current row buffer.
+     * @param chunk_width Number of pixels in the current row buffer.
+     * @param row_y Desktop Y coordinate being composed.
      * @return Nothing.
      */
-    static void gwes_overlay_interaction_preview_span(U32 x, unsigned long width, U32 row) {
-        Rect clipped = g_render_state.interaction_preview.frame;
-        const U32 chunk_right = static_cast<U32>(x + width);
-        U32 start_x;
-        U32 end_x;
-        U32 column;
+    static void gwes_overlay_interaction_preview_span(unsigned long chunk_x, unsigned long chunk_width, unsigned long row_y) {
+        const Rect clipped = gwes_clip_to_desktop(g_render_state.interaction_preview.frame);
+        unsigned long start_x;
+        unsigned long end_x;
+        unsigned long column;
 
-        if (!g_render_state.interaction_preview.active || clipped.is_empty()) {
+        if (!g_render_state.interaction_preview.active || clipped.is_empty() || row_y < clipped.y || row_y >= clipped.bottom()) {
             return;
         }
 
-        if (clipped.x >= g_render_state.compositor.desktop.width || clipped.y >= g_render_state.compositor.desktop.height) {
-            return;
-        }
-
-        if (clipped.right() > g_render_state.compositor.desktop.width) {
-            clipped.width = g_render_state.compositor.desktop.width - clipped.x;
-        }
-        if (clipped.bottom() > g_render_state.compositor.desktop.height) {
-            clipped.height = g_render_state.compositor.desktop.height - clipped.y;
-        }
-        if (clipped.is_empty() || row < clipped.y || row >= clipped.bottom()) {
-            return;
-        }
-
-        start_x = gwes_max_ul(x, clipped.x);
-        end_x = gwes_min_ul(chunk_right, clipped.right());
+        start_x = gwes_max_ul(chunk_x, clipped.x);
+        end_x = gwes_min_ul(chunk_x + chunk_width, clipped.right());
         if (start_x >= end_x) {
             return;
         }
 
         for (column = start_x; column < end_x; ++column) {
-            if (!gwes_preview_contains_border_pixel(clipped, column, row)) {
+            if (!gwes_preview_contains_border_pixel(clipped, column, row_y)) {
                 continue;
             }
 
-            g_gwes_composite_row[column - x] = (((column + row) & 1U) == 0U)
+            g_gwes_composite_row[column - chunk_x] = (((column + row_y) & 1U) == 0U)
                 ? kInteractionPreviewLight
                 : kInteractionPreviewDark;
         }
@@ -421,6 +385,177 @@ namespace {
         for (index = 0UL; index < size; ++index) {
             bytes[index] = 0U;
         }
+    }
+
+    /*
+     * Report whether one heap-backed compositor pointer still resides inside the
+     * stable EL0 heap reservation.
+     *
+     * The retained window tables are allocated through the shared user heap, so
+     * any pointer that escapes the published heap window is already corrupt.
+     * Checking the address range lets GWES fail closed before the first paint
+     * pass walks a bogus high-half alias and takes the whole server down.
+     *
+     * @param pointer Candidate heap pointer to validate.
+     * @return Non-zero when the pointer is NULL or lies inside the user heap.
+     */
+    static int gwes_pointer_is_user_heap_address(const void* pointer) {
+        const unsigned long address = static_cast<unsigned long>(reinterpret_cast<uintptr_t>(pointer));
+
+        if (pointer == nullptr) {
+            return 1;
+        }
+
+        return address >= USER_HEAP_BASE && address < USER_HEAP_LIMIT;
+    }
+    /*
+     * Report whether one heap-backed byte range stays inside the shared EL0 heap.
+     *
+     * The font cache retains both the parsed font record and the backing file
+     * buffer on the process heap. Validating the whole range before the first
+     * paint lets GWES fail closed when that cache pointer is already corrupt.
+     *
+     * @param pointer Base address of the retained heap range.
+     * @param size Byte length of the retained heap range.
+     * @return Non-zero when the full range lies inside the shared heap window.
+     */
+    static int gwes_pointer_range_is_user_heap(const void* pointer, unsigned long size) {
+        const uintptr_t address = reinterpret_cast<uintptr_t>(pointer);
+        const uintptr_t heap_base = static_cast<uintptr_t>(USER_HEAP_BASE);
+        const uintptr_t heap_limit = static_cast<uintptr_t>(USER_HEAP_LIMIT);
+        const uintptr_t end = address + static_cast<uintptr_t>(size);
+
+        if (pointer == nullptr) {
+            return 0;
+        }
+        if (size == 0UL) {
+            return gwes_pointer_is_user_heap_address(pointer);
+        }
+        if (end < address) {
+            return 0;
+        }
+
+        return address >= heap_base && end <= heap_limit;
+    }
+
+    /*
+     * Validate one retained raster-font record before the renderer dereferences it.
+     *
+     * The headless crash currently lands on the first load from the cached system
+     * font record. This validator checks that the font object, its backing file,
+     * and every published glyph coverage span still point into the shared user
+     * heap so GWES can fall back to the built-in mini font instead of faulting.
+     *
+     * @param font Cached system font candidate.
+     * @return Non-zero when the font record is safe to use.
+     */
+    static int gwes_validate_raster_font_record(const GwesRasterFont* font) {
+        const uintptr_t file_base = font != nullptr ? reinterpret_cast<uintptr_t>(font->file_buffer) : 0U;
+        const uintptr_t file_limit = file_base + (font != nullptr ? static_cast<uintptr_t>(font->file_size) : 0U);
+        unsigned long glyph_index;
+
+        if (font != &g_gwes_system_ui_font_storage) {
+            return 0;
+        }
+        if (font->loaded == 0 || font->file_buffer == nullptr || font->file_size == 0UL) {
+            return 0;
+        }
+        if (!gwes_pointer_range_is_user_heap(font->file_buffer, font->file_size)) {
+            return 0;
+        }
+        if (file_limit < file_base || font->pixel_height == 0UL || font->line_height == 0UL || font->ascent <= 0L) {
+            return 0;
+        }
+
+        for (glyph_index = 0UL; glyph_index < kGwesRasterFontGlyphCount; ++glyph_index) {
+            const GwesRasterGlyph& glyph = font->glyphs[glyph_index];
+            const unsigned long coverage_size = glyph.width * glyph.height;
+            const uintptr_t coverage_base = reinterpret_cast<uintptr_t>(glyph.coverage);
+            const uintptr_t coverage_limit = coverage_base + static_cast<uintptr_t>(coverage_size);
+
+            if (glyph.coverage == nullptr) {
+                if (coverage_size != 0UL) {
+                    return 0;
+                }
+                continue;
+            }
+            if (coverage_limit < coverage_base) {
+                return 0;
+            }
+            if (!gwes_pointer_range_is_user_heap(glyph.coverage, coverage_size)) {
+                return 0;
+            }
+            if (coverage_base < file_base || coverage_limit > file_limit) {
+                return 0;
+            }
+        }
+
+        return 1;
+    }
+
+    /*
+     * Reset the retained compositor window tables to one known-empty state.
+     *
+     * When bootstrap corruption slips into the retained table bookkeeping, the
+     * safest recovery is to drop the in-memory table and let later create-window
+     * requests rebuild it from scratch. That leaks at most one abandoned table
+     * allocation for the current process lifetime, but it keeps GWES alive long
+     * enough to continue servicing new windows instead of crashing inside the
+     * paint loop.
+     *
+     * @return Nothing.
+     */
+    static void gwes_reset_window_table_state(void) {
+        g_render_state.compositor.window_count = 0;
+        g_render_state.compositor.window_capacity = 0UL;
+        g_render_state.compositor.windows = nullptr;
+        g_render_state.window_records = nullptr;
+    }
+
+    /*
+     * Validate the retained compositor window bookkeeping before one paint pass.
+     *
+     * The first headless crash now lands in caption-text rendering before any
+     * legitimate create-window request reaches GWES. That strongly suggests the
+     * retained table metadata can become corrupt during bootstrap, so this guard
+     * checks the count-to-capacity relationship and the expected heap residency
+     * of both table pointers before any code dereferences them.
+     *
+     * @param reason Short trace label describing the caller performing the check.
+     * @return Non-zero when the retained tables are safe to walk.
+     */
+    static int gwes_validate_window_table_state(const char* reason) {
+        const int window_count = g_render_state.compositor.window_count;
+        const unsigned long window_capacity = g_render_state.compositor.window_capacity;
+
+        if (window_count < 0) {
+            gwes_render_tracef(
+                "gwes.exe: render trace corrupt tables reason=%s count=%d capacity=%lu windows=%p records=%p",
+                reason != nullptr ? reason : "unknown",
+                window_count,
+                window_capacity,
+                static_cast<void*>(g_render_state.compositor.windows),
+                static_cast<void*>(g_render_state.window_records));
+            gwes_reset_window_table_state();
+            return 0;
+        }
+
+        if (static_cast<unsigned long>(window_count) > window_capacity
+            || !gwes_pointer_is_user_heap_address(g_render_state.compositor.windows)
+            || !gwes_pointer_is_user_heap_address(g_render_state.window_records)
+            || (window_count != 0 && (g_render_state.compositor.windows == nullptr || g_render_state.window_records == nullptr))) {
+            gwes_render_tracef(
+                "gwes.exe: render trace corrupt tables reason=%s count=%d capacity=%lu windows=%p records=%p",
+                reason != nullptr ? reason : "unknown",
+                window_count,
+                window_capacity,
+                static_cast<void*>(g_render_state.compositor.windows),
+                static_cast<void*>(g_render_state.window_records));
+            gwes_reset_window_table_state();
+            return 0;
+        }
+
+        return 1;
     }
 
     static int gwes_buffer_has_prefix(const unsigned char* buffer, unsigned long buffer_size, const char* prefix, unsigned long prefix_size) {
@@ -572,51 +707,6 @@ namespace {
     }
 
     /*
-     * Look up one font-cache entry by path.
-     *
-     * @param path Cache key.
-     * @return Matching cache entry, or null when not cached.
-     */
-    static GwesRasterFontCacheEntry* gwes_find_font_cache_entry(const char* path) {
-        GwesRasterFontCacheEntry* entry = g_gwes_font_cache;
-
-        while (entry) {
-            if (gwes_text_equals(entry->path, path)) {
-                return entry;
-            }
-            entry = entry->next;
-        }
-
-        return nullptr;
-    }
-
-    /*
-     * Allocate one new cache entry and link it into the GWES registry.
-     *
-     * @param path Cache key.
-     * @return Linked cache entry, or null on failure.
-     */
-    static GwesRasterFontCacheEntry* gwes_create_font_cache_entry(const char* path) {
-        GwesRasterFontCacheEntry* entry;
-
-        entry = static_cast<GwesRasterFontCacheEntry*>(malloc(sizeof(GwesRasterFontCacheEntry)));
-        if (!entry) {
-            return nullptr;
-        }
-
-        gwes_zero_memory(entry, sizeof(*entry));
-        entry->path = gwes_duplicate_text(path);
-        if (!entry->path) {
-            free(entry);
-            return nullptr;
-        }
-
-        entry->next = g_gwes_font_cache;
-        g_gwes_font_cache = entry;
-        return entry;
-    }
-
-    /*
      * Look up one cursor-cache entry by its DOS-style asset path.
      *
      * @param path Cache key.
@@ -662,24 +752,18 @@ namespace {
     }
 
     /*
-     * Release the entire GWES raster-font cache.
+     * Release the dedicated system UI raster font owned by GWES.
+     *
+     * The chrome font is now a process-lifetime singleton rather than a
+     * heap-linked cache entry. Shutdown only needs to drop the retained backing
+     * buffer and reset the published pointer.
      *
      * @return Nothing.
      */
-    static void gwes_release_font_cache(void) {
-        GwesRasterFontCacheEntry* entry = g_gwes_font_cache;
-
-        while (entry) {
-            GwesRasterFontCacheEntry* next = entry->next;
-
-            gwes_release_raster_font(&entry->font);
-            free(entry->path);
-            free(entry);
-            entry = next;
-        }
-
-        g_gwes_font_cache = nullptr;
+    static void gwes_release_system_ui_font(void) {
+        gwes_release_raster_font(&g_gwes_system_ui_font_storage);
         g_gwes_system_ui_font = nullptr;
+        g_gwes_system_ui_font_validated = 0;
     }
 
     /*
@@ -709,7 +793,21 @@ namespace {
      * @return Loaded cached font, or null when GWES must fall back.
      */
     static const GwesRasterFont* gwes_system_ui_font(void) {
-        if (!g_gwes_system_ui_font || !g_gwes_system_ui_font->loaded) {
+        if (!g_gwes_system_ui_font) {
+            return nullptr;
+        }
+
+        if (!g_gwes_system_ui_font_validated) {
+            if (!gwes_validate_raster_font_record(g_gwes_system_ui_font)) {
+                writeLine("gwes.exe: system_ui.rtf cache invalid, using mini-font chrome");
+                g_gwes_system_ui_font = nullptr;
+                return nullptr;
+            }
+
+            g_gwes_system_ui_font_validated = 1;
+        }
+
+        if (!g_gwes_system_ui_font->loaded) {
             return nullptr;
         }
 
@@ -822,44 +920,25 @@ namespace {
         return 0L;
     }
 
-    static void gwes_desktop_surface_view(RosGdiSurface* surface) {
-        if (!surface) {
-            return;
-        }
-
-        gwes_zero_memory(surface, sizeof(*surface));
-        surface->hwnd = 0UL;
-        surface->width = g_render_state.compositor.desktop.width;
-        surface->height = g_render_state.compositor.desktop.height;
-        surface->pitch = g_render_state.compositor.desktop.pitch;
-        surface->pixel_format = g_render_state.display.pixel_format;
-        surface->pixels = g_render_state.compositor.desktop.pixels;
-    }
-
-    static void gwes_fill_desktop_surface(U32 color) {
-        if (!g_render_state.compositor.desktop.pixels) {
-            return;
-        }
-
-        for (unsigned long row = 0UL; row < g_render_state.compositor.desktop.height; ++row) {
-            U32* pixels = reinterpret_cast<U32*>(reinterpret_cast<U8*>(g_render_state.compositor.desktop.pixels) + (row * g_render_state.compositor.desktop.pitch));
-
-            for (unsigned long column = 0UL; column < g_render_state.compositor.desktop.width; ++column) {
-                pixels[column] = gwes_encode_desktop_color(color);
-            }
-        }
-    }
-
-    static long gwes_render_wallpaper_to_desktop(void) {
+    /**
+     * Render the staged wallpaper into the retained desktop backing surface.
+     *
+     * The compositor seeds every damaged tile from this retained desktop image
+     * before it overlays windows. If the backing surface stays empty, the shell
+     * can only ever show the hard-coded solid fallback even though the repo
+     * already stages `bliss.jpg` and ships a JPEG renderer.
+     *
+     * @return Nothing.
+     */
+    static void gwes_prepare_desktop_background(void) {
         unsigned char* buffer = nullptr;
         unsigned long file_size = 0UL;
         JpegRenderTarget target = {};
-        long status;
 
-        status = gwes_read_file_all(kGwesWallpaperPath, &buffer, &file_size);
-
-        if (status < 0L) {
-            return status;
+        if (g_render_state.compositor.desktop.pixels == nullptr
+            || g_render_state.compositor.desktop.width == 0U
+            || g_render_state.compositor.desktop.height == 0U) {
+            return;
         }
 
         target.width = g_render_state.compositor.desktop.width;
@@ -867,69 +946,24 @@ namespace {
         target.pitch = g_render_state.compositor.desktop.pitch;
         target.pixel_format = g_render_state.display.pixel_format;
         target.pixels = g_render_state.compositor.desktop.pixels;
-        status = jpeg_render_to_surface(buffer, static_cast<U32>(file_size), &target, kDesktopColor);
-        if (status < 0L) {
-            gwes_render_tracef("gwes.exe: wallpaper decode failed path=%s size=%lu status=%ld", kGwesWallpaperPath, file_size, status);
-        }
-        free(buffer);
-        return status;
-    }
 
-    static void gwes_render_signature_to_desktop_surface(void) {
-        RosGdiSurface desktop_surface = {};
-        unsigned long line1_width;
-        unsigned long line2_width;
-        unsigned long line_height;
-        unsigned long block_height;
-        unsigned long line1_x;
-        unsigned long line2_x;
-        unsigned long block_y;
-        unsigned long line2_y;
+        if (gwes_read_file_all(kGwesWallpaperPath, &buffer, &file_size) >= 0L) {
+            if (jpeg_render_to_surface(buffer, static_cast<U32>(file_size), &target, kDesktopColor) == StatusOK) {
+                free(buffer);
+                return;
+            }
 
-        if (!g_render_state.desktop_signature_font_loaded || !g_render_state.compositor.desktop.pixels) {
-            return;
+            free(buffer);
         }
 
-        gwes_desktop_surface_view(&desktop_surface);
-        line1_width = 0UL;
-        line2_width = 0UL;
-        line_height = g_render_state.desktop_signature_font.line_height;
-        if (gwes_gdi_measure_text(&g_render_state.desktop_signature_font, kDesktopSignatureLine1, &line1_width, &line_height) < 0L) {
-            return;
+        for (unsigned long row = 0UL; row < g_render_state.compositor.desktop.height; ++row) {
+            U32* desktop_row = reinterpret_cast<U32*>(reinterpret_cast<U8*>(g_render_state.compositor.desktop.pixels)
+                + (row * g_render_state.compositor.desktop.pitch));
+
+            for (unsigned long column = 0UL; column < g_render_state.compositor.desktop.width; ++column) {
+                desktop_row[column] = gwes_encode_desktop_color(kDesktopColor);
+            }
         }
-        if (gwes_gdi_measure_text(&g_render_state.desktop_signature_font, kDesktopSignatureLine2, &line2_width, &line_height) < 0L) {
-            return;
-        }
-
-        line_height = g_render_state.desktop_signature_font.line_height;
-        block_height = (line_height * 2UL) + kDesktopSignatureLineGap;
-        line1_x = desktop_surface.width > (line1_width + kDesktopSignatureMarginX)
-            ? (desktop_surface.width - line1_width - kDesktopSignatureMarginX)
-            : 0UL;
-        line2_x = desktop_surface.width > (line2_width + kDesktopSignatureMarginX)
-            ? (desktop_surface.width - line2_width - kDesktopSignatureMarginX)
-            : 0UL;
-        block_y = desktop_surface.height > (block_height + kDesktopSignatureMarginY)
-            ? (desktop_surface.height - block_height - kDesktopSignatureMarginY)
-            : 0UL;
-        line2_y = block_y + line_height + kDesktopSignatureLineGap;
-
-        (void)gwes_gdi_draw_text_surface(&desktop_surface, &g_render_state.desktop_signature_font, line1_x + 1UL, block_y + 1UL, kDesktopSignatureLine1, kDesktopSignatureShadow);
-        (void)gwes_gdi_draw_text_surface(&desktop_surface, &g_render_state.desktop_signature_font, line2_x + 1UL, line2_y + 1UL, kDesktopSignatureLine2, kDesktopSignatureShadow);
-        (void)gwes_gdi_draw_text_surface(&desktop_surface, &g_render_state.desktop_signature_font, line1_x, block_y, kDesktopSignatureLine1, kDesktopSignatureText);
-        (void)gwes_gdi_draw_text_surface(&desktop_surface, &g_render_state.desktop_signature_font, line2_x, line2_y, kDesktopSignatureLine2, kDesktopSignatureText);
-    }
-
-    static void gwes_render_desktop_surface(void) {
-        long wallpaper_status;
-
-        gwes_fill_desktop_surface(kDesktopColor);
-        wallpaper_status = gwes_render_wallpaper_to_desktop();
-        if (wallpaper_status < 0L) {
-            gwes_render_tracef("gwes.exe: wallpaper fallback status=%ld", wallpaper_status);
-            writeLine("gwes.exe: wallpaper unavailable, using solid desktop color");
-        }
-        gwes_render_signature_to_desktop_surface();
     }
 
     /*
@@ -1153,61 +1187,39 @@ namespace {
     }
 
     /*
-     * Load one raster font through the GWES cache.
-     *
-     * @param path Raster font path.
-     * @param font Receives the loaded cached font.
-     * @return Zero on success, or a negative status code on failure.
-     */
-    static long gwes_load_raster_font(const char* path, GwesRasterFont** font) {
-        GwesRasterFontCacheEntry* entry;
-        unsigned char* buffer = nullptr;
-        unsigned long file_size = 0UL;
-        long status;
-
-        if (!path || !font) {
-            return -1L;
-        }
-
-        entry = gwes_find_font_cache_entry(path);
-        if (!entry) {
-            entry = gwes_create_font_cache_entry(path);
-            if (!entry) {
-                return -1L;
-            }
-        }
-
-        if (entry->font.attempted) {
-            *font = entry->font.loaded ? &entry->font : nullptr;
-            return entry->font.loaded ? 0L : -1L;
-        }
-
-        entry->font.attempted = 1;
-        status = gwes_read_file_all(path, &buffer, &file_size);
-        if (status < 0L) {
-            *font = nullptr;
-            return status;
-        }
-
-        status = gwes_parse_raster_font(&entry->font, buffer, file_size);
-        if (status < 0L) {
-            free(buffer);
-            *font = nullptr;
-            return status;
-        }
-
-        *font = &entry->font;
-        writeLine("gwes.exe: loaded C:\\fonts\\system_ui.rtf for window chrome");
-        return 0L;
-    }
-
-    /*
      * Load the system UI raster font used by GWES chrome drawing.
+     *
+     * The server only uses one raster font for its own chrome, so keeping that
+     * record in dedicated static storage removes the now-dead heap cache path
+     * and avoids publishing a mutable heap pointer as the renderer singleton.
      *
      * @return Zero on success, or a negative status code on failure.
      */
     static long gwes_load_system_ui_raster_font(void) {
-        long status = gwes_load_raster_font(kGwesSystemUiRasterPath, &g_gwes_system_ui_font);
+        unsigned char* buffer = nullptr;
+        unsigned long file_size = 0UL;
+        long status;
+
+        if (g_gwes_system_ui_font == &g_gwes_system_ui_font_storage && g_gwes_system_ui_font_storage.loaded) {
+            return 0L;
+        }
+
+        gwes_release_raster_font(&g_gwes_system_ui_font_storage);
+        g_gwes_system_ui_font = nullptr;
+        g_gwes_system_ui_font_validated = 0;
+
+        status = gwes_read_file_all(kGwesSystemUiRasterPath, &buffer, &file_size);
+        if (status >= 0L) {
+            status = gwes_parse_raster_font(&g_gwes_system_ui_font_storage, buffer, file_size);
+            if (status < 0L) {
+                free(buffer);
+            }
+        }
+
+        if (status >= 0L) {
+            g_gwes_system_ui_font = &g_gwes_system_ui_font_storage;
+            writeLine("gwes.exe: loaded C:\\fonts\\system_ui.rtf for window chrome");
+        }
 
         if (status < 0L) {
             writeLine("gwes.exe: system_ui.rtf unavailable, using mini-font chrome");
@@ -1257,6 +1269,31 @@ namespace {
         *red = (color >> 16) & 0xFFUL;
         *green = (color >> 8) & 0xFFUL;
         *blue = color & 0xFFUL;
+    }
+
+    /*
+     * Decode one client-surface pixel back into compositor RGB order.
+     *
+     * Window surfaces are stored in the client-visible XRGB/XBGR layout, but
+     * the compositor blends in logical `0x00RRGGBB` order. Keeping this
+     * conversion local lets GWES honor the top-byte alpha channel without
+     * breaking existing apps that still draw through the format-aware GDI
+     * helpers.
+     *
+     * @param pixel_format Source `ROS_KERNEL_GUI_PIXEL_FORMAT_*` value.
+     * @param encoded Pixel value as stored in the mapped shared surface.
+     * @return Decoded RGB color in `0x00RRGGBB` order.
+     */
+    static U32 gwes_decode_surface_color(unsigned long pixel_format, U32 encoded) {
+        const U32 rgb = encoded & 0x00FFFFFFU;
+
+        if (pixel_format != ROS_KERNEL_GUI_PIXEL_FORMAT_XBGR8888) {
+            return rgb;
+        }
+
+        return ((rgb & 0x000000FFU) << 16)
+            | (rgb & 0x0000FF00U)
+            | ((rgb & 0x00FF0000U) >> 16);
     }
 
     static void gwes_blend_row_pixel(U32* pixel, U32 color, unsigned long alpha) {
@@ -1432,6 +1469,37 @@ namespace {
     static Rect gwes_clip_to_ancestors(const Window& window, const Rect& rect);
 
     /*
+     * Ensure the retained-window tables can hold the requested number of live
+     * windows.
+     *
+     * The redesign goal here is to remove arbitrary user-mode window ceilings
+     * while keeping the existing dense-array semantics that the reorder and
+     * compaction code already relies on.
+     *
+     * @param required_count Minimum number of retained records the tables must hold.
+     * @return Zero on success, or a negative status code on allocation failure.
+     */
+    static long gwes_ensure_window_capacity(unsigned long required_count);
+
+    /*
+     * Release the retained-window tables owned by the compositor state.
+     *
+     * Shutdown removes live windows first, then this helper returns the dynamic
+     * storage so the remaining GUI ceiling is process memory rather than one
+     * compile-time constant.
+     *
+     * @return Nothing.
+     */
+    static void gwes_release_window_storage(void);
+
+    /*
+     * Rebuild the compositor pointer table after any retained-record reorder.
+     *
+     * @return Nothing.
+     */
+    static void gwes_refresh_compositor_links(void);
+
+    /*
      * Report whether one compositor window is currently visible.
      *
      * @param window Window record to inspect.
@@ -1462,6 +1530,36 @@ namespace {
     }
 
     /*
+     * Report whether one compositor window must remain above normal app windows.
+     *
+     * @param window Window record to inspect.
+     * @return True when the topmost flag is set.
+     */
+    static bool gwes_window_is_topmost(const Window& window) {
+        return has_window_flag(window.flags, WindowFlags::Topmost);
+    }
+
+    /*
+     * Report whether one compositor window belongs to shell-managed system UI.
+     *
+     * @param window Window record to inspect.
+     * @return True when the system-ui flag is set.
+     */
+    static bool gwes_window_is_system_ui(const Window& window) {
+        return has_window_flag(window.flags, WindowFlags::SystemUi);
+    }
+
+    /*
+     * Report whether one compositor window requests fullscreen shell behavior.
+     *
+     * @param window Window record to inspect.
+     * @return True when the fullscreen flag is set.
+     */
+    static bool gwes_window_is_fullscreen(const Window& window) {
+        return has_window_flag(window.flags, WindowFlags::Fullscreen);
+    }
+
+    /*
      * Rebuild one client-visible style word from compositor flags.
      *
      * The retained renderer stores only the flag form after create-time layout
@@ -1483,8 +1581,65 @@ namespace {
         if (gwes_window_is_child(window)) {
             style |= ROS_WINDOW_STYLE_CHILD;
         }
+        if (gwes_window_is_topmost(window)) {
+            style |= ROS_WINDOW_STYLE_TOPMOST;
+        }
+        if (gwes_window_is_system_ui(window)) {
+            style |= ROS_WINDOW_STYLE_SYSTEM_UI;
+        }
+        if (gwes_window_is_fullscreen(window)) {
+            style |= ROS_WINDOW_STYLE_FULLSCREEN;
+        }
 
         return style;
+    }
+
+    /*
+     * Rebuild the retained window array so every topmost window stays above the normal layer.
+     *
+     * Shell windows such as the taskbar and start menu must remain on top even
+     * after regular apps create new windows or call the raise-window path.
+     *
+     * @return Nothing.
+     */
+    static void gwes_reorder_topmost_windows(void) {
+        GwesWindowRecord* reordered;
+        int write_index = 0;
+        int index;
+
+        if (!g_render_state.ready || g_render_state.compositor.window_count <= 1) {
+            return;
+        }
+
+        reordered = static_cast<GwesWindowRecord*>(malloc(sizeof(GwesWindowRecord) * static_cast<unsigned long>(g_render_state.compositor.window_count)));
+        if (reordered == nullptr) {
+            return;
+        }
+
+        for (index = 0; index < g_render_state.compositor.window_count; ++index) {
+            if (gwes_window_is_topmost(g_render_state.window_records[index].window)) {
+                continue;
+            }
+
+            reordered[write_index++] = g_render_state.window_records[index];
+        }
+
+        for (index = 0; index < g_render_state.compositor.window_count; ++index) {
+            if (!gwes_window_is_topmost(g_render_state.window_records[index].window)) {
+                continue;
+            }
+
+            reordered[write_index++] = g_render_state.window_records[index];
+        }
+
+        if (write_index == g_render_state.compositor.window_count) {
+            for (index = 0; index < g_render_state.compositor.window_count; ++index) {
+                g_render_state.window_records[index] = reordered[index];
+            }
+            gwes_refresh_compositor_links();
+        }
+
+        free(reordered);
     }
 
     /*
@@ -1546,18 +1701,26 @@ namespace {
      */
     static void gwes_fill_desktop_background_row(unsigned long chunk_x, unsigned long chunk_width, unsigned long row_y) {
         const U32* source_row;
-        unsigned long index;
+        unsigned long column;
 
-        if (!g_render_state.compositor.desktop.pixels || row_y >= g_render_state.compositor.desktop.height) {
+        if (g_render_state.compositor.desktop.pixels == nullptr
+            || row_y >= g_render_state.compositor.desktop.height
+            || chunk_x >= g_render_state.compositor.desktop.width) {
             gwes_fill_composite_row(chunk_width, kDesktopColor);
             return;
         }
 
-        source_row = reinterpret_cast<const U32*>(
-            reinterpret_cast<const U8*>(g_render_state.compositor.desktop.pixels)
+        source_row = reinterpret_cast<const U32*>(reinterpret_cast<const U8*>(g_render_state.compositor.desktop.pixels)
             + (row_y * g_render_state.compositor.desktop.pitch));
-        for (index = 0UL; index < chunk_width; ++index) {
-            g_gwes_composite_row[index] = source_row[chunk_x + index];
+        for (column = 0UL; column < chunk_width; ++column) {
+            const unsigned long source_x = chunk_x + column;
+
+            if (source_x >= g_render_state.compositor.desktop.width) {
+                g_gwes_composite_row[column] = gwes_encode_desktop_color(kDesktopColor);
+                continue;
+            }
+
+            g_gwes_composite_row[column] = source_row[source_x];
         }
     }
 
@@ -1570,21 +1733,21 @@ namespace {
      * @return Nothing.
      */
     static void gwes_present_tile(unsigned long x, unsigned long y, unsigned long width, unsigned long height) {
-        RosKernelGuiPresentBuffer buffer;
+        RosKernelGuiPresentBuffer* buffer = &g_render_state.present_buffer;
 
         if (!g_render_state.ready || width == 0UL || height == 0UL) {
             return;
         }
 
-        buffer.version = ROS_KERNEL_GUI_PRESENT_BUFFER_VERSION;
-        buffer.x = static_cast<U32>(x);
-        buffer.y = static_cast<U32>(y);
-        buffer.width = static_cast<U32>(width);
-        buffer.height = static_cast<U32>(height);
-        buffer.pitch = static_cast<U32>(width * sizeof(U32));
-        buffer.pixels = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(g_gwes_composite_tile));
-        buffer.reserved = 0U;
-        (void)gwes_control_gui(ROS_KERNEL_GUI_CONTROL_DISPLAY_PRESENT, static_cast<unsigned long>(reinterpret_cast<uintptr_t>(&buffer)));
+        buffer->version = ROS_KERNEL_GUI_PRESENT_BUFFER_VERSION;
+        buffer->x = static_cast<U32>(x);
+        buffer->y = static_cast<U32>(y);
+        buffer->width = static_cast<U32>(width);
+        buffer->height = static_cast<U32>(height);
+        buffer->pitch = static_cast<U32>(width * sizeof(U32));
+        buffer->pixels = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(g_gwes_composite_tile));
+        buffer->reserved = 0U;
+        (void)gwes_control_gui(ROS_KERNEL_GUI_CONTROL_DISPLAY_PRESENT, static_cast<unsigned long>(reinterpret_cast<uintptr_t>(buffer)));
     }
 
     /*
@@ -1783,6 +1946,67 @@ namespace {
         for (index = 0; index < g_render_state.compositor.window_count; ++index) {
             g_render_state.compositor.windows[index] = &g_render_state.window_records[index].window;
         }
+    }
+
+    /*
+     * Ensure the retained-window tables can hold the requested number of live
+     * windows.
+     *
+     * The compositor keeps retained records densely packed so z-order changes
+     * and removals stay simple. Growing both arrays together preserves that
+     * model without reinstating a compile-time limit.
+     *
+     * @param required_count Minimum number of retained records the tables must hold.
+     * @return Zero on success, or a negative status code on allocation failure.
+     */
+    static long gwes_ensure_window_capacity(unsigned long required_count) {
+        const unsigned long current_capacity = g_render_state.compositor.window_capacity;
+        unsigned long new_capacity = current_capacity == 0UL ? kInitialWindowCapacity : current_capacity;
+        Window** expanded_windows;
+        GwesWindowRecord* expanded_records;
+
+        if (required_count <= current_capacity) {
+            return 0L;
+        }
+
+        while (new_capacity < required_count) {
+            new_capacity *= 2UL;
+        }
+
+        expanded_windows = static_cast<Window**>(realloc(g_render_state.compositor.windows, sizeof(Window*) * new_capacity));
+        if (!expanded_windows) {
+            return -1L;
+        }
+        g_render_state.compositor.windows = expanded_windows;
+
+        expanded_records = static_cast<GwesWindowRecord*>(realloc(g_render_state.window_records, sizeof(GwesWindowRecord) * new_capacity));
+        if (!expanded_records) {
+            return -1L;
+        }
+        g_render_state.window_records = expanded_records;
+
+        gwes_zero_memory(&g_render_state.compositor.windows[current_capacity], sizeof(Window*) * (new_capacity - current_capacity));
+        gwes_zero_memory(&g_render_state.window_records[current_capacity], sizeof(GwesWindowRecord) * (new_capacity - current_capacity));
+        g_render_state.compositor.window_capacity = new_capacity;
+        gwes_refresh_compositor_links();
+        return 0L;
+    }
+
+    /*
+     * Release the retained-window tables owned by the compositor state.
+     *
+     * @return Nothing.
+     */
+    static void gwes_release_window_storage(void) {
+        if (g_render_state.compositor.windows) {
+            free(g_render_state.compositor.windows);
+            g_render_state.compositor.windows = nullptr;
+        }
+        if (g_render_state.window_records) {
+            free(g_render_state.window_records);
+            g_render_state.window_records = nullptr;
+        }
+        g_render_state.compositor.window_capacity = 0UL;
     }
 
     /*
@@ -1997,12 +2221,12 @@ namespace {
 
         if (index != last_index) {
             g_render_state.window_records[index] = g_render_state.window_records[last_index];
-            g_render_state.compositor.windows[index] = &g_render_state.window_records[index].window;
         }
 
-        g_render_state.compositor.windows[last_index] = nullptr;
         gwes_zero_memory(&g_render_state.window_records[last_index], sizeof(g_render_state.window_records[last_index]));
         --g_render_state.compositor.window_count;
+        g_render_state.compositor.windows[g_render_state.compositor.window_count] = nullptr;
+        gwes_refresh_compositor_links();
     }
 
     /*
@@ -2067,7 +2291,8 @@ namespace {
      * @param chunk_width Number of pixels in the row buffer.
      * @return Nothing.
      */
-    static void gwes_blit_surface_span(const Window& window, unsigned long row_y, unsigned long chunk_x, unsigned long chunk_width) {
+    static void gwes_blit_surface_span(const GwesWindowRecord& record, unsigned long row_y, unsigned long chunk_x, unsigned long chunk_width) {
+        const Window& window = record.window;
         Rect visible_surface;
         unsigned long start_x;
         unsigned long end_x;
@@ -2091,7 +2316,20 @@ namespace {
 
         source_row = reinterpret_cast<const U32*>(reinterpret_cast<const U8*>(window.surface.pixels) + ((row_y - window.surface_frame.y) * window.surface.pitch));
         for (x = start_x; x < end_x; ++x) {
-            g_gwes_composite_row[x - chunk_x] = source_row[x - window.surface_frame.x];
+            const U32 source_pixel = source_row[x - window.surface_frame.x];
+            const unsigned long alpha = (source_pixel >> 24) & 0xFFUL;
+            const U32 source_color = gwes_decode_surface_color(record.surface_view.pixel_format, source_pixel);
+
+            if (alpha == 0UL) {
+                continue;
+            }
+
+            if (alpha >= 255UL) {
+                g_gwes_composite_row[x - chunk_x] = gwes_encode_desktop_color(source_color);
+                continue;
+            }
+
+            gwes_blend_row_pixel(&g_gwes_composite_row[x - chunk_x], source_color, alpha);
         }
     }
 
@@ -2450,14 +2688,15 @@ namespace {
                     gwes_bind_composite_row(tile_row, chunk_width);
                     gwes_fill_desktop_background_row(clipped.x + offset_x, chunk_width, row_y);
                     for (index = 0; index < g_render_state.compositor.window_count; ++index) {
-                        Window* window = g_render_state.compositor.windows[index];
+                        GwesWindowRecord& record = g_render_state.window_records[index];
+                        Window* window = &record.window;
 
                         if (!window || !gwes_window_is_visible(*window)) {
                             continue;
                         }
 
                         gwes_paint_window_chrome_span(*window, row_y, clipped.x + offset_x, chunk_width);
-                        gwes_blit_surface_span(*window, row_y, clipped.x + offset_x, chunk_width);
+                        gwes_blit_surface_span(record, row_y, clipped.x + offset_x, chunk_width);
                     }
 
                     gwes_overlay_interaction_preview_span(clipped.x + offset_x, chunk_width, row_y);
@@ -2499,23 +2738,21 @@ extern "C" long gwes_render_init(void) {
     g_render_state.compositor.desktop.pitch = 0U;
     g_render_state.compositor.desktop.pixels = nullptr;
     g_render_state.compositor.window_count = 0;
+    g_render_state.compositor.window_capacity = 0UL;
     g_render_state.compositor.damage.clear();
     g_render_state.cascade_index = 0UL;
     g_render_state.desktop_signature_font_loaded = 0;
-    status = gwes_allocate_desktop_surface();
-    if (status < 0L) {
-        return status;
+    if (gwes_allocate_desktop_surface() != 0L) {
+        return -1L;
     }
-    if (gwes_gdi_load_font(0, 12UL, &g_render_state.desktop_signature_font) >= 0L) {
-        g_render_state.desktop_signature_font_loaded = 1;
-    }
+
     default_cursor = gwes_resolve_cursor_asset(kGwesDefaultCursorPath);
     g_render_state.pointer.visible = default_cursor != nullptr;
     g_render_state.pointer.x = g_render_state.compositor.desktop.width / 2U;
     g_render_state.pointer.y = g_render_state.compositor.desktop.height / 2U;
     g_render_state.pointer.active_cursor = default_cursor;
     (void)gwes_load_system_ui_raster_font();
-    gwes_render_desktop_surface();
+    gwes_prepare_desktop_background();
     g_render_state.ready = 1;
     gwes_render_request_full_redraw();
     return 0;
@@ -2526,13 +2763,10 @@ extern "C" void gwes_render_shutdown(void) {
         gwes_remove_window_at(g_render_state.compositor.window_count - 1);
     }
 
-    gwes_release_font_cache();
-    gwes_release_cursor_cache();
-    if (g_render_state.desktop_signature_font_loaded) {
-        (void)gwes_gdi_unload_font(&g_render_state.desktop_signature_font);
-        g_render_state.desktop_signature_font_loaded = 0;
-    }
+    gwes_release_window_storage();
     gwes_release_desktop_surface();
+    gwes_release_system_ui_font();
+    gwes_release_cursor_cache();
     g_render_state.ready = 0;
     g_render_state.compositor.damage.clear();
     gwes_zero_memory(&g_render_state.display, sizeof(g_render_state.display));
@@ -2556,14 +2790,24 @@ extern "C" long gwes_render_create_window(unsigned long hwnd,
     WindowFlags flags = WindowFlags::Opaque;
     long layout_status;
     long surface_status;
+    long capacity_status;
 
-    if (!g_render_state.ready || g_render_state.compositor.window_count >= static_cast<int>(kMaxWindowCount)) {
+    if (!g_render_state.ready) {
         gwes_render_tracef(
-            "gwes.exe: render trace create rejected ready=%d window_count=%d max=%lu",
+            "gwes.exe: render trace create rejected ready=%d window_count=%d capacity=%lu",
             g_render_state.ready,
             g_render_state.compositor.window_count,
-            kMaxWindowCount);
+            g_render_state.compositor.window_capacity);
         return -1L;
+    }
+    capacity_status = gwes_ensure_window_capacity(static_cast<unsigned long>(g_render_state.compositor.window_count) + 1UL);
+    if (capacity_status != 0L) {
+        gwes_render_tracef(
+            "gwes.exe: render trace create capacity failed count=%d capacity=%lu status=%ld",
+            g_render_state.compositor.window_count,
+            g_render_state.compositor.window_capacity,
+            capacity_status);
+        return capacity_status;
     }
     layout_status = gwes_compute_window_layout(parent_hwnd, x, y, width, height, style, &frame, &surface_frame, &client_offset_x, &client_offset_y);
     if (layout_status != 0) {
@@ -2612,6 +2856,15 @@ extern "C" long gwes_render_create_window(unsigned long hwnd,
     if ((style & ROS_WINDOW_STYLE_CHILD) != 0UL) {
         flags |= WindowFlags::Child;
     }
+    if ((style & ROS_WINDOW_STYLE_TOPMOST) != 0UL) {
+        flags |= WindowFlags::Topmost;
+    }
+    if ((style & ROS_WINDOW_STYLE_SYSTEM_UI) != 0UL) {
+        flags |= WindowFlags::SystemUi;
+    }
+    if ((style & ROS_WINDOW_STYLE_FULLSCREEN) != 0UL) {
+        flags |= WindowFlags::Fullscreen;
+    }
     record->window.flags = flags;
 
     surface_status = gwes_create_shared_surface(hwnd, owner_pid, surface_frame.width, surface_frame.height, g_render_state.display.pixel_format, &record->surface_view);
@@ -2632,6 +2885,7 @@ extern "C" long gwes_render_create_window(unsigned long hwnd,
 
     g_render_state.compositor.windows[g_render_state.compositor.window_count] = &record->window;
     ++g_render_state.compositor.window_count;
+    gwes_reorder_topmost_windows();
     gwes_mark_damage(frame);
     return 0;
 }
@@ -2688,13 +2942,13 @@ extern "C" long gwes_render_resize_window(unsigned long hwnd, long x, long y, un
     Rect old_frame;
     Rect old_surface_frame;
     GuiWindowSurfaceView old_surface_view;
+    GuiWindowSurfaceView* resized_view = &g_render_state.syscall_surface_view;
     U32 old_client_offset_x;
     U32 old_client_offset_y;
     Rect new_frame;
     Rect new_surface_frame;
     U32 new_client_offset_x;
     U32 new_client_offset_y;
-    GuiWindowSurfaceView resized_view;
     long layout_status;
     long surface_status;
     long delta_x;
@@ -2732,7 +2986,7 @@ extern "C" long gwes_render_resize_window(unsigned long hwnd, long x, long y, un
         gwes_destroy_shared_surface(hwnd);
     }
     gwes_zero_memory(&record->surface_view, sizeof(record->surface_view));
-    gwes_zero_memory(&resized_view, sizeof(resized_view));
+    gwes_zero_memory(resized_view, sizeof(*resized_view));
 
     surface_status = gwes_create_shared_surface(
         hwnd,
@@ -2740,7 +2994,7 @@ extern "C" long gwes_render_resize_window(unsigned long hwnd, long x, long y, un
         new_surface_frame.width,
         new_surface_frame.height,
         g_render_state.display.pixel_format,
-        &resized_view);
+        resized_view);
     if (surface_status != 0L) {
         if (old_surface_view.hwnd != 0ULL) {
             (void)gwes_create_shared_surface(
@@ -2762,7 +3016,7 @@ extern "C" long gwes_render_resize_window(unsigned long hwnd, long x, long y, un
         return surface_status;
     }
 
-    record->surface_view = resized_view;
+    record->surface_view = *resized_view;
     record->window.frame = new_frame;
     record->window.surface_frame = new_surface_frame;
     record->window.client_offset_x = new_client_offset_x;
@@ -2826,9 +3080,14 @@ extern "C" long gwes_render_raise_window(unsigned long hwnd) {
     }
 
     free(reordered);
-    gwes_refresh_compositor_links();
+    gwes_reorder_topmost_windows();
     gwes_render_request_full_redraw();
     return 0L;
+}
+
+extern "C" void gwes_render_refresh_window_groups(void) {
+    gwes_reorder_topmost_windows();
+    gwes_render_request_full_redraw();
 }
 
 extern "C" long gwes_render_hit_test(unsigned long x, unsigned long y, unsigned long* hwnd, long* local_x, long* local_y) {
@@ -2869,6 +3128,39 @@ extern "C" long gwes_render_query_desktop_size(unsigned long* width, unsigned lo
 
     *width = g_render_state.compositor.desktop.width;
     *height = g_render_state.compositor.desktop.height;
+    return 0L;
+}
+
+/*
+ * Return one retained client surface already mapped into GWES.
+ *
+ * Menu popups and other built-in system UI render directly inside GWES, so they
+ * must reuse the compositor-owned mapping established during window creation.
+ * Handing out that retained mapping keeps repaint synchronous while avoiding the
+ * acquire/release path that would unmap the surface from the compositor.
+ *
+ * @param hwnd Stable window identifier assigned by GWES.
+ * @param surface Receives the retained surface description.
+ * @return Zero on success, or a negative status code when the handle is unknown.
+ */
+extern "C" long gwes_render_get_window_surface(unsigned long hwnd, RosGdiSurface* surface) {
+    GwesWindowRecord* record;
+
+    if (!g_render_state.ready || surface == nullptr) {
+        return -1L;
+    }
+
+    record = gwes_find_window_record(hwnd);
+    if (record == nullptr || record->window.surface.pixels == nullptr) {
+        return -1L;
+    }
+
+    surface->hwnd = hwnd;
+    surface->width = record->window.surface.width;
+    surface->height = record->window.surface.height;
+    surface->pitch = record->window.surface.pitch;
+    surface->pixel_format = record->surface_view.pixel_format;
+    surface->pixels = record->window.surface.pixels;
     return 0L;
 }
 
@@ -2988,10 +3280,28 @@ extern "C" void gwes_render_request_full_redraw(void) {
     gwes_mark_damage(gwes_desktop_rect());
 }
 
+extern "C" int gwes_render_has_pending_damage(void) {
+    return g_render_state.ready && g_render_state.compositor.damage.count != 0;
+}
+
 extern "C" void gwes_render_present_if_needed(void) {
     int index;
 
     if (!g_render_state.ready || g_render_state.compositor.damage.count == 0) {
+        return;
+    }
+    if (g_gwes_present_trace_budget != 0UL) {
+        gwes_render_tracef(
+            "gwes.exe: render trace present count=%d capacity=%lu damage=%d windows=%p records=%p",
+            g_render_state.compositor.window_count,
+            g_render_state.compositor.window_capacity,
+            g_render_state.compositor.damage.count,
+            static_cast<void*>(g_render_state.compositor.windows),
+            static_cast<void*>(g_render_state.window_records));
+        --g_gwes_present_trace_budget;
+    }
+    if (!gwes_validate_window_table_state("present")) {
+        g_render_state.compositor.damage.clear();
         return;
     }
 

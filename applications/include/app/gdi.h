@@ -1,10 +1,16 @@
 #ifndef ROS_APP_GDI_H
 #define ROS_APP_GDI_H
 
+#include "user_runtime.h"
 #include "kernel_gui__.h"
-#include "window.h"
+#include "app/gdi_handle.h"
+#include "app/gdi_bitmap.h"
+#include "app/gdi_icon.h"
+#include "app/gdi_image.h"
 
 #define ROS_GDI_CLIENT_MODULE_NAME "gdi.dll"
+
+typedef unsigned long HWND;
 
 typedef struct RosGdiSurface {
     HWND hwnd;
@@ -23,6 +29,10 @@ typedef struct RosGdiFont {
     long line_gap;
     void* handle;
 } RosGdiFont;
+
+#if defined(ROS_GDI_EXPORTS) && !defined(ROS_BUILDING_GDI_DLL)
+#error "ROS_GDI_EXPORTS is reserved for the dedicated gdi.dll wrapper build"
+#endif
 
 #if defined(ROS_GDI_EXPORTS)
 
@@ -173,20 +183,7 @@ long GdiDrawTextSurface(const RosGdiSurface* surface, const RosGdiFont* font, un
  */
 long GdiDrawTextEx(HWND hwnd, const RosGdiFont* font, unsigned long x, unsigned long y, const char* text, unsigned long foreground_color, int opaque_background, unsigned long background_color);
 
-/*
- * Acquire one window surface, draw text, and invalidate the updated bounds.
- *
- * @param hwnd Target window handle previously returned by `CreateWindow`.
- * @param font Loaded font handle.
- * @param x Text-box X coordinate relative to the window surface.
- * @param y Text-box Y coordinate relative to the window surface.
- * @param text Null-terminated string to render.
- * @param color RGB text color.
- * @return Zero on success, or a negative status code on failure.
- */
-long GdiDrawText(HWND hwnd, const RosGdiFont* font, unsigned long x, unsigned long y, const char* text, unsigned long color);
-
-#else
+#elif !defined(ROS_GDI_NO_IMPORTS)
 
 DECLARE(long, GdiGetWindowSurface, (HWND hwnd, RosGdiSurface* surface), FROM, ROS_GDI_CLIENT_MODULE_NAME, "GdiGetWindowSurface");
 DECLARE(long, GdiReleaseWindowSurface, (HWND hwnd), FROM, ROS_GDI_CLIENT_MODULE_NAME, "GdiReleaseWindowSurface");
@@ -199,7 +196,6 @@ DECLARE(long, GdiMeasureText, (const RosGdiFont* font, const char* text, unsigne
 DECLARE(long, GdiDrawTextSurfaceEx, (const RosGdiSurface* surface, const RosGdiFont* font, unsigned long x, unsigned long y, const char* text, unsigned long foreground_color, int opaque_background, unsigned long background_color), FROM, ROS_GDI_CLIENT_MODULE_NAME, "GdiDrawTextSurfaceEx");
 DECLARE(long, GdiDrawTextSurface, (const RosGdiSurface* surface, const RosGdiFont* font, unsigned long x, unsigned long y, const char* text, unsigned long color), FROM, ROS_GDI_CLIENT_MODULE_NAME, "GdiDrawTextSurface");
 DECLARE(long, GdiDrawTextEx, (HWND hwnd, const RosGdiFont* font, unsigned long x, unsigned long y, const char* text, unsigned long foreground_color, int opaque_background, unsigned long background_color), FROM, ROS_GDI_CLIENT_MODULE_NAME, "GdiDrawTextEx");
-DECLARE(long, GdiDrawText, (HWND hwnd, const RosGdiFont* font, unsigned long x, unsigned long y, const char* text, unsigned long color), FROM, ROS_GDI_CLIENT_MODULE_NAME, "GdiDrawText");
 
 #endif
 

@@ -37,6 +37,19 @@ _start:
     mov x0, #(3 << 20)
     msr cpacr_el1, x0
     isb
+
+    // Route the architected timer PPIs into Group 1 before dropping to
+    // non-secure EL1. The GICv2 PPI group bits are effectively secure-owned,
+    // so later EL1 writes do not reliably move the timer out of Group 0.
+    ldr x3, =0x08000080
+    ldr w4, [x3]
+    mov w5, #(1 << 27)
+    orr w5, w5, #(1 << 30)
+    orr w4, w4, w5
+    str w4, [x3]
+    dsb sy
+    isb
+
     mov x0, #(1 << 31)
     orr x0, x0, #(1 << 1)
     msr hcr_el2, x0

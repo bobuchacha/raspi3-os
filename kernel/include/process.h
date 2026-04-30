@@ -18,9 +18,11 @@
 
 struct Thread;
 struct HandleTables;
+struct LoaderPrivatePage;
 
 typedef U64 Pid;
 inline constexpr U32 ProcessNameCapacity = 32U;
+inline constexpr U32 ProcessImagePathCapacity = 260U;
 
 enum class ProcessState : U32 {
     Created = 0,
@@ -33,6 +35,7 @@ struct Process {
     ObjectHeader header;
     Pid id;
     char name[ProcessNameCapacity];
+    char image_path[ProcessImagePathCapacity];
     char* launch_arguments;
     ProcessState current_state;
     AddressSpace process_address_space;
@@ -40,8 +43,18 @@ struct Process {
     // stack blocks that the loader mapped into their address space.
     void* loader_image_backing;
     Size loader_image_bytes;
+    LoaderPrivatePage* loader_image_private_pages;
+    U32 loader_image_private_page_count;
     void* loader_stack_backing;
     Size loader_stack_bytes;
+    U32 user_stack_slot_bitmap;
+    Size user_stack_slot_bytes;
+    // The user heap now reserves one sparse EL0 range per process and populates
+    // pages on demand from lower-EL translation faults. Keeping the reservation
+    // bounds in the process object lets the fault path quickly reject unrelated
+    // FAR values without consulting every subsystem.
+    VirtAddr user_heap_base;
+    Size user_heap_reserved_bytes;
     // Preserve the parent PID separately from the live parent pointer so child
     // wait and task-info queries remain stable even after pointer teardown.
     Pid parent_process_id;
@@ -75,6 +88,21 @@ public:
     static Status create_user_process(const char* name, Process** out_process);
     static Status destroy_process(Process* process);
     static Status terminate_process(Pid id, U64 exit_code);
+    /**
+     * Tear down one launched process subtree rooted at `root_id`.
+     *
+     * Launcher PID links are metadata rather than ownership in the steady
+     * state, but fatal user faults still need one way to collapse the current
+     * app plus any direct or transitive children it spawned. The optional
+     * exempt PID lets the caller mark the current process for exit while
+     * deferring its final destruction until the current thread can retire.
+     *
+     * @param root_id Root process whose subtree should be terminated.
+     * @param exit_code Exit code recorded on every terminated process.
+     * @param exempt_process_id Optional PID to leave in `Exiting` state.
+     * @return StatusOK on success, or StatusNotFound when the root does not exist.
+     */
+    static Status terminate_process_tree(Pid root_id, U64 exit_code, Pid exempt_process_id = 0U);
     /**
      * Reap processes that already requested exit and are waiting for a safe
      * teardown point.

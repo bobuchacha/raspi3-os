@@ -1,6 +1,8 @@
 #ifndef ROS_APP_GWES_RENDER_H
 #define ROS_APP_GWES_RENDER_H
 
+typedef struct RosGdiSurface RosGdiSurface;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -80,6 +82,21 @@ extern "C" {
     long gwes_render_query_desktop_size(unsigned long* width, unsigned long* height);
 
     /*
+     * Expose one retained GWES-owned client surface for direct system-UI painting.
+     *
+     * Popup menus are rendered by GWES itself, so they must draw into the
+     * compositor's long-lived surface mapping rather than round-tripping through
+     * the kernel acquire/release controls that exist for external clients.
+     * Reusing the retained mapping avoids unmapping the same popup surface out
+     * from under the compositor after each repaint.
+     *
+     * @param hwnd Stable window identifier assigned by GWES.
+     * @param surface Receives the retained surface description.
+     * @return Zero on success, or a negative status code when the handle is unknown.
+     */
+    long gwes_render_get_window_surface(unsigned long hwnd, RosGdiSurface* surface);
+
+    /*
      * Show or update one Win9x-style move/resize placeholder rectangle.
      *
      * GWES uses this during interactive drag and resize so the live client
@@ -109,6 +126,13 @@ extern "C" {
      * @return Zero on success, or a negative status code when the handle is unknown.
      */
     long gwes_render_raise_window(unsigned long hwnd);
+
+    /*
+     * Reapply the stable topmost grouping after shell or app z-order changes.
+     *
+     * @return Nothing.
+     */
+    void gwes_render_refresh_window_groups(void);
 
     /*
      * Hit-test the retained client-surface stack using desktop coordinates.
@@ -168,6 +192,17 @@ extern "C" {
      * @return Nothing.
      */
     void gwes_render_request_full_redraw(void);
+
+    /*
+     * Report whether the compositor still has queued damage to present.
+     *
+     * The paint scheduler uses this to keep the window thread from sleeping
+     * between damage production and composition when no explicit wake object is
+     * available yet.
+     *
+     * @return Non-zero when at least one damage rectangle is queued.
+     */
+    int gwes_render_has_pending_damage(void);
 
     /*
      * Composite any pending damage and submit it to the display backend.

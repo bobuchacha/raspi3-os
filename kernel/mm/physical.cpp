@@ -61,6 +61,21 @@ namespace mm {
             list->size += 1;
         }
 
+        static inline void prepend_page_list(PageList* list, Page* node) {
+            if (!list || !node) return;
+            node->prev_page = NULL;
+            if (list->head != NULL) {
+                node->next_page = list->head;
+                list->head->prev_page = node;
+            }
+            else {
+                node->next_page = NULL;
+                list->tail = node;
+            }
+            list->head = node;
+            list->size += 1;
+        }
+
         static inline Page* pop_page_list(PageList* list) {
             if (!list || list->head == NULL) return NULL;
             Page* res = list->head;
@@ -237,6 +252,31 @@ namespace mm {
 
         arch::Arch::restore_interrupts(ints);
         return base_phys;
+    }
+
+    void PhysicalMemory::release_contiguous_pages(PhysAddr base_phys, unsigned int page_count) {
+        const bool ints = arch::Arch::save_and_disable_interrupts();
+
+        if (!initialized || (base_phys == 0U) || (page_count == 0U)) {
+            arch::Arch::restore_interrupts(ints);
+            return;
+        }
+
+        for (unsigned int offset = page_count; offset > 0U; --offset) {
+            const PhysAddr page_phys = base_phys + (static_cast<PhysAddr>(offset - 1U) * PageSize);
+            Page* page = page_from_phys(managed_phys_base, page_phys);
+
+            if (page == NULL) {
+                continue;
+            }
+
+            page->flags.allocated = false;
+            page->flags.kernel_page = false;
+            page->ref_count = 0U;
+            prepend_page_list(&free_pages, page);
+        }
+
+        arch::Arch::restore_interrupts(ints);
     }
 
     void PhysicalMemory::retain_page(PhysAddr phys) {

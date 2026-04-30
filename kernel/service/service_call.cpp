@@ -2,7 +2,9 @@
 
 #include "arch/aarch64/exception_debugger.h"
 #include "debug-message.h"
+#include "dll_image.h"
 #include "dll_loader.h"
+#include "file_mapping.h"
 #include "gui_service.h"
 #include "heap.h"
 #include "kernel_event.h"
@@ -12,13 +14,27 @@
 #include "mm.h"
 #include "platform.h"
 #include "process.h"
+#include "resource_manager.h"
 #include "scheduler.h"
 #include "serial.h"
 #include "shared_memory.h"
 #include "thread.h"
+#include "user_address_space_layout.h"
 #include "user_heap.h"
 #include "user_ipc.h"
 #include "vfs.h"
+
+#ifndef SERVICE_READ_FILE_TRACE_ENABLED
+#define SERVICE_READ_FILE_TRACE_ENABLED 0
+#endif
+
+#if SERVICE_READ_FILE_TRACE_ENABLED
+#define SERVICE_READ_FILE_TRACE(...) KRETAIL(__VA_ARGS__)
+#else
+#define SERVICE_READ_FILE_TRACE(...) \
+    do {                           \
+    } while (0)
+#endif
 
 extern "C" [[noreturn]] void scheduler_thread_exit_current(void);
 
@@ -27,15 +43,40 @@ namespace {
     inline constexpr U64 UserLoaderActionBit = 1ULL << 63;
     inline constexpr Size ServicePathCapacity = 260U;
     inline constexpr Size ServiceTextCapacity = 512U;
-    inline constexpr Size VfsReadProgressMinimumBytes = 4UL * 1024UL;
-    inline constexpr U64 SyscallCount = 42ULL;
+    inline constexpr Size ServiceModuleCapacity = 64U;
+    inline constexpr Size ServiceModuleChunkCapacity = 8U;
+    inline constexpr U64 SyscallCount = 56ULL;
     inline constexpr U32 IpcQueueInitialCapacity = 32U;
+    inline constexpr Size UserThreadStackSlotBytes = user_address_space::InitialThreadStackSlotBytes;
+    inline constexpr U32 UserThreadStackSlotCount = static_cast<U32>(user_address_space::InitialThreadStackSlotCount);
+    // The current cooperative scheduler can starve low-priority background
+    // workers indefinitely while normal-priority UI threads keep cycling
+    // through message-pump and polling paths. Keep async process loading at the
+    // normal scheduler band so queued Explorer launches actually run.
+    inline constexpr U8 AsyncSpawnWorkerPriority = ThreadPriorityNormal;
+    // Large EL0 asset reads still execute in bounded chunks so one syscall does
+    // not spend unbounded time inside a single VFS iteration. Fairness now
+    // comes from timer-driven kernel preemption rather than an explicit
+    // scheduler yield after each slice.
+    inline constexpr Size ServiceReadFileChunkBytes = 32U * 1024U;
+    inline constexpr unsigned long UserTaskResourceFlagImageSectionTruncated = 1UL;
+
+    typedef DllLoaderSectionSnapshot UserTaskSectionInfo;
 
     typedef struct UserDirectoryEntry {
         char name[128];
         unsigned long size;
         unsigned long attr;
     } UserDirectoryEntry;
+
+    typedef struct UserPathInfo {
+        unsigned long size;
+        unsigned long type;
+        unsigned long backend_kind;
+        unsigned long flags;
+        unsigned long volume_letter;
+        char device_name[16];
+    } UserPathInfo;
 
     typedef struct UserTaskInfo {
         long id;
@@ -50,12 +91,44 @@ namespace {
         char name[32];
     } UserTaskInfo;
 
+    typedef struct UserTaskResourceInfo {
+        unsigned long image_bytes;
+        unsigned long stack_bytes;
+        unsigned long heap_bytes;
+        unsigned long total_bytes;
+        unsigned long image_base;
+        unsigned long flags;
+        unsigned long image_section_count;
+        char image_path[260];
+        UserTaskSectionInfo image_sections[DllLoaderSnapshotSectionCapacity];
+    } UserTaskResourceInfo;
+
+    typedef struct UserTaskModuleInfo {
+        unsigned long image_base;
+        unsigned long image_bytes;
+        unsigned long shared_backing_bytes;
+        unsigned long private_backing_bytes;
+        unsigned long shared_reference_count;
+        unsigned long flags;
+        char module_name[64];
+        char path[260];
+        unsigned long section_count;
+        UserTaskSectionInfo sections[DllLoaderSnapshotSectionCapacity];
+    } UserTaskModuleInfo;
+
     typedef struct UserMemInfo {
         unsigned long total_bytes;
         unsigned long free_bytes;
         unsigned long page_size;
         unsigned long free_pages;
     } UserMemInfo;
+
+    typedef struct UserAsyncSpawnResult {
+        unsigned long request_id;
+        long status;
+        long pid;
+        unsigned long reserved0;
+    } UserAsyncSpawnResult;
 
     typedef struct IpcProcessQueue {
         U64 pid;
@@ -68,7 +141,205 @@ namespace {
         IpcProcessQueue* prev;
     } IpcProcessQueue;
 
+    typedef struct AsyncSpawnRequest {
+        U64 request_id;
+        U64 parent_process_id;
+        char* path;
+        char* name;
+        char* args;
+        AsyncSpawnRequest* next;
+        AsyncSpawnRequest* prev;
+    } AsyncSpawnRequest;
+
+    typedef struct AsyncSpawnCompletion {
+        U64 request_id;
+        U64 parent_process_id;
+        long status;
+        long pid;
+        AsyncSpawnCompletion* next;
+        AsyncSpawnCompletion* prev;
+    } AsyncSpawnCompletion;
+
     typedef Status(*ServiceHandler)(ServiceFrame* frame);
+
+    /**
+     * Return one scheduler-backed millisecond timestamp for syscall profiling.
+     *
+     * Spawn diagnostics need to distinguish user-string marshaling, loader
+     * work, and final enqueue time, so the syscall layer keeps its own simple
+     * timestamp helper instead of reusing loader-local utilities.
+     *
+     * @return Current uptime in milliseconds.
+     */
+    U64 service_now_msec(void) {
+        return KernelTime::ticks_to_milliseconds(Scheduler::tick_count());
+    }
+
+    /**
+     * Copy one optional text value into a fixed kernel buffer while preserving a fallback.
+     *
+     * @param destination Target output buffer.
+     * @param capacity Size of the destination buffer in bytes.
+     * @param source Preferred source string.
+     * @param fallback Replacement string when source is null or empty.
+     * @return None.
+     */
+    void copy_text(char* destination, Size capacity, const char* source, const char* fallback) {
+        Size index = 0;
+        const char* active = ((source != NULL) && (source[0] != '\0')) ? source : fallback;
+
+        if ((destination == NULL) || (capacity == 0U)) {
+            return;
+        }
+
+        while ((index + 1U < capacity) && (active[index] != '\0')) {
+            destination[index] = active[index];
+            ++index;
+        }
+
+        destination[index] = '\0';
+    }
+
+    /**
+     * Return the validated packed-image header stored at the start of one backing.
+     *
+     * User process images keep their packed header bytes inside the resident image
+     * backing. The task snapshot path only needs lightweight structural validation
+     * before it can expose stable section ranges to rcman.
+     *
+     * @param image_backing Resident EXE backing owned by the process loader.
+     * @return Header pointer when the backing looks like a valid packed image.
+     */
+    const dll_header* task_image_header_from_backing(const void* image_backing) {
+        const dll_header* header = reinterpret_cast<const dll_header*>(image_backing);
+
+        if (image_backing == NULL) {
+            return NULL;
+        }
+        if (header->magic != DLL_IMAGE_MAGIC) {
+            return NULL;
+        }
+        if (header->header_size < sizeof(dll_header)) {
+            return NULL;
+        }
+
+        return header;
+    }
+
+    /**
+     * Return the section table embedded in one resident process image backing.
+     *
+     * The loader has already validated the section table during image load, but the
+     * resource syscall still guards against malformed offsets so userspace cannot
+     * observe garbage after later memory corruption.
+     *
+     * @param image_backing Resident EXE backing owned by the process loader.
+     * @return Section-table pointer, or NULL when the backing is not usable.
+     */
+    const dll_section* task_image_sections_from_backing(const void* image_backing) {
+        const dll_header* header = task_image_header_from_backing(image_backing);
+
+        if (header == NULL) {
+            return NULL;
+        }
+        if (header->section_table_offset > header->header_size) {
+            return NULL;
+        }
+        if ((header->section_count != 0U)
+            && ((static_cast<U64>(header->section_table_offset)
+                + (static_cast<U64>(header->section_count) * sizeof(dll_section))) > header->header_size)) {
+            return NULL;
+        }
+
+        return reinterpret_cast<const dll_section*>(static_cast<const U8*>(image_backing) + header->section_table_offset);
+    }
+
+    /**
+     * Copy one packed section name into a stable C string for snapshot export.
+     *
+     * The image format stores section names as a fixed eight-byte field. rcman wants
+     * plain C strings, so the syscall layer normalizes the name once while building
+     * the snapshot record.
+     *
+     * @param section Packed section record whose name should be copied.
+     * @param destination Output buffer receiving the normalized name.
+     * @param capacity Destination capacity in bytes.
+     * @return Nothing.
+     */
+    void copy_task_section_name(const dll_section* section, char* destination, Size capacity) {
+        Size index = 0U;
+
+        if ((section == NULL) || (destination == NULL) || (capacity == 0U)) {
+            return;
+        }
+
+        while ((index < sizeof(section->name)) && ((index + 1U) < capacity) && (section->name[index] != '\0')) {
+            destination[index] = section->name[index];
+            ++index;
+        }
+        destination[index] = '\0';
+    }
+
+    /**
+     * Copy one image's section layout into the fixed userspace snapshot format.
+     *
+     * rcman only needs the final virtual ranges and raw section flags for display.
+     * Keeping this translation local to the syscall path avoids teaching userspace
+     * how to parse packed image headers directly.
+     *
+     * @param image_backing Resident image backing to inspect.
+     * @param image_base Final virtual base where the image is mapped.
+     * @param sections Destination section array.
+     * @param capacity Number of destination slots available.
+     * @param truncated_out Receives whether some sections did not fit.
+     * @return Number of copied section records.
+     */
+    unsigned long capture_task_section_layout(
+        const void* image_backing,
+        VirtAddr image_base,
+        UserTaskSectionInfo* sections,
+        unsigned long capacity,
+        bool* truncated_out) {
+        const dll_header* header = task_image_header_from_backing(image_backing);
+        const dll_section* section_table = task_image_sections_from_backing(image_backing);
+        unsigned long copied_count = 0UL;
+        bool truncated = false;
+
+        if (truncated_out != NULL) {
+            *truncated_out = false;
+        }
+        if ((header == NULL) || (section_table == NULL) || ((sections == NULL) && (capacity != 0UL))) {
+            return 0UL;
+        }
+
+        for (U32 section_index = 0U; section_index < header->section_count; ++section_index) {
+            const dll_section* section = &section_table[section_index];
+            const U64 section_span = (section->virtual_size >= section->raw_data_size)
+                ? section->virtual_size
+                : section->raw_data_size;
+
+            if (section_span == 0U) {
+                continue;
+            }
+            if (copied_count >= capacity) {
+                truncated = true;
+                continue;
+            }
+
+            memzero(&sections[copied_count], sizeof(sections[copied_count]));
+            sections[copied_count].start_address = static_cast<unsigned long>(image_base + section->virtual_address);
+            sections[copied_count].end_address = static_cast<unsigned long>(image_base + section->virtual_address + section_span);
+            sections[copied_count].flags = static_cast<unsigned long>(section->flags);
+            copy_task_section_name(section, sections[copied_count].name, sizeof(sections[copied_count].name));
+            copied_count += 1UL;
+        }
+
+        if (truncated_out != NULL) {
+            *truncated_out = truncated;
+        }
+
+        return copied_count;
+    }
 
     typedef struct DirectoryLookupContext {
         U64 target_index;
@@ -79,6 +350,383 @@ namespace {
 
     IpcProcessQueue* g_ipc_queue_head;
     IpcProcessQueue* g_ipc_queue_tail;
+    AsyncSpawnRequest* g_async_spawn_request_head;
+    AsyncSpawnRequest* g_async_spawn_request_tail;
+    AsyncSpawnCompletion* g_async_spawn_completion_head;
+    AsyncSpawnCompletion* g_async_spawn_completion_tail;
+    U64 g_async_spawn_next_request_id = 1ULL;
+    Process* g_async_spawn_worker_process;
+    Thread* g_async_spawn_worker_thread;
+
+    /**
+     * Mask interrupts while mutating the async launch queues.
+     *
+     * The background launcher infrastructure is implemented as intrusive lists
+     * inside the syscall layer. Disabling interrupts here keeps those list
+     * updates atomic against timer-driven reschedules without introducing a new
+     * lock primitive into the kernel service path.
+     *
+     * @return Saved interrupt-enabled state token.
+     */
+    bool async_spawn_lock(void) {
+        return arch::Arch::save_and_disable_interrupts();
+    }
+
+    /**
+     * Restore the previous interrupt state after one queue mutation.
+     *
+     * @param interrupts_enabled Saved interrupt-enabled state token.
+     * @return Nothing.
+     */
+    void async_spawn_unlock(bool interrupts_enabled) {
+        arch::Arch::restore_interrupts(interrupts_enabled);
+    }
+
+    /**
+     * Duplicate one syscall-owned text buffer onto the kernel heap.
+     *
+     * Async launch requests outlive the caller's syscall frame, so the worker
+     * queue must own durable copies of the path, visible name, and arguments.
+     *
+     * @param text Source string to copy.
+     * @return Heap-owned copy, or NULL when allocation fails.
+     */
+    char* async_spawn_duplicate_text(const char* text) {
+        Size length = 0U;
+        char* duplicate;
+
+        if (text == NULL) {
+            return NULL;
+        }
+
+        while (text[length] != '\0') {
+            ++length;
+        }
+
+        duplicate = static_cast<char*>(Heap::alloc(length + 1U, alignof(char)));
+        if (duplicate == NULL) {
+            return NULL;
+        }
+
+        memcopy(duplicate, text, length);
+        duplicate[length] = '\0';
+        return duplicate;
+    }
+
+    /**
+     * Release one queued async launch request and its heap-owned fields.
+     *
+     * @param request Request node to release.
+     * @return Nothing.
+     */
+    void async_spawn_free_request(AsyncSpawnRequest* request) {
+        if (request == NULL) {
+            return;
+        }
+
+        if (request->path != NULL) {
+            Heap::free(request->path);
+        }
+        if (request->name != NULL) {
+            Heap::free(request->name);
+        }
+        if (request->args != NULL) {
+            Heap::free(request->args);
+        }
+        Heap::free(request);
+    }
+
+    /**
+     * Release one async launch completion node.
+     *
+     * @param completion Completion node to release.
+     * @return Nothing.
+     */
+    void async_spawn_free_completion(AsyncSpawnCompletion* completion) {
+        if (completion != NULL) {
+            Heap::free(completion);
+        }
+    }
+
+    /**
+     * Append one request to the async launch worker queue.
+     *
+     * @param request Prepared request node.
+     * @return Nothing.
+     */
+    void async_spawn_link_request(AsyncSpawnRequest* request) {
+        if (request == NULL) {
+            return;
+        }
+
+        request->next = NULL;
+        request->prev = g_async_spawn_request_tail;
+        if (g_async_spawn_request_tail != NULL) {
+            g_async_spawn_request_tail->next = request;
+        }
+        else {
+            g_async_spawn_request_head = request;
+        }
+        g_async_spawn_request_tail = request;
+    }
+
+    /**
+     * Pop the oldest pending async launch request.
+     *
+     * @return Detached request node, or NULL when the queue is empty.
+     */
+    AsyncSpawnRequest* async_spawn_pop_request(void) {
+        AsyncSpawnRequest* request;
+        bool interrupts_enabled;
+
+        interrupts_enabled = async_spawn_lock();
+        request = g_async_spawn_request_head;
+        if (request != NULL) {
+            g_async_spawn_request_head = request->next;
+            if (g_async_spawn_request_head != NULL) {
+                g_async_spawn_request_head->prev = NULL;
+            }
+            else {
+                g_async_spawn_request_tail = NULL;
+            }
+            request->next = NULL;
+            request->prev = NULL;
+        }
+        async_spawn_unlock(interrupts_enabled);
+        return request;
+    }
+
+    /**
+     * Append one finished launch result for later user-mode collection.
+     *
+     * This intentionally uses a dedicated completion queue instead of the
+     * generic IPC broker so UI code can consume async spawn results without
+     * interfering with window-server traffic in the same process.
+     *
+     * @param parent_process_id Launching process identifier.
+     * @param request_id Stable async request identifier.
+     * @param status Final kernel status for the launch.
+     * @param pid Created child pid on success, or zero on failure.
+     * @return StatusOK on success, or a negative allocation/liveness error.
+     */
+    Status async_spawn_queue_completion(U64 parent_process_id, U64 request_id, long status, long pid) {
+        AsyncSpawnCompletion* completion;
+        bool interrupts_enabled;
+
+        if ((parent_process_id == 0U) || (ProcessManager::find_process(parent_process_id) == NULL)) {
+            return StatusNotFound;
+        }
+
+        completion = static_cast<AsyncSpawnCompletion*>(Heap::alloc(sizeof(AsyncSpawnCompletion), alignof(AsyncSpawnCompletion)));
+        if (completion == NULL) {
+            return StatusNoMemory;
+        }
+
+        memzero(completion, sizeof(*completion));
+        completion->parent_process_id = parent_process_id;
+        completion->request_id = request_id;
+        completion->status = status;
+        completion->pid = pid;
+
+        interrupts_enabled = async_spawn_lock();
+        completion->next = NULL;
+        completion->prev = g_async_spawn_completion_tail;
+        if (g_async_spawn_completion_tail != NULL) {
+            g_async_spawn_completion_tail->next = completion;
+        }
+        else {
+            g_async_spawn_completion_head = completion;
+        }
+        g_async_spawn_completion_tail = completion;
+        async_spawn_unlock(interrupts_enabled);
+        return StatusOK;
+    }
+
+    /**
+     * Remove the oldest queued completion for one parent process.
+     *
+     * @param parent_process_id Launching process identifier.
+     * @return Detached completion node, or NULL when none are queued.
+     */
+    AsyncSpawnCompletion* async_spawn_take_completion(U64 parent_process_id) {
+        AsyncSpawnCompletion* completion = NULL;
+        bool interrupts_enabled;
+
+        interrupts_enabled = async_spawn_lock();
+        for (AsyncSpawnCompletion* cursor = g_async_spawn_completion_head; cursor != NULL; cursor = cursor->next) {
+            if (cursor->parent_process_id != parent_process_id) {
+                continue;
+            }
+
+            completion = cursor;
+            if (cursor->prev != NULL) {
+                cursor->prev->next = cursor->next;
+            }
+            else {
+                g_async_spawn_completion_head = cursor->next;
+            }
+            if (cursor->next != NULL) {
+                cursor->next->prev = cursor->prev;
+            }
+            else {
+                g_async_spawn_completion_tail = cursor->prev;
+            }
+            cursor->next = NULL;
+            cursor->prev = NULL;
+            break;
+        }
+        async_spawn_unlock(interrupts_enabled);
+        return completion;
+    }
+
+    /**
+     * Execute one queued launch request on the dedicated background worker.
+     *
+     * Moving `Loader::spawn_user_process()` here keeps the expensive image load
+     * and address-space bring-up work off the caller's syscall path so UI input
+     * and repaint traffic can continue while the child is still loading.
+     *
+     * @param request Queued launch request to execute.
+     * @return Nothing.
+     */
+    void async_spawn_execute_request(AsyncSpawnRequest* request) {
+        Thread* main_thread = NULL;
+        Process* child_process = NULL;
+        Process* parent_process;
+        Status status;
+        long pid = 0L;
+
+        if (request == NULL) {
+            return;
+        }
+
+        KRETAIL(
+            "[async-spawn] execute request=%llu parent=%llu path=%s name=%s args=%s\n",
+            static_cast<unsigned long long>(request->request_id),
+            static_cast<unsigned long long>(request->parent_process_id),
+            (request->path != NULL) ? request->path : "<null>",
+            (request->name != NULL) ? request->name : "<null>",
+            (request->args != NULL) ? request->args : "");
+
+        status = Loader::spawn_user_process(
+            request->path,
+            (request->name != NULL) && (request->name[0] != '\0') ? request->name : NULL,
+            request->args != NULL ? request->args : "",
+            &main_thread);
+        if ((status == StatusOK) && ((main_thread == NULL) || (main_thread->parent == NULL))) {
+            status = StatusFault;
+        }
+
+        if (status == StatusOK) {
+            child_process = main_thread->parent;
+            parent_process = ProcessManager::find_process(request->parent_process_id);
+            if (parent_process != NULL) {
+                child_process->parent = parent_process;
+                child_process->parent_process_id = parent_process->id;
+            }
+
+            status = Scheduler::enqueue(main_thread);
+            if (status != StatusOK) {
+                (void)ProcessManager::destroy_process(child_process);
+                child_process = NULL;
+            }
+        }
+
+        if (child_process != NULL) {
+            pid = static_cast<long>(child_process->id);
+        }
+
+        KRETAIL(
+            "[async-spawn] finished request=%llu status=%ld pid=%ld\n",
+            static_cast<unsigned long long>(request->request_id),
+            static_cast<long>(status),
+            pid);
+
+        if (async_spawn_queue_completion(request->parent_process_id, request->request_id, static_cast<long>(status), pid) != StatusOK) {
+            KRETAIL(
+                "[loader-prof] async-spawn-completion-drop request=%llu parent=%llu status=%ld pid=%ld\n",
+                static_cast<unsigned long long>(request->request_id),
+                static_cast<unsigned long long>(request->parent_process_id),
+                static_cast<long>(status),
+                pid);
+        }
+
+        async_spawn_free_request(request);
+    }
+
+    /**
+     * Run the dedicated async spawn worker thread forever.
+     *
+     * @return Never returns.
+     */
+    [[noreturn]] void service_async_spawn_worker_entry(void) {
+        KRETAIL("[async-spawn] worker-start thread=%llu\n", static_cast<unsigned long long>(Scheduler::current()->id));
+
+        for (;;) {
+            AsyncSpawnRequest* request = async_spawn_pop_request();
+
+            if (request == NULL) {
+                KRETAIL("[async-spawn] worker-wait\n");
+                // The `virt` scheduler still depends on cooperative timer progress in
+                // several paths, so a pure sleep/poll worker can stall forever when no
+                // tick source happens to wake it. Block here and let the enqueue path
+                // explicitly requeue the worker as soon as a launch request arrives.
+                (void)Scheduler::block_current(WaitReason::Event, NULL);
+                continue;
+            }
+
+            KRETAIL(
+                "[async-spawn] worker-dequeue request=%llu parent=%llu\n",
+                static_cast<unsigned long long>(request->request_id),
+                static_cast<unsigned long long>(request->parent_process_id));
+
+            async_spawn_execute_request(request);
+        }
+    }
+
+    /**
+     * Start the permanent kernel worker that owns async process loading.
+     *
+     * @return StatusOK when the worker is ready to accept requests.
+     */
+    Status ensure_async_spawn_worker(void) {
+        Process* process = NULL;
+        Thread* thread = NULL;
+        Status status;
+
+        if ((g_async_spawn_worker_process != NULL) && (g_async_spawn_worker_thread != NULL)) {
+            return StatusOK;
+        }
+
+        status = ProcessManager::create_process("svc-launch", &process);
+        if (status != StatusOK) {
+            return status;
+        }
+
+        process->header.flags = process->header.flags | ObjectFlags::Permanent | ObjectFlags::Kernel;
+        status = ThreadManager::create_thread(
+            process,
+            "async-launch",
+            reinterpret_cast<VirtAddr>(&service_async_spawn_worker_entry),
+            &thread,
+            AsyncSpawnWorkerPriority,
+            ThreadDefaultQuantumTicks);
+        if (status != StatusOK) {
+            (void)ProcessManager::destroy_process(process);
+            return status;
+        }
+
+        thread->header.flags = thread->header.flags | ObjectFlags::Permanent | ObjectFlags::Kernel;
+        status = Scheduler::enqueue(thread);
+        if (status != StatusOK) {
+            (void)ProcessManager::destroy_process(process);
+            return status;
+        }
+
+        g_async_spawn_worker_process = process;
+        g_async_spawn_worker_thread = thread;
+        return StatusOK;
+    }
 
     /**
      * Report whether one character is ASCII whitespace.
@@ -249,6 +897,75 @@ namespace {
         if (size != 0U) {
             memcopy(kernel_buffer, user_buffer, size);
         }
+        return StatusOK;
+    }
+
+    /**
+     * Reserve one extra user-thread stack slot inside the process stack arena.
+     *
+     * @param process Owning user process.
+     * @param slot_index_out Receives the allocated slot index.
+     * @param stack_base_out Receives the mapped stack base.
+     * @param stack_top_out Receives the initial stack pointer.
+     * @param backing_out Receives the retained backing block.
+     * @return StatusOK on success, or a propagated allocation/map failure.
+     */
+    Status reserve_user_thread_stack(
+        Process* process,
+        U32* slot_index_out,
+        VirtAddr* stack_base_out,
+        VirtAddr* stack_top_out,
+        void** backing_out) {
+        U32 slot_index;
+        U8* stack_backing;
+        VmMapping stack_mapping = {};
+        Status status;
+
+        if ((process == NULL)
+            || (slot_index_out == NULL)
+            || (stack_base_out == NULL)
+            || (stack_top_out == NULL)
+            || (backing_out == NULL)) {
+            return StatusInvalidArgument;
+        }
+        if ((process->user_stack_slot_bytes == 0U) || (process->user_stack_slot_bytes != UserThreadStackSlotBytes)) {
+            return StatusNotSupported;
+        }
+
+        for (slot_index = 1U; slot_index < UserThreadStackSlotCount && slot_index < 32U; ++slot_index) {
+            if ((process->user_stack_slot_bitmap & (1U << slot_index)) == 0U) {
+                break;
+            }
+        }
+        if ((slot_index >= UserThreadStackSlotCount) || (slot_index >= 32U)) {
+            return StatusNoSpace;
+        }
+
+        stack_backing = static_cast<U8*>(KernelResourceManager::allocate(
+            KernelResourceKind::LoaderStackBacking,
+            UserThreadStackSlotBytes,
+            mm::PageSize,
+            0ULL,
+            "user-thread-stack"));
+        if (stack_backing == NULL) {
+            return StatusNoMemory;
+        }
+
+        *stack_base_out = user_address_space::InitialStackBase + (static_cast<VirtAddr>(slot_index) * UserThreadStackSlotBytes);
+        *stack_top_out = *stack_base_out + UserThreadStackSlotBytes;
+        stack_mapping.virtual_base = *stack_base_out;
+        stack_mapping.physical_base = mm::MemoryManager::kernel_to_physical(reinterpret_cast<VirtAddr>(stack_backing));
+        stack_mapping.length = UserThreadStackSlotBytes;
+        stack_mapping.flags = PagePresent | PageWritable | PageUser;
+        status = mm::MemoryManager::map(&process->process_address_space, &stack_mapping);
+        if (status != StatusOK) {
+            KernelResourceManager::release(stack_backing);
+            return status;
+        }
+
+        process->user_stack_slot_bitmap |= (1U << slot_index);
+        *slot_index_out = slot_index;
+        *backing_out = stack_backing;
         return StatusOK;
     }
 
@@ -612,12 +1329,20 @@ namespace {
 
     Status copy_kernel_string_to_user(const char* kernel_text, char* user_text, Size capacity) {
         Size index = 0U;
+        Process* process;
+        Status status;
 
         if ((kernel_text == NULL) || (user_text == NULL) || (capacity == 0U)) {
             return StatusInvalidArgument;
         }
         if (!user_range_valid(user_text, capacity)) {
             return StatusInvalidArgument;
+        }
+
+        process = Scheduler::current_process();
+        status = UserHeap::ensure_range_mapped(process, reinterpret_cast<VirtAddr>(user_text), capacity);
+        if (status != StatusOK) {
+            return status;
         }
 
         while ((index + 1U) < capacity && (kernel_text[index] != '\0')) {
@@ -630,11 +1355,20 @@ namespace {
     }
 
     Status copy_kernel_bytes_to_user(void* user_buffer, const void* kernel_buffer, Size size) {
+        Process* process;
+        Status status;
+
         if ((user_buffer == NULL) || ((kernel_buffer == NULL) && (size != 0U))) {
             return StatusInvalidArgument;
         }
         if (!user_range_valid(user_buffer, size == 0U ? 1U : size)) {
             return StatusInvalidArgument;
+        }
+
+        process = Scheduler::current_process();
+        status = UserHeap::ensure_range_mapped(process, reinterpret_cast<VirtAddr>(user_buffer), size);
+        if (status != StatusOK) {
+            return status;
         }
 
         if (size != 0U) {
@@ -676,6 +1410,40 @@ namespace {
         return (ch >= 'A') && (ch <= 'Z');
     }
 
+    /**
+     * Detect one bare device-alias path supplied by userspace.
+     *
+     * Userspace shell commands address device aliases with names like `COM1:`
+     * or `UART:`. Those are already normalized VFS paths, so the syscall layer
+     * must preserve them instead of prefixing the current drive.
+     *
+     * @param user_path Caller-supplied user path text.
+     * @return True when the path is a bare alias ending in `:`.
+     */
+    bool is_device_alias_path(const char* user_path) {
+        Size index = 0U;
+
+        if ((user_path == NULL) || (user_path[0] == '\0')) {
+            return false;
+        }
+
+        while (user_path[index] != '\0') {
+            if ((user_path[index] == '/') || (user_path[index] == '\\')) {
+                return false;
+            }
+            if (user_path[index] == ':') {
+                if (user_path[index + 1U] != '\0') {
+                    return false;
+                }
+
+                return (index != 1U) || !is_drive_letter(user_path[0]);
+            }
+            ++index;
+        }
+
+        return false;
+    }
+
     Status translate_user_path(const char* user_path, char* kernel_path, Size capacity) {
         Size write_index = 0U;
         const char* cursor = user_path;
@@ -687,7 +1455,7 @@ namespace {
             return StatusInvalidArgument;
         }
 
-        if (is_drive_letter(user_path[0]) && (user_path[1] == ':')) {
+        if ((is_drive_letter(user_path[0]) && (user_path[1] == ':')) || is_device_alias_path(user_path)) {
             while ((cursor[write_index] != '\0') && ((write_index + 1U) < capacity)) {
                 kernel_path[write_index] = cursor[write_index];
                 ++write_index;
@@ -750,6 +1518,31 @@ namespace {
         entry->attr = (node->type == VfsNodeTypeDirectory) ? 0x10UL : 0UL;
     }
 
+    /**
+     * Copy one resolved VFS node into the userspace path-info ABI shape.
+     *
+     * The syscall intentionally exposes only the stable metadata needed for
+     * runtime smoke tests and shell-style path classification, not raw kernel
+     * object pointers or backend-private identifiers.
+     *
+     * @param info Destination userspace ABI record.
+     * @param node Resolved VFS node.
+     * @return None.
+     */
+    void fill_path_info(UserPathInfo* info, const VfsNode* node) {
+        if ((info == NULL) || (node == NULL)) {
+            return;
+        }
+
+        memzero(info, sizeof(*info));
+        info->size = static_cast<unsigned long>(node->size_bytes);
+        info->type = static_cast<unsigned long>(node->type);
+        info->backend_kind = static_cast<unsigned long>(node->backend_kind);
+        info->flags = static_cast<unsigned long>(node->flags);
+        info->volume_letter = static_cast<unsigned long>(static_cast<unsigned char>(node->volume_letter));
+        copy_text(info->device_name, sizeof(info->device_name), node->device_name, "");
+    }
+
     Status directory_lookup_visitor(const char* name, const VfsNode* node, void* context) {
         DirectoryLookupContext* lookup = static_cast<DirectoryLookupContext*>(context);
 
@@ -807,9 +1600,103 @@ namespace {
         info->name[index] = '\0';
     }
 
+    /**
+     * Count the number of set bits in one 32-bit bitmap.
+     *
+     * The process record stores active user-thread stack slots as a compact
+     * bitmap, so the resource snapshot needs a tiny local popcount helper.
+     *
+     * @param value Bitset to count.
+     * @return Number of set bits.
+     */
+    Size count_bits32(U32 value) {
+        Size count = 0U;
+
+        while (value != 0U) {
+            count += static_cast<Size>(value & 1U);
+            value >>= 1U;
+        }
+
+        return count;
+    }
+
+    /**
+     * Populate one task resource snapshot from a kernel process object.
+     *
+     * This reports the committed owner-side bytes we can prove today: the
+     * loaded image, the loader stack, the committed user-thread stacks, and
+     * the live user-heap pages mapped for that process.
+     *
+     * @param process Kernel process being exported to userspace.
+     * @param info Destination snapshot that will be copied back through the syscall.
+     * @return Nothing.
+     */
+    void fill_task_resource_info(Process* process, UserTaskResourceInfo* info) {
+        Size user_stack_slots;
+        Size stack_bytes;
+        Size heap_bytes;
+        bool sections_truncated = false;
+
+        if ((process == NULL) || (info == NULL)) {
+            return;
+        }
+
+        memzero(info, sizeof(*info));
+        user_stack_slots = count_bits32(process->user_stack_slot_bitmap);
+        stack_bytes = process->loader_stack_bytes + (user_stack_slots * process->user_stack_slot_bytes);
+        heap_bytes = UserHeap::mapped_heap_bytes(process);
+
+        info->image_bytes = static_cast<unsigned long>(process->loader_image_bytes);
+        info->stack_bytes = static_cast<unsigned long>(stack_bytes);
+        info->heap_bytes = static_cast<unsigned long>(heap_bytes);
+        info->total_bytes = static_cast<unsigned long>(process->loader_image_bytes + stack_bytes + heap_bytes);
+        info->image_base = (process->loader_image_backing != NULL)
+            ? static_cast<unsigned long>(user_address_space::ExecutableBase)
+            : 0UL;
+        copy_text(info->image_path, sizeof(info->image_path), process->image_path, "");
+        info->image_section_count = capture_task_section_layout(
+            process->loader_image_backing,
+            user_address_space::ExecutableBase,
+            info->image_sections,
+            COUNT_OF(info->image_sections),
+            &sections_truncated);
+        if (sections_truncated) {
+            info->flags |= UserTaskResourceFlagImageSectionTruncated;
+        }
+    }
+
     Status service_unsupported(ServiceFrame* frame) {
         frame->result = encode_status(StatusNotSupported);
         return StatusNotSupported;
+    }
+
+    Status service_kill(ServiceFrame* frame) {
+        Process* current_process = Scheduler::current_process();
+        Process* target_process;
+        Pid target_pid = static_cast<Pid>(frame->arguments[0]);
+        Status status;
+
+        if (target_pid == 0U) {
+            frame->result = encode_status(StatusInvalidArgument);
+            return StatusInvalidArgument;
+        }
+
+        target_process = ProcessManager::find_process(target_pid);
+        if (target_process == NULL) {
+            frame->result = encode_status(StatusNotFound);
+            return StatusNotFound;
+        }
+
+        if ((current_process != NULL && target_process == current_process)
+            || object_has_flag(target_process->header.flags, ObjectFlags::Kernel)
+            || object_has_flag(target_process->header.flags, ObjectFlags::Permanent)) {
+            frame->result = encode_status(StatusBusy);
+            return StatusBusy;
+        }
+
+        status = ProcessManager::terminate_process(target_pid, 0U);
+        frame->result = (status == StatusOK) ? 0U : encode_status(status);
+        return status;
     }
 
     Status service_write(ServiceFrame* frame) {
@@ -948,6 +1835,126 @@ namespace {
         return status;
     }
 
+    /**
+     * Create one kernel-resident file mapping object.
+     *
+     * @param frame Active syscall frame.
+     * @return StatusOK on success, or a negative kernel status code.
+     */
+    Status service_file_mapping_create(ServiceFrame* frame) {
+        char file_path[ServicePathCapacity];
+        FileMappingId handle = 0U;
+        Status status;
+
+        status = copy_user_string(reinterpret_cast<const char*>(frame->arguments[0]), file_path, sizeof(file_path));
+        if (status != StatusOK) {
+            frame->result = encode_status(status);
+            return status;
+        }
+
+        status = FileMapping::CreateFileMapping(file_path, static_cast<unsigned long>(frame->arguments[1]), &handle);
+        frame->result = (status == StatusOK) ? handle : encode_status(status);
+        return status;
+    }
+
+    /**
+     * Open one existing kernel-resident file mapping object.
+     *
+     * @param frame Active syscall frame.
+     * @return StatusOK on success, or a negative kernel status code.
+     */
+    Status service_file_mapping_open(ServiceFrame* frame) {
+        char file_path[ServicePathCapacity];
+        FileMappingId handle = 0U;
+        Status status;
+
+        status = copy_user_string(reinterpret_cast<const char*>(frame->arguments[0]), file_path, sizeof(file_path));
+        if (status != StatusOK) {
+            frame->result = encode_status(status);
+            return status;
+        }
+
+        status = FileMapping::OpenFileMapping(file_path, static_cast<unsigned long>(frame->arguments[1]), &handle);
+        frame->result = (status == StatusOK) ? handle : encode_status(status);
+        return status;
+    }
+
+    /**
+     * Release one file-mapping handle.
+     *
+     * @param frame Active syscall frame.
+     * @return StatusOK on success, or a negative kernel status code.
+     */
+    Status service_file_mapping_close(ServiceFrame* frame) {
+        Status status = FileMapping::CloseFileMapping(frame->arguments[0]);
+
+        frame->result = (status == StatusOK) ? 0U : encode_status(status);
+        return status;
+    }
+
+    /**
+     * Map one file mapping into the current process address space.
+     *
+     * @param frame Active syscall frame.
+     * @return StatusOK on success, or a negative kernel status code.
+     */
+    Status service_file_mapping_map(ServiceFrame* frame) {
+        Process* process = Scheduler::current_process();
+        void* view_address = NULL;
+        Status status;
+
+        if (process == NULL) {
+            frame->result = encode_status(StatusInvalidArgument);
+            return StatusInvalidArgument;
+        }
+
+        status = FileMapping::MapViewOfFile(
+            process,
+            frame->arguments[0],
+            static_cast<unsigned long>(frame->arguments[1]),
+            static_cast<unsigned long>(frame->arguments[2]),
+            &view_address);
+        frame->result = (status == StatusOK) ? reinterpret_cast<U64>(view_address) : encode_status(status);
+        return status;
+    }
+
+    /**
+     * Unmap one file-mapping view from the current process address space.
+     *
+     * @param frame Active syscall frame.
+     * @return StatusOK on success, or a negative kernel status code.
+     */
+    Status service_file_mapping_unmap(ServiceFrame* frame) {
+        Process* process = Scheduler::current_process();
+        Status status;
+
+        if (process == NULL) {
+            frame->result = encode_status(StatusInvalidArgument);
+            return StatusInvalidArgument;
+        }
+
+        status = FileMapping::UnmapViewOfFile(process, reinterpret_cast<void*>(frame->arguments[0]));
+        frame->result = (status == StatusOK) ? 0U : encode_status(status);
+        return status;
+    }
+
+    /**
+     * Grow one file-mapping object to a larger logical size.
+     *
+     * The file-mapping object keeps its base address stable; the kernel only
+     * appends new pages to the existing view so callers can extend pointer-free
+     * cache payloads without remapping the already published prefix.
+     *
+     * @param frame Active syscall frame.
+     * @return StatusOK on success, or a negative kernel status code.
+     */
+    Status service_file_mapping_resize(ServiceFrame* frame) {
+        Status status = FileMapping::ResizeFileMapping(frame->arguments[0], static_cast<unsigned long>(frame->arguments[1]));
+
+        frame->result = (status == StatusOK) ? 0U : encode_status(status);
+        return status;
+    }
+
     Status service_spawn(ServiceFrame* frame) {
         char kernel_path[ServicePathCapacity];
         char process_name[ProcessNameCapacity];
@@ -956,22 +1963,35 @@ namespace {
         Process* parent_process = Scheduler::current_process();
         Process* child_process;
         Status status;
+        U64 total_start_msec = service_now_msec();
+        U64 stage_start_msec = total_start_msec;
+        U64 copy_path_msec = 0U;
+        U64 copy_name_msec = 0U;
+        U64 copy_args_msec = 0U;
+        U64 loader_msec = 0U;
+        U64 enqueue_msec = 0U;
 
         (void)Heap::debug_validate("service_spawn:entry");
 
+        stage_start_msec = service_now_msec();
         status = copy_user_path(reinterpret_cast<const char*>(frame->arguments[0]), kernel_path, sizeof(kernel_path));
+        copy_path_msec = service_now_msec() - stage_start_msec;
         if (status != StatusOK) {
             frame->result = encode_status(status);
             return status;
         }
 
+        stage_start_msec = service_now_msec();
         status = copy_optional_user_string(reinterpret_cast<const char*>(frame->arguments[1]), process_name, sizeof(process_name));
+        copy_name_msec = service_now_msec() - stage_start_msec;
         if (status != StatusOK) {
             frame->result = encode_status(status);
             return status;
         }
 
+        stage_start_msec = service_now_msec();
         status = copy_optional_user_string_alloc(reinterpret_cast<const char*>(frame->arguments[2]), &launch_arguments);
+        copy_args_msec = service_now_msec() - stage_start_msec;
         if (status != StatusOK) {
             frame->result = encode_status(status);
             return status;
@@ -979,11 +1999,13 @@ namespace {
 
         // Reuse the same loader path for boot-time and shell-driven launches so
         // the kernel maintains one process-creation implementation.
+        stage_start_msec = service_now_msec();
         status = Loader::spawn_user_process(
             kernel_path,
             process_name[0] != '\0' ? process_name : NULL,
             launch_arguments != NULL ? launch_arguments : "",
             &main_thread);
+        loader_msec = service_now_msec() - stage_start_msec;
         if (launch_arguments != NULL) {
             Heap::free(launch_arguments);
             launch_arguments = NULL;
@@ -1003,15 +2025,160 @@ namespace {
             child_process->parent_process_id = parent_process->id;
         }
 
+        stage_start_msec = service_now_msec();
         status = Scheduler::enqueue(main_thread);
+        enqueue_msec = service_now_msec() - stage_start_msec;
         if (status != StatusOK) {
             (void)ProcessManager::destroy_process(child_process);
             frame->result = encode_status(status);
             return status;
         }
 
+        KRETAIL(
+            "[loader-prof] syscall-spawn path=%s copy_path_ms=%llu copy_name_ms=%llu copy_args_ms=%llu loader_ms=%llu enqueue_ms=%llu total_ms=%llu\n",
+            kernel_path,
+            static_cast<unsigned long long>(copy_path_msec),
+            static_cast<unsigned long long>(copy_name_msec),
+            static_cast<unsigned long long>(copy_args_msec),
+            static_cast<unsigned long long>(loader_msec),
+            static_cast<unsigned long long>(enqueue_msec),
+            static_cast<unsigned long long>(service_now_msec() - total_start_msec));
+
         frame->result = child_process->id;
         return StatusOK;
+    }
+
+    /**
+     * Queue one process launch for the dedicated background loader worker.
+     *
+     * Existing synchronous callers keep using `service_spawn()`. This additive
+     * API only marshals the request data, publishes it to the worker queue, and
+     * returns one stable request id immediately.
+     *
+     * @param frame Active syscall frame.
+     * @return StatusOK when the request was queued successfully.
+     */
+    Status service_spawn_async(ServiceFrame* frame) {
+        char kernel_path[ServicePathCapacity];
+        char process_name[ProcessNameCapacity];
+        char* launch_arguments = NULL;
+        AsyncSpawnRequest* request = NULL;
+        Status status;
+        bool interrupts_enabled;
+
+        status = copy_user_path(reinterpret_cast<const char*>(frame->arguments[0]), kernel_path, sizeof(kernel_path));
+        if (status != StatusOK) {
+            frame->result = encode_status(status);
+            return status;
+        }
+
+        status = copy_optional_user_string(reinterpret_cast<const char*>(frame->arguments[1]), process_name, sizeof(process_name));
+        if (status != StatusOK) {
+            frame->result = encode_status(status);
+            return status;
+        }
+
+        status = copy_optional_user_string_alloc(reinterpret_cast<const char*>(frame->arguments[2]), &launch_arguments);
+        if (status != StatusOK) {
+            frame->result = encode_status(status);
+            return status;
+        }
+
+        status = ensure_async_spawn_worker();
+        if (status != StatusOK) {
+            if (launch_arguments != NULL) {
+                Heap::free(launch_arguments);
+            }
+            frame->result = encode_status(status);
+            return status;
+        }
+
+        request = static_cast<AsyncSpawnRequest*>(Heap::alloc(sizeof(AsyncSpawnRequest), alignof(AsyncSpawnRequest)));
+        if (request == NULL) {
+            if (launch_arguments != NULL) {
+                Heap::free(launch_arguments);
+            }
+            frame->result = encode_status(StatusNoMemory);
+            return StatusNoMemory;
+        }
+
+        memzero(request, sizeof(*request));
+        request->path = async_spawn_duplicate_text(kernel_path);
+        request->name = (process_name[0] != '\0') ? async_spawn_duplicate_text(process_name) : NULL;
+        request->args = launch_arguments;
+        launch_arguments = NULL;
+        if ((request->path == NULL) || ((process_name[0] != '\0') && (request->name == NULL))) {
+            async_spawn_free_request(request);
+            frame->result = encode_status(StatusNoMemory);
+            return StatusNoMemory;
+        }
+
+        request->parent_process_id = (Scheduler::current_process() != NULL) ? Scheduler::current_process()->id : 0U;
+        interrupts_enabled = async_spawn_lock();
+        request->request_id = g_async_spawn_next_request_id++;
+        async_spawn_link_request(request);
+        async_spawn_unlock(interrupts_enabled);
+
+        KRETAIL(
+            "[async-spawn] queued request=%llu parent=%llu path=%s name=%s args=%s\n",
+            static_cast<unsigned long long>(request->request_id),
+            static_cast<unsigned long long>(request->parent_process_id),
+            (request->path != NULL) ? request->path : "<null>",
+            (request->name != NULL) ? request->name : "<null>",
+            (request->args != NULL) ? request->args : "");
+
+        // Wake the dedicated loader worker immediately instead of waiting for one
+        // cooperative scheduler tick. This keeps async launch progress independent
+        // of timer-poll cadence while Explorer remains in normal UI code.
+        if (g_async_spawn_worker_thread != NULL) {
+            (void)Scheduler::enqueue(g_async_spawn_worker_thread);
+        }
+
+        frame->result = request->request_id;
+        return StatusOK;
+    }
+
+    /**
+     * Poll one completed async launch result for the current process.
+     *
+     * User mode owns callback dispatch and any UI-thread marshaling, so the
+     * kernel only exposes the stable request token, final status, and child pid.
+     *
+     * @param frame Active syscall frame.
+     * @return StatusOK when a completion was copied, or StatusBusy when none are ready.
+     */
+    Status service_spawn_async_result(ServiceFrame* frame) {
+        Process* process = Scheduler::current_process();
+        UserAsyncSpawnResult result = {};
+        UserAsyncSpawnResult* user_buffer = reinterpret_cast<UserAsyncSpawnResult*>(frame->arguments[0]);
+        AsyncSpawnCompletion* completion;
+        Status status;
+
+        if ((process == NULL) || !user_range_valid(user_buffer, sizeof(*user_buffer))) {
+            frame->result = encode_status(StatusInvalidArgument);
+            return StatusInvalidArgument;
+        }
+
+        completion = async_spawn_take_completion(process->id);
+        if (completion == NULL) {
+            frame->result = encode_status(StatusBusy);
+            return StatusBusy;
+        }
+
+        result.request_id = static_cast<unsigned long>(completion->request_id);
+        result.status = completion->status;
+        result.pid = completion->pid;
+        result.reserved0 = 0UL;
+        KRETAIL(
+            "[async-spawn] collect request=%llu status=%ld pid=%ld parent=%llu\n",
+            static_cast<unsigned long long>(completion->request_id),
+            completion->status,
+            completion->pid,
+            static_cast<unsigned long long>(completion->parent_process_id));
+        status = copy_kernel_bytes_to_user(user_buffer, &result, sizeof(result));
+        async_spawn_free_completion(completion);
+        frame->result = (status == StatusOK) ? 0U : encode_status(status);
+        return status;
     }
 
     Status service_wait_pid(ServiceFrame* frame) {
@@ -1057,14 +2224,28 @@ namespace {
         return StatusOK;
     }
 
+    /**
+     * Read one file range directly into the caller's mapped user buffer.
+     *
+     * Large user-mode asset loads still need cooperative yield points so GWES,
+     * Explorer, and other UI threads can run between VFS slices. Use a coarse
+     * fixed chunk size to keep the hot path inexpensive while preventing one
+     * long JPEG or TTF read from monopolizing the scheduler.
+     *
+     * @param frame Active syscall frame.
+     * @return StatusOK on success, or the propagated resolve/read failure.
+     */
     Status service_read_file(ServiceFrame* frame) {
         char kernel_path[ServicePathCapacity];
         VfsNode node;
+        Process* current_process = Scheduler::current_process();
         void* user_buffer = reinterpret_cast<void*>(frame->arguments[2]);
+        const U64 read_offset = frame->arguments[1];
         Size length = static_cast<Size>(frame->arguments[3]);
         Size readable_bytes = 0U;
+        Size total_read = 0U;
         Status status;
-        SSize read_result;
+        SSize read_result = 0;
 
         if ((length != 0U) && !user_range_valid(user_buffer, length)) {
             frame->result = encode_status(StatusInvalidArgument);
@@ -1089,60 +2270,53 @@ namespace {
         }
 
         readable_bytes = length;
-        if (frame->arguments[1] >= node.size_bytes) {
+        if (read_offset >= node.size_bytes) {
             readable_bytes = 0U;
         }
-        else if (node.size_bytes - frame->arguments[1] < readable_bytes) {
-            readable_bytes = static_cast<Size>(node.size_bytes - frame->arguments[1]);
+        else if (node.size_bytes - read_offset < readable_bytes) {
+            readable_bytes = static_cast<Size>(node.size_bytes - read_offset);
         }
 
-        if ((kernel_debug_zone_mask() == 0U) || (readable_bytes == 0U) || (readable_bytes < VfsReadProgressMinimumBytes)) {
-            read_result = VirtualFileSystem::read(&node, frame->arguments[1], user_buffer, length);
+        status = UserHeap::ensure_range_mapped(current_process, reinterpret_cast<VirtAddr>(user_buffer), readable_bytes);
+        if (status != StatusOK) {
+            frame->result = encode_status(status);
+            return status;
+        }
+
+        while (total_read < readable_bytes) {
+            Size chunk_bytes = readable_bytes - total_read;
+
+            if (chunk_bytes > ServiceReadFileChunkBytes) {
+                chunk_bytes = ServiceReadFileChunkBytes;
+            }
+
+            read_result = VirtualFileSystem::read(
+                &node,
+                read_offset + static_cast<U64>(total_read),
+                static_cast<char*>(user_buffer) + total_read,
+                chunk_bytes);
             if (read_result < 0) {
                 frame->result = encode_status(static_cast<Status>(read_result));
                 return static_cast<Status>(read_result);
             }
-        }
-        else {
-            U8* destination = static_cast<U8*>(user_buffer);
-            U64 total_read = 0U;
-            unsigned long next_progress = 20UL;
-            const Size progress_chunk = (readable_bytes + 4U) / 5U;
-
-            while (total_read < readable_bytes) {
-                const Size remaining = readable_bytes - static_cast<Size>(total_read);
-                const Size chunk_bytes = (remaining < progress_chunk) ? remaining : progress_chunk;
-
-                read_result = VirtualFileSystem::read(
-                    &node,
-                    frame->arguments[1] + total_read,
-                    destination + total_read,
-                    chunk_bytes);
-                if (read_result < 0) {
-                    frame->result = encode_status(static_cast<Status>(read_result));
-                    return static_cast<Status>(read_result);
-                }
-                if (read_result == 0) {
-                    break;
-                }
-
-                total_read += static_cast<U64>(read_result);
-                while ((next_progress <= 100UL) && ((total_read * 100ULL) >= (static_cast<U64>(readable_bytes) * next_progress))) {
-                    KRETAIL(
-                        "[vfs] read %s %lu%% (%llu/%llu)\n",
-                        kernel_path,
-                        next_progress,
-                        static_cast<unsigned long long>(total_read),
-                        static_cast<unsigned long long>(readable_bytes));
-                    next_progress += 20UL;
-                }
+            if (read_result == 0) {
+                break;
             }
 
-            read_result = static_cast<SSize>(total_read);
+            total_read += static_cast<Size>(read_result);
+            SERVICE_READ_FILE_TRACE(
+                "[vfs] read %s offset=%llu bytes=%llu\n",
+                kernel_path,
+                static_cast<unsigned long long>(read_offset + static_cast<U64>(total_read - static_cast<Size>(read_result))),
+                static_cast<unsigned long long>(read_result));
+
+            if (static_cast<Size>(read_result) < chunk_bytes) {
+                break;
+            }
         }
 
         (void)Heap::debug_validate("service_read_file:success");
-        frame->result = static_cast<U64>(read_result);
+        frame->result = static_cast<U64>(total_read);
         return StatusOK;
     }
 
@@ -1186,6 +2360,42 @@ namespace {
 
         status = copy_kernel_bytes_to_user(reinterpret_cast<void*>(frame->arguments[2]), &entry, sizeof(entry));
         frame->result = (status == StatusOK) ? 1U : encode_status(status);
+        return status;
+    }
+
+    /**
+     * Resolve one VFS path and return the visible node metadata to EL0.
+     *
+     * Userspace already has file-only reads and directory enumeration. This
+     * narrow resolve-style syscall fills the remaining gap for runtime smoke
+     * coverage by letting EL0 distinguish filesystem paths from device aliases
+     * without depending on kernel boot-time assertions.
+     *
+     * @param frame Active syscall frame.
+     * @return StatusOK on success, or the propagated resolve/copy failure.
+     */
+    Status service_path_info(ServiceFrame* frame) {
+        char kernel_path[ServicePathCapacity];
+        VfsNode node;
+        UserPathInfo info;
+        Status status;
+
+        status = copy_user_path(reinterpret_cast<const char*>(frame->arguments[0]), kernel_path, sizeof(kernel_path));
+        if (status != StatusOK) {
+            frame->result = encode_status(status);
+            return status;
+        }
+
+        memzero(&node, sizeof(node));
+        status = VirtualFileSystem::resolve(kernel_path, &node);
+        if (status != StatusOK) {
+            frame->result = encode_status(status);
+            return status;
+        }
+
+        fill_path_info(&info, &node);
+        status = copy_kernel_bytes_to_user(reinterpret_cast<void*>(frame->arguments[1]), &info, sizeof(info));
+        frame->result = (status == StatusOK) ? 0U : encode_status(status);
         return status;
     }
 
@@ -1238,6 +2448,145 @@ namespace {
         status = copy_kernel_bytes_to_user(reinterpret_cast<void*>(frame->arguments[1]), &info, sizeof(info));
         frame->result = (status == StatusOK) ? 0U : encode_status(status);
         return status;
+    }
+
+    Status service_task_resource_info(ServiceFrame* frame) {
+        Process* process = ProcessManager::find_process(static_cast<Pid>(frame->arguments[0]));
+        UserTaskResourceInfo info;
+        Status status;
+
+        if (process == NULL) {
+            frame->result = encode_status(StatusNotFound);
+            return StatusNotFound;
+        }
+
+        fill_task_resource_info(process, &info);
+        status = copy_kernel_bytes_to_user(reinterpret_cast<void*>(frame->arguments[1]), &info, sizeof(info));
+        frame->result = (status == StatusOK) ? 0U : encode_status(status);
+        return status;
+    }
+
+    Status service_task_module_info(ServiceFrame* frame) {
+        Process* process = ProcessManager::find_process(static_cast<Pid>(frame->arguments[0]));
+        Size user_capacity;
+        Size copy_count;
+        Size total_count = 0U;
+        Size copied_count = 0U;
+        Size chunk_capacity;
+        UserTaskModuleInfo* module_infos = NULL;
+        Status snapshot_status;
+        Status status;
+        static bool g_task_module_stream_trace_emitted = false;
+
+        if (process == NULL) {
+            frame->result = encode_status(StatusNotFound);
+            return StatusNotFound;
+        }
+
+        user_capacity = static_cast<Size>(frame->arguments[2]);
+
+        if (!g_task_module_stream_trace_emitted) {
+            KRETAIL(
+                "[service] task-modules switched to chunked copy old_stack_bytes=%llu chunk_bytes=%llu\n",
+                static_cast<unsigned long long>(sizeof(UserTaskModuleInfo) * ServiceModuleCapacity),
+                static_cast<unsigned long long>(sizeof(UserTaskModuleInfo) * ServiceModuleChunkCapacity));
+            g_task_module_stream_trace_emitted = true;
+        }
+
+        snapshot_status = DllLoader::snapshot_process_modules_window(
+            process,
+            0U,
+            NULL,
+            0U,
+            &copied_count,
+            &total_count);
+        if (snapshot_status != StatusOK) {
+            frame->result = encode_status(snapshot_status);
+            return snapshot_status;
+        }
+
+        copy_count = total_count;
+        if (copy_count > user_capacity) {
+            copy_count = user_capacity;
+        }
+
+        if ((copy_count != 0U) && (frame->arguments[1] != 0U)) {
+            chunk_capacity = copy_count;
+            if (chunk_capacity > ServiceModuleChunkCapacity) {
+                chunk_capacity = ServiceModuleChunkCapacity;
+            }
+
+            module_infos = static_cast<UserTaskModuleInfo*>(Heap::alloc(
+                sizeof(UserTaskModuleInfo) * chunk_capacity,
+                alignof(UserTaskModuleInfo)));
+            if (module_infos == NULL) {
+                frame->result = encode_status(StatusNoMemory);
+                return StatusNoMemory;
+            }
+
+            while (copied_count < copy_count) {
+                Size window_count = copy_count - copied_count;
+                Size total_count_check = 0U;
+
+                if (window_count > chunk_capacity) {
+                    window_count = chunk_capacity;
+                }
+
+                snapshot_status = DllLoader::snapshot_process_modules_window(
+                    process,
+                    copied_count,
+                    static_cast<void*>(module_infos),
+                    window_count,
+                    &window_count,
+                    &total_count_check);
+                if ((snapshot_status != StatusOK) && (snapshot_status != StatusNoSpace)) {
+                    Heap::free(module_infos);
+                    frame->result = encode_status(snapshot_status);
+                    return snapshot_status;
+                }
+                if (window_count == 0U) {
+                    Heap::free(module_infos);
+                    frame->result = encode_status(StatusFault);
+                    return StatusFault;
+                }
+                if (total_count_check != total_count) {
+                    Heap::free(module_infos);
+                    frame->result = encode_status(StatusFault);
+                    return StatusFault;
+                }
+
+                status = copy_kernel_bytes_to_user(
+                    reinterpret_cast<void*>(frame->arguments[1] + (copied_count * sizeof(UserTaskModuleInfo))),
+                    module_infos,
+                    static_cast<Size>(sizeof(UserTaskModuleInfo) * window_count));
+                if (status != StatusOK) {
+                    Heap::free(module_infos);
+                    frame->result = encode_status(status);
+                    return status;
+                }
+
+                copied_count += window_count;
+            }
+
+            Heap::free(module_infos);
+        }
+
+        status = copy_kernel_bytes_to_user(
+            reinterpret_cast<void*>(frame->arguments[3]),
+            &copy_count,
+            sizeof(copy_count));
+        if (status != StatusOK) {
+            frame->result = encode_status(status);
+            return status;
+        }
+
+        if (total_count > user_capacity) {
+            frame->result = encode_status(StatusNoSpace);
+            return StatusNoSpace;
+        }
+
+        frame->result = 0U;
+        return StatusOK;
     }
 
     Status service_mem_info(ServiceFrame* frame) {
@@ -1763,13 +3112,19 @@ namespace {
     Status service_log_recv(ServiceFrame* frame) {
         char* user_buffer = reinterpret_cast<char*>(frame->arguments[0]);
         Size size = static_cast<Size>(frame->arguments[1]);
+        Status status;
 
         if ((size == 0U) || !user_range_valid(user_buffer, size)) {
             frame->result = encode_status(StatusInvalidArgument);
             return StatusInvalidArgument;
         }
 
-        user_buffer[0] = '\0';
+        status = copy_kernel_string_to_user("", user_buffer, size);
+        if (status != StatusOK) {
+            frame->result = encode_status(status);
+            return status;
+        }
+
         frame->result = encode_status(StatusNotSupported);
         return StatusNotSupported;
     }
@@ -1854,6 +3209,161 @@ namespace {
         }
     }
 
+    /**
+     * Create one extra EL0 thread in the current user process.
+     *
+     * @param frame Active syscall frame.
+     * @return StatusOK on success, or a propagated allocation/validation error.
+     */
+    Status service_create_thread(ServiceFrame* frame) {
+        Process* process = Scheduler::current_process();
+        Thread* thread = NULL;
+        char thread_name[ThreadNameCapacity] = {};
+        const VirtAddr entry_point = static_cast<VirtAddr>(frame->arguments[0]);
+        const U64 argument = frame->arguments[1];
+        const char* user_thread_name = reinterpret_cast<const char*>(frame->arguments[2]);
+        VirtAddr stack_base = 0U;
+        VirtAddr stack_top = 0U;
+        void* stack_backing = NULL;
+        U32 slot_index = 0U;
+        Status status;
+
+        if ((process == NULL) || object_has_flag(process->header.flags, ObjectFlags::Kernel)) {
+            frame->result = encode_status(StatusInvalidArgument);
+            return StatusInvalidArgument;
+        }
+        if ((entry_point == 0U) || !user_range_valid(reinterpret_cast<const void*>(entry_point), 1U)) {
+            frame->result = encode_status(StatusInvalidArgument);
+            return StatusInvalidArgument;
+        }
+
+        if (user_thread_name != NULL) {
+            status = copy_user_string(user_thread_name, thread_name, sizeof(thread_name));
+            if ((status != StatusOK) && (status != StatusNoSpace)) {
+                frame->result = encode_status(status);
+                return status;
+            }
+        }
+        if (thread_name[0] == '\0') {
+            copy_text(thread_name, sizeof(thread_name), "worker", "worker");
+        }
+
+        status = reserve_user_thread_stack(process, &slot_index, &stack_base, &stack_top, &stack_backing);
+        if (status != StatusOK) {
+            frame->result = encode_status(status);
+            return status;
+        }
+
+        status = ThreadManager::create_user_thread(process, thread_name, entry_point, stack_top, &thread);
+        if (status != StatusOK) {
+            (void)mm::MemoryManager::unmap(&process->process_address_space, stack_base, UserThreadStackSlotBytes);
+            KernelResourceManager::release(stack_backing);
+            process->user_stack_slot_bitmap &= ~(1U << slot_index);
+            frame->result = encode_status(status);
+            return status;
+        }
+
+        thread->context.general_registers[0] = argument;
+        thread->user_stack_backing = stack_backing;
+        thread->user_stack_bytes = UserThreadStackSlotBytes;
+        thread->user_stack_slot_index = slot_index;
+        // The thread object starts in Ready state, but it will never execute
+        // until the scheduler run queue owns it. Explorer depends on this path
+        // for its taskbar UI worker thread, so enqueue the new thread before
+        // returning the thread id to EL0.
+        status = Scheduler::enqueue(thread);
+        if (status != StatusOK) {
+            (void)ThreadManager::destroy_thread(thread);
+            frame->result = encode_status(status);
+            return status;
+        }
+
+        frame->result = static_cast<U64>(thread->id);
+        return StatusOK;
+    }
+
+    /**
+     * Change the scheduler priority of the currently running user thread.
+     *
+     * Explorer uses this to keep its message pump more responsive than a
+     * background launcher worker inside the same process while long-running
+     * syscalls are still being de-risked.
+     *
+     * @param frame Active syscall frame.
+     * @return StatusOK on success, or a validation/scheduler error.
+     */
+    Status service_set_thread_priority(ServiceFrame* frame) {
+        const U64 raw_priority = frame->arguments[0];
+        Status status;
+
+        if (raw_priority >= ThreadPriorityLevelCount) {
+            frame->result = encode_status(StatusInvalidArgument);
+            return StatusInvalidArgument;
+        }
+
+        status = Scheduler::set_current_priority(static_cast<U8>(raw_priority));
+        frame->result = (status == StatusOK) ? 0U : encode_status(status);
+        return status;
+    }
+
+    /**
+     * Change the scheduler priority of one thread that belongs to the current user process.
+     *
+     * The synthetic IRQ handoff probe needs to stage multiple equal-priority
+     * worker threads before any of them runs, otherwise the first worker can
+     * legitimately outrank its sibling and the test stops proving scheduler
+     * handoff. Restricting the target to the caller's own process keeps the
+     * permission model narrow while enabling that setup.
+     *
+     * @param frame Active syscall frame.
+     * @return StatusOK on success, or a validation/scheduler error.
+     */
+    Status service_set_thread_priority_by_id(ServiceFrame* frame) {
+        Process* process = Scheduler::current_process();
+        Thread* thread;
+        const U64 raw_thread_id = frame->arguments[0];
+        const U64 raw_priority = frame->arguments[1];
+        Status status;
+
+        if (raw_priority >= ThreadPriorityLevelCount) {
+            frame->result = encode_status(StatusInvalidArgument);
+            return StatusInvalidArgument;
+        }
+        if (process == NULL) {
+            frame->result = encode_status(StatusBusy);
+            return StatusBusy;
+        }
+
+        thread = ThreadManager::find_thread(raw_thread_id);
+        if ((thread == NULL) || (thread->parent != process) || object_has_flag(thread->header.flags, ObjectFlags::Kernel)) {
+            frame->result = encode_status(StatusNotFound);
+            return StatusNotFound;
+        }
+
+        status = Scheduler::set_thread_priority(thread, static_cast<U8>(raw_priority));
+        frame->result = (status == StatusOK) ? 0U : encode_status(status);
+        return status;
+    }
+
+    /**
+     * Terminate the current EL0 thread without exiting the whole process.
+     *
+     * Userspace helper threads now enter through a runtime trampoline and may
+     * return normally. This syscall gives that trampoline one defined way to
+     * retire the current thread so DLL-local workers do not need to park forever
+     * inside text that might later be unloaded.
+     *
+     * @param frame Active syscall frame.
+     * @return Never returns on success.
+     */
+    Status service_exit_thread(ServiceFrame* frame) {
+        if (frame == NULL) {
+            return StatusInvalidArgument;
+        }
+
+        scheduler_thread_exit_current();
+    }
+
     ServiceHandler g_service_handlers[SyscallCount] = {
         &service_write,
         &service_malloc,
@@ -1873,10 +3383,10 @@ namespace {
         &service_mkdir,
         &service_task_info,
         &service_mem_info,
-        &service_unsupported,
+        &service_kill,
         &service_reboot,
         &service_debug_shell,
-        &service_unsupported,
+        &service_task_resource_info,
         &service_task_args,
         &service_module_invoke,
         &service_shlib_export,
@@ -1897,6 +3407,20 @@ namespace {
         &service_remove,
         &service_ipc_send,
         &service_ipc_recv,
+        &service_create_thread,
+        &service_set_thread_priority,
+        &service_spawn_async,
+        &service_spawn_async_result,
+        &service_file_mapping_create,
+        &service_file_mapping_open,
+        &service_file_mapping_close,
+        &service_file_mapping_map,
+        &service_file_mapping_unmap,
+        &service_file_mapping_resize,
+        &service_task_module_info,
+        &service_path_info,
+        &service_exit_thread,
+        &service_set_thread_priority_by_id,
     };
 
 } // namespace

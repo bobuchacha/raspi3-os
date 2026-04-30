@@ -1,14 +1,17 @@
 #include "gui_service.h"
 
+#include "arch.h"
 #include "device.h"
 #include "framebuffer.h"
 #include "heap.h"
 #include "kernel_time.h"
 #include "mm.h"
 #include "mm/physical.h"
-#include "scheduler.h"
 #include "process.h"
+#include "resource_manager.h"
+#include "scheduler.h"
 #include "service_call.h"
+#include "user_address_space_layout.h"
 #include "vfs.h"
 
 #include "debug-message.h"
@@ -36,21 +39,63 @@ namespace {
         return StatusOK;
     }
 
-    inline constexpr Size GuiSurfaceRecordCount = ROS_KERNEL_GUI_WINDOW_SURFACE_MAX_SLOTS;
-    inline constexpr Size GuiSurfaceMaxBytes = mm::backend::L2BlockSize;
-    inline constexpr Size GuiSurfaceSlotUnitBytes = 64U * 1024U;
-    inline constexpr Size GuiSurfaceSlotUnitCount = 4096U;
-    inline constexpr Size GuiSurfaceViewRegionBytes = GuiSurfaceSlotUnitBytes * GuiSurfaceSlotUnitCount;
-    inline constexpr VirtAddr GuiSurfaceViewBase = 64ULL * mm::backend::L2BlockSize;
-    inline constexpr VirtAddr GuiSurfaceViewLimit = GuiSurfaceViewBase + GuiSurfaceViewRegionBytes;
-    inline constexpr VirtAddr GuiSharedInputViewBase = GuiSurfaceViewLimit;
-    inline constexpr Size GuiSharedInputViewBytes = mm::PageSize;
-    inline constexpr VirtAddr GuiSharedInputViewLimit = GuiSharedInputViewBase + GuiSharedInputViewBytes;
+    /*
+     * Log one concise GUI surface memory snapshot.
+     *
+     * Surface allocation failures can come from total physical-page pressure,
+     * kernel heap exhaustion inside bookkeeping, or leaked live GUI surfaces.
+     * Capturing all three counters at the failing branch keeps the next repro
+     * actionable instead of forcing another round of guesswork.
+     *
+     * @param reason Short phase label describing the failure point.
+     * @return Nothing.
+     */
+    void gui_log_surface_memory_snapshot(const char* reason) {
+        HeapStats heap_stats = {};
+        KernelResourceStats record_stats = {};
+        KernelResourceStats backing_stats = {};
 
-    static_assert((GuiSurfaceSlotUnitBytes% mm::PageSize) == 0U, "GUI surface slot units must stay page aligned");
-    static_assert(GuiSurfaceViewLimit <= (mm::backend::TableEntries * mm::backend::L2BlockSize), "GUI surface region must stay inside the first user GiB");
-    static_assert((GuiSharedInputViewBase% mm::PageSize) == 0U, "shared input view must stay page aligned");
-    static_assert(GuiSharedInputViewLimit <= (mm::backend::TableEntries * mm::backend::L2BlockSize), "shared input view must stay inside the first user GiB");
+        Heap::get_stats(&heap_stats);
+        KernelResourceManager::get_stats(KernelResourceKind::GuiSurfaceRecord, &record_stats);
+        KernelResourceManager::get_stats(KernelResourceKind::GuiSurfaceBacking, &backing_stats);
+        KERROR(
+            "[gui-surface] snapshot reason=%s free_pages=%u heap_used=%llu heap_free=%llu records=%llu/%llu backings=%llu/%llu bytes=%llu/%llu\n",
+            reason != NULL ? reason : "<none>",
+            mm::PhysicalMemory::free_page_count(),
+            static_cast<unsigned long long>(heap_stats.used_bytes),
+            static_cast<unsigned long long>(heap_stats.free_bytes),
+            static_cast<unsigned long long>(record_stats.live_count),
+            static_cast<unsigned long long>(record_stats.peak_count),
+            static_cast<unsigned long long>(backing_stats.live_count),
+            static_cast<unsigned long long>(backing_stats.peak_count),
+            static_cast<unsigned long long>(backing_stats.live_bytes),
+            static_cast<unsigned long long>(backing_stats.peak_bytes));
+    }
+
+    // Explorer now owns the desktop as one real top-level window, so a single
+    // client surface can legitimately exceed one 2 MiB L2 block. Allow larger
+    // page-backed surfaces while still keeping a finite per-window cap well
+    // below the full shared-view arena.
+    inline constexpr Size GuiSurfaceMaxBytes = 16U * mm::backend::L2BlockSize;
+
+    /*
+     * Round one fixed-record size up to the next aligned slot boundary.
+     *
+     * The GUI surface metadata pool carves whole physical pages into equal
+     * record slots, so each slot stride must preserve the natural alignment of
+     * the stored `SharedWindowSurfaceRecord`.
+     *
+     * @param value Raw record size in bytes.
+     * @param alignment Required record alignment.
+     * @return Aligned slot size.
+     */
+    constexpr Size gui_align_up_record(Size value, Size alignment) {
+        return (value + (alignment - 1U)) & ~(alignment - 1U);
+    }
+
+    static_assert(user_address_space::GuiSurfaceViewLimit <= (mm::backend::TableEntries * mm::backend::L2BlockSize), "GUI surface region must stay inside the first user GiB");
+    static_assert(user_address_space::GuiSharedInputViewLimit <= (mm::backend::TableEntries * mm::backend::L2BlockSize), "shared input view must stay inside the first user GiB");
+    static_assert(GuiSurfaceMaxBytes <= user_address_space::GuiSurfaceViewRegionBytes, "single GUI surface cap must fit inside the GUI view arena");
 
     typedef struct SharedWindowSurfaceRecord {
         bool in_use;
@@ -64,20 +109,288 @@ namespace {
         U32 allocation_bytes;
         U32 slot_index;
         U32 slot_count;
+        U32 backing_page_count;
         bool owner_mapped;
         bool server_mapped;
         void* backing;
         PhysAddr physical_base;
+        PhysAddr* backing_pages;
+        struct SharedWindowSurfaceRecord* next;
+        struct SharedWindowSurfaceRecord* prev;
+        struct SharedWindowSurfaceRecord* slot_next;
+        struct SharedWindowSurfaceRecord* slot_prev;
     } SharedWindowSurfaceRecord;
 
+    typedef struct GuiSurfaceRecordSlot {
+        struct GuiSurfaceRecordSlot* next_free;
+    } GuiSurfaceRecordSlot;
+
+    typedef struct GuiSurfaceRecordPageHeader {
+        struct GuiSurfaceRecordPageHeader* next_page;
+        PhysAddr page_phys;
+        U32 live_slots;
+        U32 slot_capacity;
+    } GuiSurfaceRecordPageHeader;
+
+    typedef struct GuiSurfaceRecordPool {
+        Size slot_bytes;
+        Size slot_alignment;
+        GuiSurfaceRecordSlot* free_list;
+        GuiSurfaceRecordPageHeader* pages;
+    } GuiSurfaceRecordPool;
+
     bool gui_service_initialized;
-    SharedWindowSurfaceRecord shared_surfaces[GuiSurfaceRecordCount];
-    bool shared_surface_slots[GuiSurfaceSlotUnitCount];
+    SharedWindowSurfaceRecord* g_shared_surface_head;
+    SharedWindowSurfaceRecord* g_shared_surface_tail;
+    SharedWindowSurfaceRecord* g_shared_surface_slot_head;
+    SharedWindowSurfaceRecord* g_shared_surface_slot_tail;
+    GuiSurfaceRecordPool g_shared_surface_record_pool = {};
+
+    /*
+     * Initialize the GUI surface metadata pool lazily.
+     *
+     * Surface records are only needed after the first shared surface is
+     * created, so the pool geometry is derived on demand instead of during
+     * broader GUI service initialization.
+     *
+     * @return Nothing.
+     */
+    void gui_surface_record_pool_init(void) {
+        if (g_shared_surface_record_pool.slot_bytes != 0U) {
+            return;
+        }
+
+        g_shared_surface_record_pool.slot_alignment = alignof(SharedWindowSurfaceRecord);
+        g_shared_surface_record_pool.slot_bytes = gui_align_up_record(sizeof(SharedWindowSurfaceRecord), alignof(SharedWindowSurfaceRecord));
+        g_shared_surface_record_pool.free_list = NULL;
+        g_shared_surface_record_pool.pages = NULL;
+    }
+
+    /*
+     * Return the metadata page header that owns one record slot.
+     *
+     * Each GUI metadata page stores its header at the start of the page and
+     * carves `SharedWindowSurfaceRecord` slots from the remaining bytes.
+     *
+     * @param slot Slot pointer returned by the GUI metadata pool.
+     * @return Owning page header, or NULL for invalid input.
+     */
+    GuiSurfaceRecordPageHeader* gui_surface_record_page_from_slot(const void* slot) {
+        if (slot == NULL) {
+            return NULL;
+        }
+
+        return reinterpret_cast<GuiSurfaceRecordPageHeader*>(
+            reinterpret_cast<Uptr>(slot) & ~(static_cast<Uptr>(mm::PageSize) - 1U));
+    }
+
+    /*
+     * Grow the GUI metadata pool by carving one physical page into record slots.
+     *
+     * GUI surface records can live for the lifetime of a window, so page-backed
+     * slots remove that persistent bookkeeping pressure from the general heap
+     * while still allowing empty metadata pages to be reclaimed.
+     *
+     * @return True when at least one new slot becomes available.
+     */
+    bool gui_surface_record_pool_grow(void) {
+        const PhysAddr page_phys = mm::PhysicalMemory::alloc_page();
+        U8* page_base;
+        GuiSurfaceRecordPageHeader* page_header;
+        Uptr slot_start;
+        Size available_bytes;
+        Size slot_capacity;
+
+        if ((g_shared_surface_record_pool.slot_bytes == 0U)
+            || (g_shared_surface_record_pool.slot_alignment == 0U)
+            || (page_phys == 0U)) {
+            return false;
+        }
+
+        page_base = reinterpret_cast<U8*>(mm::MemoryManager::physical_to_kernel(page_phys));
+        page_header = reinterpret_cast<GuiSurfaceRecordPageHeader*>(page_base);
+        memzero(page_header, sizeof(*page_header));
+        page_header->next_page = g_shared_surface_record_pool.pages;
+        page_header->page_phys = page_phys;
+        g_shared_surface_record_pool.pages = page_header;
+
+        slot_start = reinterpret_cast<Uptr>(page_base + sizeof(GuiSurfaceRecordPageHeader));
+        slot_start = gui_align_up_record(slot_start, g_shared_surface_record_pool.slot_alignment);
+        if (slot_start >= (reinterpret_cast<Uptr>(page_base) + mm::PageSize)) {
+            g_shared_surface_record_pool.pages = page_header->next_page;
+            mm::PhysicalMemory::free_page(page_phys);
+            return false;
+        }
+
+        available_bytes = (reinterpret_cast<Uptr>(page_base) + mm::PageSize) - slot_start;
+        slot_capacity = available_bytes / g_shared_surface_record_pool.slot_bytes;
+        if (slot_capacity == 0U) {
+            g_shared_surface_record_pool.pages = page_header->next_page;
+            mm::PhysicalMemory::free_page(page_phys);
+            return false;
+        }
+
+        page_header->slot_capacity = static_cast<U32>(slot_capacity);
+        for (Size index = 0U; index < slot_capacity; ++index) {
+            GuiSurfaceRecordSlot* slot = reinterpret_cast<GuiSurfaceRecordSlot*>(slot_start + (index * g_shared_surface_record_pool.slot_bytes));
+
+            slot->next_free = g_shared_surface_record_pool.free_list;
+            g_shared_surface_record_pool.free_list = slot;
+        }
+
+        return true;
+    }
+
+    /*
+     * Allocate one zeroed GUI surface metadata record from the page-backed pool.
+     *
+     * @return Fresh metadata record, or NULL when no slot can be allocated.
+     */
+    SharedWindowSurfaceRecord* gui_surface_record_pool_allocate(void) {
+        GuiSurfaceRecordSlot* slot;
+        GuiSurfaceRecordPageHeader* page_header;
+
+        gui_surface_record_pool_init();
+        if ((g_shared_surface_record_pool.free_list == NULL) && !gui_surface_record_pool_grow()) {
+            return NULL;
+        }
+
+        slot = g_shared_surface_record_pool.free_list;
+        g_shared_surface_record_pool.free_list = slot->next_free;
+        page_header = gui_surface_record_page_from_slot(slot);
+        if (page_header != NULL) {
+            page_header->live_slots += 1U;
+        }
+
+        memzero(slot, g_shared_surface_record_pool.slot_bytes);
+        return reinterpret_cast<SharedWindowSurfaceRecord*>(slot);
+    }
+
+    /*
+     * Remove every free-list entry that belongs to one reclaimed metadata page.
+     *
+     * @param page_header Page that is about to be released.
+     * @return Nothing.
+     */
+    void gui_surface_record_pool_remove_page_slots(GuiSurfaceRecordPageHeader* page_header) {
+        const Uptr page_start = reinterpret_cast<Uptr>(page_header);
+        const Uptr page_limit = page_start + mm::PageSize;
+        GuiSurfaceRecordSlot* previous = NULL;
+        GuiSurfaceRecordSlot* slot = g_shared_surface_record_pool.free_list;
+
+        if (page_header == NULL) {
+            return;
+        }
+
+        while (slot != NULL) {
+            GuiSurfaceRecordSlot* next_slot = slot->next_free;
+            const Uptr slot_address = reinterpret_cast<Uptr>(slot);
+
+            if ((slot_address >= page_start) && (slot_address < page_limit)) {
+                if (previous != NULL) {
+                    previous->next_free = next_slot;
+                }
+                else {
+                    g_shared_surface_record_pool.free_list = next_slot;
+                }
+            }
+            else {
+                previous = slot;
+            }
+
+            slot = next_slot;
+        }
+    }
+
+    /*
+     * Unlink one reclaimed metadata page from the pool page list.
+     *
+     * @param page_header Page header to unlink.
+     * @return Nothing.
+     */
+    void gui_surface_record_pool_unlink_page(GuiSurfaceRecordPageHeader* page_header) {
+        GuiSurfaceRecordPageHeader* previous = NULL;
+        GuiSurfaceRecordPageHeader* cursor = g_shared_surface_record_pool.pages;
+
+        if (page_header == NULL) {
+            return;
+        }
+
+        while ((cursor != NULL) && (cursor != page_header)) {
+            previous = cursor;
+            cursor = cursor->next_page;
+        }
+        if (cursor == NULL) {
+            return;
+        }
+
+        if (previous != NULL) {
+            previous->next_page = cursor->next_page;
+        }
+        else {
+            g_shared_surface_record_pool.pages = cursor->next_page;
+        }
+    }
+
+    /*
+     * Return one surface metadata record to the page-backed pool.
+     *
+     * @param record Record previously allocated from the metadata pool.
+     * @return Nothing.
+     */
+    void gui_surface_record_pool_free(SharedWindowSurfaceRecord* record) {
+        GuiSurfaceRecordSlot* slot;
+        GuiSurfaceRecordPageHeader* page_header;
+
+        if (record == NULL) {
+            return;
+        }
+
+        slot = reinterpret_cast<GuiSurfaceRecordSlot*>(record);
+        page_header = gui_surface_record_page_from_slot(record);
+        slot->next_free = g_shared_surface_record_pool.free_list;
+        g_shared_surface_record_pool.free_list = slot;
+
+        if ((page_header == NULL) || (page_header->live_slots == 0U)) {
+            return;
+        }
+
+        page_header->live_slots -= 1U;
+        if (page_header->live_slots != 0U) {
+            return;
+        }
+
+        gui_surface_record_pool_remove_page_slots(page_header);
+        gui_surface_record_pool_unlink_page(page_header);
+        mm::PhysicalMemory::free_page(page_header->page_phys);
+    }
 
     /* Shared input region (one page) exposed to user-mode GWES and peers. */
     static PhysAddr g_gui_shared_input_phys = 0ULL;
     static RosKernelGuiSharedInputRegion* g_gui_shared_input_region_ptr = nullptr;
     static RosKernelGuiPointerState g_gui_pointer_state = { (uint32_t)ROS_KERNEL_GUI_POINTER_HIDDEN, (uint32_t)ROS_KERNEL_GUI_POINTER_HIDDEN, 0U, 0U };
+
+    /*
+     * Compute how many shared-input consumers fit inside the reserved view.
+     *
+     * The shared ring keeps a fixed record capacity, so the remaining reserved
+     * bytes can now be devoted entirely to consumer descriptors instead of a
+     * compile-time fixed array embedded in the ABI.
+     *
+     * @return Runtime consumer capacity derived from the reserved view size.
+     */
+    U32 gui_shared_input_max_consumers(void) {
+        const Size minimum_bytes = sizeof(RosKernelGuiSharedInputRegion)
+            + (sizeof(RosKernelGuiSharedInputRecord) * ROS_KERNEL_GUI_SHARED_INPUT_CAPACITY);
+
+        if (user_address_space::GuiSharedInputViewBytes <= minimum_bytes) {
+            return 0U;
+        }
+
+        return static_cast<U32>(
+            (user_address_space::GuiSharedInputViewBytes - minimum_bytes)
+            / sizeof(RosKernelGuiSharedInputConsumer));
+    }
 
     /*
      * Post one coalesced wake notification to a shared-input consumer.
@@ -117,13 +430,18 @@ namespace {
     }
 
     static void gui_shared_input_initialize_region(RosKernelGuiSharedInputRegion* region) {
+        const U32 max_consumers = gui_shared_input_max_consumers();
+
         if (!region) return;
-        memzero(region, sizeof(*region));
+        memzero(region, user_address_space::GuiSharedInputViewBytes);
         region->magic = ROS_KERNEL_GUI_SHARED_INPUT_MAGIC;
         region->version = ROS_KERNEL_GUI_SHARED_INPUT_VERSION;
-        region->max_consumers = ROS_KERNEL_GUI_SHARED_INPUT_MAX_CONSUMERS;
+        region->max_consumers = static_cast<uint16_t>(max_consumers);
         region->capacity = ROS_KERNEL_GUI_SHARED_INPUT_CAPACITY;
         region->record_size = static_cast<uint32_t>(sizeof(RosKernelGuiSharedInputRecord));
+        region->consumer_size = static_cast<uint32_t>(sizeof(RosKernelGuiSharedInputConsumer));
+        region->records_offset = static_cast<uint32_t>(sizeof(RosKernelGuiSharedInputRegion));
+        region->consumers_offset = region->records_offset + (region->capacity * region->record_size);
         region->tail_sequence = 0ULL;
         region->produced_count = 0ULL;
         region->overflow_count = 0ULL;
@@ -132,17 +450,20 @@ namespace {
         region->last_pointer_state = g_gui_pointer_state;
         region->reserved0 = 0U;
         region->reserved1 = 0U;
-        for (unsigned int i = 0U; i < ROS_KERNEL_GUI_SHARED_INPUT_MAX_CONSUMERS; ++i) {
-            gui_shared_input_reset_consumer(&region->consumers[i]);
+        for (U32 index = 0U; index < max_consumers; ++index) {
+            gui_shared_input_reset_consumer(ros_kernel_gui_shared_input_consumer_at(region, index));
         }
     }
 
     static RosKernelGuiSharedInputRegion* gui_shared_input_ensure_region(void) {
         if (g_gui_shared_input_region_ptr) return g_gui_shared_input_region_ptr;
-        PhysAddr page = mm::PhysicalMemory::alloc_page();
-        if (page == 0ULL) return nullptr;
-        g_gui_shared_input_phys = page;
-        g_gui_shared_input_region_ptr = reinterpret_cast<RosKernelGuiSharedInputRegion*>(mm::MemoryManager::physical_to_kernel(page));
+        const Size rounded_bytes = user_address_space::GuiSharedInputViewBytes;
+        const unsigned int page_count = static_cast<unsigned int>(rounded_bytes / mm::PageSize);
+        const PhysAddr base_phys = mm::PhysicalMemory::reserve_contiguous_pages(page_count);
+
+        if ((gui_shared_input_max_consumers() == 0U) || (base_phys == 0ULL)) return nullptr;
+        g_gui_shared_input_phys = base_phys;
+        g_gui_shared_input_region_ptr = reinterpret_cast<RosKernelGuiSharedInputRegion*>(mm::MemoryManager::physical_to_kernel(base_phys));
         gui_shared_input_initialize_region(g_gui_shared_input_region_ptr);
         return g_gui_shared_input_region_ptr;
     }
@@ -173,8 +494,8 @@ namespace {
             return NULL;
         }
 
-        for (U32 index = 0U; index < ROS_KERNEL_GUI_SHARED_INPUT_MAX_CONSUMERS; ++index) {
-            RosKernelGuiSharedInputConsumer* consumer = &region->consumers[index];
+        for (U32 index = 0U; index < region->max_consumers; ++index) {
+            RosKernelGuiSharedInputConsumer* consumer = ros_kernel_gui_shared_input_consumer_at(region, index);
 
             if (consumer->pid == static_cast<U32>(pid)) {
                 if (consumer_index_out != NULL) {
@@ -199,8 +520,8 @@ namespace {
             return;
         }
 
-        for (U32 index = 0U; index < ROS_KERNEL_GUI_SHARED_INPUT_MAX_CONSUMERS; ++index) {
-            RosKernelGuiSharedInputConsumer* consumer = &region->consumers[index];
+        for (U32 index = 0U; index < region->max_consumers; ++index) {
+            RosKernelGuiSharedInputConsumer* consumer = ros_kernel_gui_shared_input_consumer_at(region, index);
             Process* process;
 
             if (consumer->pid == 0U) {
@@ -222,9 +543,9 @@ namespace {
      */
     Status gui_map_shared_input(Process* process) {
         const VmMapping mapping = {
-            GuiSharedInputViewBase,
+            user_address_space::GuiSharedInputViewBase,
             g_gui_shared_input_phys,
-            GuiSharedInputViewBytes,
+            user_address_space::GuiSharedInputViewBytes,
             PagePresent | PageWritable | PageUser,
         };
 
@@ -246,7 +567,7 @@ namespace {
             return StatusInvalidArgument;
         }
 
-        return mm::MemoryManager::unmap(&process->process_address_space, GuiSharedInputViewBase, GuiSharedInputViewBytes);
+        return mm::MemoryManager::unmap(&process->process_address_space, user_address_space::GuiSharedInputViewBase, user_address_space::GuiSharedInputViewBytes);
     }
 
     /*
@@ -259,16 +580,20 @@ namespace {
     Status gui_fill_shared_input_view(U32 consumer_index, RosKernelGuiSharedInputView* view) {
         RosKernelGuiSharedInputRegion* region = gui_shared_input_ensure_region();
 
-        if ((region == NULL) || (view == NULL) || (consumer_index >= ROS_KERNEL_GUI_SHARED_INPUT_MAX_CONSUMERS)) {
+        RosKernelGuiSharedInputConsumer* consumer;
+
+        if ((region == NULL) || (view == NULL) || (consumer_index >= region->max_consumers)) {
             return StatusInvalidArgument;
         }
 
+        consumer = ros_kernel_gui_shared_input_consumer_at(region, consumer_index);
+
         view->version = ROS_KERNEL_GUI_SHARED_INPUT_VERSION;
-        view->flags = region->consumers[consumer_index].flags;
-        view->view_address = GuiSharedInputViewBase;
-        view->view_size = static_cast<U32>(sizeof(RosKernelGuiSharedInputRegion));
+        view->flags = consumer->flags;
+        view->view_address = user_address_space::GuiSharedInputViewBase;
+        view->view_size = static_cast<U32>(user_address_space::GuiSharedInputViewBytes);
         view->consumer_index = consumer_index;
-        view->initial_head_sequence = region->consumers[consumer_index].head_sequence;
+        view->initial_head_sequence = consumer->head_sequence;
         return StatusOK;
     }
 
@@ -284,7 +609,7 @@ namespace {
      * @return User virtual base for that slot.
      */
     VirtAddr gui_surface_slot_address(U32 slot_index) {
-        return GuiSurfaceViewBase + (static_cast<VirtAddr>(slot_index) * GuiSurfaceSlotUnitBytes);
+        return user_address_space::GuiSurfaceViewBase + (static_cast<VirtAddr>(slot_index) * user_address_space::GuiSurfaceSlotUnitBytes);
     }
 
     /*
@@ -336,10 +661,8 @@ namespace {
      * @return Matching surface record, or NULL when none exists.
      */
     SharedWindowSurfaceRecord* gui_find_surface_by_server(I64 server_pid, U64 hwnd) {
-        for (Size index = 0U; index < COUNT_OF(shared_surfaces); ++index) {
-            SharedWindowSurfaceRecord* record = &shared_surfaces[index];
-
-            if (record->in_use && (record->server_pid == server_pid) && (record->hwnd == hwnd)) {
+        for (SharedWindowSurfaceRecord* record = g_shared_surface_head; record != NULL; record = record->next) {
+            if ((record != NULL) && record->in_use && (record->server_pid == server_pid) && (record->hwnd == hwnd)) {
                 return record;
             }
         }
@@ -359,10 +682,8 @@ namespace {
             return NULL;
         }
 
-        for (Size index = 0U; index < COUNT_OF(shared_surfaces); ++index) {
-            SharedWindowSurfaceRecord* record = &shared_surfaces[index];
-
-            if (!record->in_use || (record->hwnd != hwnd)) {
+        for (SharedWindowSurfaceRecord* record = g_shared_surface_head; record != NULL; record = record->next) {
+            if ((record == NULL) || !record->in_use || (record->hwnd != hwnd)) {
                 continue;
             }
             if ((record->owner_pid == static_cast<I64>(process->id)) || (record->server_pid == static_cast<I64>(process->id))) {
@@ -374,22 +695,349 @@ namespace {
     }
 
     /*
-     * Reserve one empty shared-surface record.
+     * Link one live surface record into the global intrusive registry.
      *
-     * Surface metadata and virtual slot units are allocated independently so a
-     * large window can span multiple units without forcing the record table to
-     * mirror the virtual address allocator.
+     * Surface metadata records are already page-backed objects, so the registry
+     * now publishes them directly instead of storing extra heap-backed pointer
+     * slots in a separate dynamic array.
      *
-     * @return Empty record, or NULL when the service is full.
+     * @param record Live surface record that is ready for lookup.
+     * @return Nothing.
      */
-    SharedWindowSurfaceRecord* gui_reserve_surface(void) {
-        for (Size index = 0U; index < COUNT_OF(shared_surfaces); ++index) {
-            if (!shared_surfaces[index].in_use) {
-                return &shared_surfaces[index];
+    void gui_link_surface_record(SharedWindowSurfaceRecord* record) {
+        if (record == NULL) {
+            return;
+        }
+
+        record->prev = g_shared_surface_tail;
+        record->next = NULL;
+        if (g_shared_surface_tail != NULL) {
+            g_shared_surface_tail->next = record;
+        }
+        else {
+            g_shared_surface_head = record;
+        }
+
+        g_shared_surface_tail = record;
+    }
+
+    /*
+     * Unlink one surface record from the global intrusive registry.
+     *
+     * @param record Published surface record to remove.
+     * @return Nothing.
+     */
+    void gui_unlink_surface_record(SharedWindowSurfaceRecord* record) {
+        if (record == NULL) {
+            return;
+        }
+
+        if (record->prev != NULL) {
+            record->prev->next = record->next;
+        }
+        else if (g_shared_surface_head == record) {
+            g_shared_surface_head = record->next;
+        }
+
+        if (record->next != NULL) {
+            record->next->prev = record->prev;
+        }
+        else if (g_shared_surface_tail == record) {
+            g_shared_surface_tail = record->prev;
+        }
+
+        record->next = NULL;
+        record->prev = NULL;
+    }
+
+    /*
+     * Allocate one page-backed surface metadata record.
+     *
+     * Surface view space is already capped by the reserved EL0 arena, so the
+     * metadata registry should grow with demand without consuming additional
+     * long-lived allocations from the general heap.
+     *
+     * @param owner_id Diagnostic owner identifier for resource tracking.
+     * @return Fresh metadata record, or NULL when allocation or tracking fails.
+     */
+    SharedWindowSurfaceRecord* gui_allocate_surface_record(U64 owner_id) {
+        SharedWindowSurfaceRecord* record;
+        Status status;
+        const bool interrupts_enabled = arch::Arch::save_and_disable_interrupts();
+
+        record = gui_surface_record_pool_allocate();
+        arch::Arch::restore_interrupts(interrupts_enabled);
+        if (record == NULL) {
+            return NULL;
+        }
+
+        status = KernelResourceManager::track_external(
+            KernelResourceKind::GuiSurfaceRecord,
+            record,
+            g_shared_surface_record_pool.slot_bytes,
+            owner_id,
+            "gui-surface-record");
+        if (status != StatusOK) {
+            const bool rollback_interrupts = arch::Arch::save_and_disable_interrupts();
+
+            gui_surface_record_pool_free(record);
+            arch::Arch::restore_interrupts(rollback_interrupts);
+            return NULL;
+        }
+
+        return record;
+    }
+
+    /*
+     * Return one surface metadata record to the page-backed pool.
+     *
+     * @param record Surface metadata record to release.
+     * @return Nothing.
+     */
+    void gui_free_surface_record(SharedWindowSurfaceRecord* record) {
+        if (record == NULL) {
+            return;
+        }
+
+        const bool interrupts_enabled = arch::Arch::save_and_disable_interrupts();
+
+        (void)KernelResourceManager::untrack(KernelResourceKind::GuiSurfaceRecord, record);
+        gui_surface_record_pool_free(record);
+        arch::Arch::restore_interrupts(interrupts_enabled);
+    }
+
+    /*
+     * Allocate one page list for a GUI surface backing.
+     *
+     * Requiring one physically contiguous run for every long-lived window
+     * surface makes GWES fragile once one large surface is already alive.
+     * Using one page list instead lets later windows and popup menus consume
+     * any free pages that remain, which is the behavior the shared surface
+     * arena needs.
+     *
+     * @param backing_bytes Page-rounded surface byte count.
+     * @param owner_id Diagnostic owner identifier for resource tracking.
+     * @param page_count_out Receives the number of pages in the returned list.
+     * @return Heap-owned physical page list, or NULL on failure.
+     */
+    PhysAddr* gui_allocate_surface_backing_pages(U32 backing_bytes, U64 owner_id, U32* page_count_out) {
+        const Size rounded_bytes = (static_cast<Size>(backing_bytes) + (mm::PageSize - 1U)) & ~(mm::PageSize - 1U);
+        const U32 page_count = static_cast<U32>(rounded_bytes / mm::PageSize);
+        PhysAddr* backing_pages;
+
+        if ((backing_bytes == 0U) || (page_count_out == NULL)) {
+            return NULL;
+        }
+        if ((rounded_bytes == 0U) || (page_count == 0U)) {
+            return NULL;
+        }
+
+        backing_pages = static_cast<PhysAddr*>(Heap::alloc(static_cast<Size>(page_count) * sizeof(PhysAddr), alignof(PhysAddr)));
+        if (backing_pages == NULL) {
+            KERROR("[gui-surface] backing-page-list alloc failed bytes=%u pages=%u owner=%llu\n",
+                backing_bytes,
+                page_count,
+                static_cast<unsigned long long>(owner_id));
+            gui_log_surface_memory_snapshot("backing-page-list-alloc-failed");
+            return NULL;
+        }
+
+        memzero(backing_pages, static_cast<Size>(page_count) * sizeof(PhysAddr));
+        for (U32 page_index = 0U; page_index < page_count; ++page_index) {
+            void* page_alias;
+            Status status;
+
+            backing_pages[page_index] = mm::PhysicalMemory::alloc_page();
+            if (backing_pages[page_index] == 0U) {
+                KERROR("[gui-surface] backing-page alloc failed bytes=%u pages=%u owner=%llu page_index=%u\n",
+                    backing_bytes,
+                    page_count,
+                    static_cast<unsigned long long>(owner_id),
+                    page_index);
+                gui_log_surface_memory_snapshot("backing-page-alloc-failed");
+                for (U32 rollback_index = 0U; rollback_index < page_index; ++rollback_index) {
+                    if (backing_pages[rollback_index] != 0U) {
+                        page_alias = reinterpret_cast<void*>(mm::MemoryManager::physical_to_kernel(backing_pages[rollback_index]));
+                        (void)KernelResourceManager::untrack(KernelResourceKind::GuiSurfaceBacking, page_alias);
+                        mm::PhysicalMemory::free_page(backing_pages[rollback_index]);
+                    }
+                }
+                Heap::free(backing_pages);
+                return NULL;
+            }
+
+            page_alias = reinterpret_cast<void*>(mm::MemoryManager::physical_to_kernel(backing_pages[page_index]));
+            status = KernelResourceManager::track_external(
+                KernelResourceKind::GuiSurfaceBacking,
+                page_alias,
+                mm::PageSize,
+                owner_id,
+                "gui-surface-backing");
+            if (status != StatusOK) {
+                KERROR("[gui-surface] backing-page track failed bytes=%u pages=%u owner=%llu page_index=%u status=%d\n",
+                    backing_bytes,
+                    page_count,
+                    static_cast<unsigned long long>(owner_id),
+                    page_index,
+                    static_cast<int>(status));
+                gui_log_surface_memory_snapshot("backing-page-track-failed");
+                (void)KernelResourceManager::untrack(KernelResourceKind::GuiSurfaceBacking, page_alias);
+                mm::PhysicalMemory::free_page(backing_pages[page_index]);
+                for (U32 rollback_index = 0U; rollback_index < page_index; ++rollback_index) {
+                    if (backing_pages[rollback_index] != 0U) {
+                        page_alias = reinterpret_cast<void*>(mm::MemoryManager::physical_to_kernel(backing_pages[rollback_index]));
+                        (void)KernelResourceManager::untrack(KernelResourceKind::GuiSurfaceBacking, page_alias);
+                        mm::PhysicalMemory::free_page(backing_pages[rollback_index]);
+                    }
+                }
+                Heap::free(backing_pages);
+                return NULL;
             }
         }
 
-        return NULL;
+        *page_count_out = page_count;
+        return backing_pages;
+    }
+
+    /*
+     * Return one GUI surface backing page list.
+     *
+     * @param backing_pages Physical pages that back the surface.
+     * @param page_count Number of pages stored in `backing_pages`.
+     * @return Nothing.
+     */
+    void gui_free_surface_backing_pages(PhysAddr* backing_pages, U32 page_count) {
+        if (backing_pages == NULL) {
+            return;
+        }
+
+        for (U32 page_index = 0U; page_index < page_count; ++page_index) {
+            if (backing_pages[page_index] != 0U) {
+                void* page_alias = reinterpret_cast<void*>(mm::MemoryManager::physical_to_kernel(backing_pages[page_index]));
+
+                (void)KernelResourceManager::untrack(KernelResourceKind::GuiSurfaceBacking, page_alias);
+                mm::PhysicalMemory::free_page(backing_pages[page_index]);
+            }
+        }
+
+        Heap::free(backing_pages);
+    }
+
+    /*
+     * Zero one page-backed GUI surface backing before it is published.
+     *
+     * The surface is shared with both GWES and the client process, so each
+     * page must start from known pixels even though the backing is no longer a
+     * single contiguous direct-map span.
+     *
+     * @param backing_pages Physical page list that backs the surface.
+     * @param page_count Number of pages stored in `backing_pages`.
+     * @return Nothing.
+     */
+    void gui_zero_surface_backing_pages(const PhysAddr* backing_pages, U32 page_count) {
+        if (backing_pages == NULL) {
+            return;
+        }
+
+        for (U32 page_index = 0U; page_index < page_count; ++page_index) {
+            if (backing_pages[page_index] != 0U) {
+                void* page_alias = reinterpret_cast<void*>(mm::MemoryManager::physical_to_kernel(backing_pages[page_index]));
+
+                memzero(page_alias, mm::PageSize);
+            }
+        }
+    }
+
+    /*
+     * Publish one live surface record in the intrusive registry.
+     *
+     * @param record Live surface record that is ready for lookup.
+     * @return StatusOK on success.
+     */
+    Status gui_publish_surface_record(SharedWindowSurfaceRecord* record) {
+        if (record == NULL) {
+            return StatusInvalidArgument;
+        }
+
+        gui_link_surface_record(record);
+        return StatusOK;
+    }
+
+    /*
+     * Link one reserved surface span into the slot-ordered registry.
+     *
+     * The surface slot registry is ordered by `slot_index` so the allocator can
+     * find the first fitting gap without relying on a fixed bitmap sized to the
+     * full virtual address range.
+     *
+     * @param record Surface record that already owns a valid slot span.
+     * @return Nothing.
+     */
+    void gui_link_surface_slot_record(SharedWindowSurfaceRecord* record) {
+        SharedWindowSurfaceRecord* cursor;
+
+        if ((record == NULL) || (record->slot_count == 0U)) {
+            return;
+        }
+
+        cursor = g_shared_surface_slot_head;
+        while ((cursor != NULL) && (cursor->slot_index <= record->slot_index)) {
+            cursor = cursor->slot_next;
+        }
+
+        if (cursor == NULL) {
+            record->slot_prev = g_shared_surface_slot_tail;
+            record->slot_next = NULL;
+            if (g_shared_surface_slot_tail != NULL) {
+                g_shared_surface_slot_tail->slot_next = record;
+            }
+            else {
+                g_shared_surface_slot_head = record;
+            }
+
+            g_shared_surface_slot_tail = record;
+            return;
+        }
+
+        record->slot_next = cursor;
+        record->slot_prev = cursor->slot_prev;
+        if (cursor->slot_prev != NULL) {
+            cursor->slot_prev->slot_next = record;
+        }
+        else {
+            g_shared_surface_slot_head = record;
+        }
+
+        cursor->slot_prev = record;
+    }
+
+    /*
+     * Unlink one reserved surface span from the slot-ordered registry.
+     *
+     * @param record Surface record whose reservation should be removed.
+     * @return Nothing.
+     */
+    void gui_unlink_surface_slot_record(SharedWindowSurfaceRecord* record) {
+        if (record == NULL) {
+            return;
+        }
+
+        if (record->slot_prev != NULL) {
+            record->slot_prev->slot_next = record->slot_next;
+        }
+        else if (g_shared_surface_slot_head == record) {
+            g_shared_surface_slot_head = record->slot_next;
+        }
+
+        if (record->slot_next != NULL) {
+            record->slot_next->slot_prev = record->slot_prev;
+        }
+        else if (g_shared_surface_slot_tail == record) {
+            g_shared_surface_slot_tail = record->slot_prev;
+        }
+
+        record->slot_next = NULL;
+        record->slot_prev = NULL;
     }
 
     /*
@@ -404,12 +1052,12 @@ namespace {
      * @return StatusOK on success, or an error when the request is invalid.
      */
     Status gui_surface_slot_units(U32 allocation_bytes, U32* slot_count_out) {
-        const U64 slot_count = (static_cast<U64>(allocation_bytes) + (GuiSurfaceSlotUnitBytes - 1ULL)) / GuiSurfaceSlotUnitBytes;
+        const U64 slot_count = (static_cast<U64>(allocation_bytes) + (user_address_space::GuiSurfaceSlotUnitBytes - 1ULL)) / user_address_space::GuiSurfaceSlotUnitBytes;
 
         if ((slot_count_out == NULL) || (allocation_bytes == 0U)) {
             return StatusInvalidArgument;
         }
-        if ((slot_count == 0ULL) || (slot_count > GuiSurfaceSlotUnitCount)) {
+        if ((slot_count == 0ULL) || (slot_count > user_address_space::GuiSurfaceSlotUnitCount)) {
             return StatusNoSpace;
         }
 
@@ -420,67 +1068,57 @@ namespace {
     /*
      * Reserve one contiguous span of shared-surface slot units.
      *
-     * A contiguous first-fit allocator keeps the resulting user mapping stable
-     * and lets `map` and `unmap` cover the whole surface with one range even
-     * when it crosses several 64 KiB units.
+     * A first-fit scan over the slot-ordered registry keeps the resulting user
+     * mapping stable and lets `map` and `unmap` cover the whole surface with
+     * one range even when it crosses several 64 KiB units.
      *
      * @param slot_count Number of contiguous units required.
      * @param slot_index_out Receives the first unit index.
      * @return StatusOK on success, or StatusNoSpace when no contiguous span fits.
      */
     Status gui_reserve_surface_span(U32 slot_count, U32* slot_index_out) {
-        U32 run_start = 0U;
-        U32 run_length = 0U;
+        U32 candidate = 0U;
 
         if ((slot_index_out == NULL) || (slot_count == 0U)) {
             return StatusInvalidArgument;
         }
-        if (slot_count > COUNT_OF(shared_surface_slots)) {
+        if (slot_count > user_address_space::GuiSurfaceSlotUnitCount) {
             return StatusNoSpace;
         }
 
-        for (U32 index = 0U; index < COUNT_OF(shared_surface_slots); ++index) {
-            if (shared_surface_slots[index]) {
-                run_length = 0U;
-                run_start = index + 1U;
-                continue;
-            }
-
-            if (run_length == 0U) {
-                run_start = index;
-            }
-            ++run_length;
-            if (run_length == slot_count) {
-                for (U32 reserve_index = 0U; reserve_index < slot_count; ++reserve_index) {
-                    shared_surface_slots[run_start + reserve_index] = true;
-                }
-                *slot_index_out = run_start;
+        for (SharedWindowSurfaceRecord* record = g_shared_surface_slot_head; record != NULL; record = record->slot_next) {
+            if ((static_cast<U64>(candidate) + static_cast<U64>(slot_count)) <= record->slot_index) {
+                *slot_index_out = candidate;
                 return StatusOK;
             }
+
+            candidate = record->slot_index + record->slot_count;
+        }
+
+        if ((static_cast<U64>(candidate) + static_cast<U64>(slot_count)) <= user_address_space::GuiSurfaceSlotUnitCount) {
+            *slot_index_out = candidate;
+            return StatusOK;
         }
 
         return StatusNoSpace;
     }
 
     /*
-     * Release one contiguous span of shared-surface slot units.
+     * Release one reserved shared-surface span from the slot registry.
      *
      * Surface records own their slot-unit reservation for the entire lifetime
-     * of the backing store. Clearing the reservation here makes small-window VA
+     * of the backing store. Unlinking the record here makes small-window VA
      * reuse deterministic after destroy or process teardown.
      *
-     * @param slot_index First reserved slot-unit index.
-     * @param slot_count Number of reserved units.
+     * @param record Surface record whose reserved span should be released.
      * @return Nothing.
      */
-    void gui_release_surface_span(U32 slot_index, U32 slot_count) {
-        if ((slot_count == 0U) || (slot_index >= COUNT_OF(shared_surface_slots))) {
+    void gui_release_surface_span(SharedWindowSurfaceRecord* record) {
+        if ((record == NULL) || (record->slot_count == 0U)) {
             return;
         }
 
-        for (U32 index = 0U; (index < slot_count) && ((slot_index + index) < COUNT_OF(shared_surface_slots)); ++index) {
-            shared_surface_slots[slot_index + index] = false;
-        }
+        gui_unlink_surface_slot_record(record);
     }
 
     /*
@@ -539,14 +1177,10 @@ namespace {
      * @return StatusOK on success, or the MMU failure code.
      */
     Status gui_map_surface(Process* process, const SharedWindowSurfaceRecord* record) {
-        const VmMapping mapping = {
-            gui_surface_slot_address(record->slot_index),
-            record->physical_base,
-            record->allocation_bytes,
-            PagePresent | PageWritable | PageUser,
-        };
+        VmMapping mapping = {};
+        const VirtAddr view_base = gui_surface_slot_address(record->slot_index);
 
-        if ((process == NULL) || (record == NULL)) {
+        if ((process == NULL) || (record == NULL) || (record->backing_pages == NULL) || (record->backing_page_count == 0U)) {
             return StatusInvalidArgument;
         }
 
@@ -555,11 +1189,27 @@ namespace {
             static_cast<long>(process->id),
             static_cast<unsigned long long>(record->hwnd),
             record->slot_index,
-            static_cast<unsigned long long>(mapping.virtual_base),
-            static_cast<unsigned long long>(mapping.physical_base),
-            static_cast<unsigned long long>(mapping.length),
+            static_cast<unsigned long long>(view_base),
+            static_cast<unsigned long long>(record->physical_base),
+            static_cast<unsigned long long>(record->allocation_bytes),
             static_cast<long>(record->owner_pid));
-        return mm::MemoryManager::map(&process->process_address_space, &mapping);
+
+        for (U32 page_index = 0U; page_index < record->backing_page_count; ++page_index) {
+            mapping.virtual_base = view_base + (static_cast<VirtAddr>(page_index) * mm::PageSize);
+            mapping.physical_base = record->backing_pages[page_index];
+            mapping.length = mm::PageSize;
+            mapping.flags = PagePresent | PageWritable | PageUser;
+
+            Status status = mm::MemoryManager::map(&process->process_address_space, &mapping);
+            if (status != StatusOK) {
+                if (page_index != 0U) {
+                    (void)mm::MemoryManager::unmap(&process->process_address_space, view_base, static_cast<Size>(page_index) * mm::PageSize);
+                }
+                return status;
+            }
+        }
+
+        return StatusOK;
     }
 
     /*
@@ -619,16 +1269,41 @@ namespace {
      * @param record Surface slot to clear.
      * @return Nothing.
      */
-    void gui_clear_surface_record(SharedWindowSurfaceRecord* record) {
+    void gui_release_surface_record_resources(SharedWindowSurfaceRecord* record) {
         if (record == NULL) {
             return;
         }
 
         if (record->backing != NULL) {
-            Heap::free(record->backing);
+            gui_free_surface_backing_pages(record->backing_pages, record->backing_page_count);
+            record->backing = NULL;
         }
-        gui_release_surface_span(record->slot_index, record->slot_count);
-        memzero(record, sizeof(*record));
+        record->backing_pages = NULL;
+        record->backing_page_count = 0U;
+        gui_release_surface_span(record);
+        record->slot_index = 0U;
+        record->slot_count = 0U;
+        record->allocation_bytes = 0U;
+        record->physical_base = 0ULL;
+        record->owner_mapped = false;
+        record->server_mapped = false;
+        record->in_use = false;
+    }
+
+    /*
+     * Remove one surface record from the registry and free its backing.
+     *
+     * @param record Surface metadata to destroy.
+     * @return Nothing.
+     */
+    void gui_destroy_surface_record(SharedWindowSurfaceRecord* record) {
+        if (record == NULL) {
+            return;
+        }
+
+        gui_unlink_surface_record(record);
+        gui_release_surface_record_resources(record);
+        gui_free_surface_record(record);
     }
 
 } // namespace
@@ -641,8 +1316,11 @@ Status GuiService::init(void) {
     }
 
     if (!gui_service_initialized) {
-        memzero(shared_surfaces, sizeof(shared_surfaces));
-        memzero(shared_surface_slots, sizeof(shared_surface_slots));
+        (void)KernelResourceManager::init();
+        g_shared_surface_head = NULL;
+        g_shared_surface_tail = NULL;
+        g_shared_surface_slot_head = NULL;
+        g_shared_surface_slot_tail = NULL;
         gui_service_initialized = true;
     }
 
@@ -760,9 +1438,11 @@ Status GuiService::acquire_shared_input(Process* process, RosKernelGuiSharedInpu
     gui_cleanup_stale_shared_input_consumers();
     consumer = gui_find_shared_input_consumer(process->id, &consumer_index);
     if (consumer == NULL) {
-        for (consumer_index = 0U; consumer_index < ROS_KERNEL_GUI_SHARED_INPUT_MAX_CONSUMERS; ++consumer_index) {
-            if (region->consumers[consumer_index].pid == 0U) {
-                consumer = &region->consumers[consumer_index];
+        for (consumer_index = 0U; consumer_index < region->max_consumers; ++consumer_index) {
+            RosKernelGuiSharedInputConsumer* candidate = ros_kernel_gui_shared_input_consumer_at(region, consumer_index);
+
+            if (candidate->pid == 0U) {
+                consumer = candidate;
                 gui_shared_input_reset_consumer(consumer);
                 consumer->pid = static_cast<U32>(process->id);
                 consumer->head_sequence = region->tail_sequence;
@@ -916,30 +1596,53 @@ Status GuiService::create_window_surface(Process* process, GuiWindowSurfaceView*
         return StatusAlreadyExists;
     }
 
-    record = gui_reserve_surface();
+    record = gui_allocate_surface_record(static_cast<U64>(process->id));
     if (record == NULL) {
-        return StatusNoSpace;
+        KERROR("[gui-surface] surface-record alloc failed server_pid=%ld hwnd=%llu owner=%ld size=%ux%u\n",
+            static_cast<long>(process->id),
+            static_cast<unsigned long long>(view->hwnd),
+            static_cast<long>(view->owner_pid),
+            view->width,
+            view->height);
+        gui_log_surface_memory_snapshot("surface-record-alloc-failed");
+        return StatusNoMemory;
     }
 
     status = gui_reserve_surface_span(slot_count, &slot_index);
     if (status != StatusOK) {
+        gui_free_surface_record(record);
         return status;
     }
 
-    memzero(record, sizeof(*record));
-    record->backing = Heap::alloc(allocation_bytes, mm::PageSize);
-    if (record->backing == NULL) {
-        gui_release_surface_span(slot_index, slot_count);
-        memzero(record, sizeof(*record));
+    record->slot_index = slot_index;
+    record->slot_count = slot_count;
+    gui_link_surface_slot_record(record);
+
+    record->backing_pages = gui_allocate_surface_backing_pages(allocation_bytes, static_cast<U64>(process->id), &record->backing_page_count);
+    if (record->backing_pages == NULL) {
+        KERROR("[gui-surface] surface-backing alloc failed server_pid=%ld hwnd=%llu owner=%ld size=%ux%u bytes=%u pages=%u\n",
+            static_cast<long>(process->id),
+            static_cast<unsigned long long>(view->hwnd),
+            static_cast<long>(view->owner_pid),
+            view->width,
+            view->height,
+            allocation_bytes,
+            static_cast<unsigned int>(allocation_bytes / mm::PageSize));
+        gui_log_surface_memory_snapshot("surface-backing-alloc-failed");
+        gui_release_surface_span(record);
+        record->slot_index = 0U;
+        record->slot_count = 0U;
+        gui_free_surface_record(record);
         return StatusNoMemory;
     }
+    record->backing = reinterpret_cast<void*>(mm::MemoryManager::physical_to_kernel(record->backing_pages[0]));
     status = gui_heap_checkpoint_status("gui:create-surface:backing-ready");
     if (status != StatusOK) {
-        gui_clear_surface_record(record);
+        gui_destroy_surface_record(record);
         return status;
     }
 
-    memzero(record->backing, allocation_bytes);
+    gui_zero_surface_backing_pages(record->backing_pages, record->backing_page_count);
     record->in_use = true;
     record->hwnd = view->hwnd;
     record->owner_pid = view->owner_pid;
@@ -949,9 +1652,7 @@ Status GuiService::create_window_surface(Process* process, GuiWindowSurfaceView*
     record->pitch = view->width * sizeof(U32);
     record->pixel_format = view->pixel_format;
     record->allocation_bytes = allocation_bytes;
-    record->slot_index = slot_index;
-    record->slot_count = slot_count;
-    record->physical_base = mm::MemoryManager::kernel_to_physical(reinterpret_cast<VirtAddr>(record->backing));
+    record->physical_base = record->backing_pages[0];
 
     GUI_SURFACE_TRACE(
         "allocated slot=%u span=%u backing=%p paddr=%llx paddr_align=%llx payload=%u bytes=%u pitch=%u",
@@ -972,7 +1673,14 @@ Status GuiService::create_window_surface(Process* process, GuiWindowSurfaceView*
             static_cast<unsigned long long>(record->hwnd),
             record->slot_index,
             static_cast<int>(status));
-        gui_clear_surface_record(record);
+        gui_destroy_surface_record(record);
+        return status;
+    }
+
+    status = gui_publish_surface_record(record);
+    if (status != StatusOK) {
+        (void)gui_unmap_surface(process, record);
+        gui_destroy_surface_record(record);
         return status;
     }
 
@@ -1008,7 +1716,7 @@ Status GuiService::destroy_window_surface(Process* process, const GuiWindowSurfa
         (void)gui_unmap_surface(owner_process, record);
     }
 
-    gui_clear_surface_record(record);
+    gui_destroy_surface_record(record);
     return gui_heap_checkpoint_status("gui:destroy-surface:success");
 }
 
@@ -1093,10 +1801,11 @@ Status GuiService::release_process_surfaces(Process* process) {
         return status;
     }
 
-    for (Size index = 0U; index < COUNT_OF(shared_surfaces); ++index) {
-        SharedWindowSurfaceRecord* record = &shared_surfaces[index];
+    for (SharedWindowSurfaceRecord* record = g_shared_surface_head; record != NULL;) {
+        SharedWindowSurfaceRecord* next_record = record->next;
 
         if (!record->in_use) {
+            record = next_record;
             continue;
         }
 
@@ -1106,13 +1815,16 @@ Status GuiService::release_process_surfaces(Process* process) {
             if ((owner_process != NULL) && (owner_process != process) && record->owner_mapped) {
                 (void)gui_unmap_surface(owner_process, record);
             }
-            gui_clear_surface_record(record);
+            gui_destroy_surface_record(record);
+            record = next_record;
             continue;
         }
 
         if (record->owner_pid == static_cast<I64>(process->id)) {
             record->owner_mapped = false;
         }
+
+        record = next_record;
     }
 
     return gui_heap_checkpoint_status("gui:release-process-surfaces:success");
@@ -1131,7 +1843,9 @@ void GuiService::publish_input_event(uint32_t type, uint32_t x, uint32_t y, uint
     }
 
     U64 sequence = region->tail_sequence;
-    RosKernelGuiSharedInputRecord* record = &region->records[sequence % ROS_KERNEL_GUI_SHARED_INPUT_CAPACITY];
+    RosKernelGuiSharedInputRecord* record = ros_kernel_gui_shared_input_record_at(
+        region,
+        static_cast<uint32_t>(sequence % region->capacity));
 
     record->sequence = sequence;
     record->uptime_msec = static_cast<uint32_t>(KernelTime::ticks_to_milliseconds(Scheduler::tick_count()));
@@ -1157,7 +1871,7 @@ void GuiService::publish_input_event(uint32_t type, uint32_t x, uint32_t y, uint
         region->last_pointer_state.visible = 1U;
     }
 
-    if (sequence >= ROS_KERNEL_GUI_SHARED_INPUT_CAPACITY) {
+    if (sequence >= region->capacity) {
         region->overflow_count++;
     }
 
@@ -1165,8 +1879,8 @@ void GuiService::publish_input_event(uint32_t type, uint32_t x, uint32_t y, uint
     asm volatile("dmb ishst" ::: "memory");
     region->tail_sequence = sequence + 1ULL;
 
-    for (U32 index = 0U; index < ROS_KERNEL_GUI_SHARED_INPUT_MAX_CONSUMERS; ++index) {
-        RosKernelGuiSharedInputConsumer* consumer = &region->consumers[index];
+    for (U32 index = 0U; index < region->max_consumers; ++index) {
+        RosKernelGuiSharedInputConsumer* consumer = ros_kernel_gui_shared_input_consumer_at(region, index);
 
         if ((consumer->pid == 0U) || (consumer->head_sequence != sequence)) {
             continue;

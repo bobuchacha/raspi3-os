@@ -8,37 +8,38 @@
 namespace {
 
     inline constexpr U64 VfsFileCacheTtlMsec = 5ULL * 60ULL * 1000ULL;
-    inline constexpr Size VfsFileCacheEntryCount = 32U;
     inline constexpr Size VfsFileCacheMaxBytes = 24U * 1024U * 1024U;
     inline constexpr Size VfsFileCacheMaxFileBytes = 4U * 1024U * 1024U;
 
     typedef struct VfsVolumeEntry {
         bool mounted;
         VfsMount mount;
+        struct VfsVolumeEntry* next;
     } VfsVolumeEntry;
 
     typedef struct VfsDeviceAliasEntry {
         bool used;
         char name[VFS_DEVICE_NAME_CAPACITY];
         Device* device;
+        struct VfsDeviceAliasEntry* next;
     } VfsDeviceAliasEntry;
 
     typedef struct VfsFileCacheEntry {
-        bool used;
         char volume_letter;
-        U16 reserved0;
-        U32 reserved1;
         U64 inode;
         U64 size_bytes;
         U64 expires_at_msec;
         U64 last_used_msec;
         U8* data;
+        struct VfsFileCacheEntry* next;
     } VfsFileCacheEntry;
 
-    VfsVolumeEntry g_volume_table[VFS_VOLUME_SLOT_COUNT];
-    VfsDeviceAliasEntry g_device_aliases[VFS_DEVICE_ALIAS_CAPACITY];
-    VfsFileCacheEntry g_vfs_file_cache[VfsFileCacheEntryCount];
+    VfsVolumeEntry* g_volume_table;
+    VfsDeviceAliasEntry* g_device_aliases;
+    VfsFileCacheEntry* g_vfs_file_cache;
     Size g_vfs_file_cache_bytes;
+
+    int volume_index_for_letter(char drive_letter);
 
     /*
      * Return the current uptime used by the VFS cache TTL bookkeeping.
@@ -50,13 +51,116 @@ namespace {
     }
 
     /*
+     * Release every heap-backed volume registry entry.
+     *
+     * @return Nothing.
+     */
+    void vfs_release_volume_registry(void) {
+        while (g_volume_table != NULL) {
+            VfsVolumeEntry* next = g_volume_table->next;
+
+            Heap::free(g_volume_table);
+            g_volume_table = next;
+        }
+    }
+
+    /*
+     * Release every heap-backed device alias entry.
+     *
+     * @return Nothing.
+     */
+    void vfs_release_device_alias_registry(void) {
+        while (g_device_aliases != NULL) {
+            VfsDeviceAliasEntry* next = g_device_aliases->next;
+
+            Heap::free(g_device_aliases);
+            g_device_aliases = next;
+        }
+    }
+
+    /*
+     * Allocate one heap-backed volume registry entry.
+     *
+     * @return Zeroed registry entry, or NULL on allocation failure.
+     */
+    VfsVolumeEntry* vfs_allocate_volume_entry(void) {
+        VfsVolumeEntry* entry = static_cast<VfsVolumeEntry*>(Heap::alloc(sizeof(VfsVolumeEntry), alignof(VfsVolumeEntry)));
+
+        if (entry == NULL) {
+            return NULL;
+        }
+
+        memzero(entry, sizeof(*entry));
+        return entry;
+    }
+
+    /*
+     * Allocate one heap-backed device alias entry.
+     *
+     * @return Zeroed alias entry, or NULL on allocation failure.
+     */
+    VfsDeviceAliasEntry* vfs_allocate_device_alias_entry(void) {
+        VfsDeviceAliasEntry* entry = static_cast<VfsDeviceAliasEntry*>(Heap::alloc(sizeof(VfsDeviceAliasEntry), alignof(VfsDeviceAliasEntry)));
+
+        if (entry == NULL) {
+            return NULL;
+        }
+
+        memzero(entry, sizeof(*entry));
+        return entry;
+    }
+
+    /*
+     * Allocate one heap-backed cache metadata entry.
+     *
+     * @return Zeroed cache entry, or NULL on allocation failure.
+     */
+    VfsFileCacheEntry* vfs_allocate_file_cache_entry(void) {
+        VfsFileCacheEntry* entry = static_cast<VfsFileCacheEntry*>(Heap::alloc(sizeof(VfsFileCacheEntry), alignof(VfsFileCacheEntry)));
+
+        if (entry == NULL) {
+            return NULL;
+        }
+
+        memzero(entry, sizeof(*entry));
+        return entry;
+    }
+
+    /*
+     * Find one mounted volume entry by drive letter.
+     *
+     * @param drive_letter Requested drive letter.
+     * @return Mounted volume entry, or NULL when none exists.
+     */
+    VfsVolumeEntry* vfs_find_volume(char drive_letter) {
+        const int volume_index = volume_index_for_letter(drive_letter);
+
+        if (volume_index < 0) {
+            return NULL;
+        }
+
+        const char normalized_drive = static_cast<char>('A' + volume_index);
+
+        for (VfsVolumeEntry* entry = g_volume_table; entry != NULL; entry = entry->next) {
+            if (entry->mounted && (entry->mount.drive_letter == normalized_drive)) {
+                return entry;
+            }
+        }
+
+        return NULL;
+    }
+
+    /*
      * Release one cached file image and clear its metadata.
      *
      * @param entry Cache entry to release.
      * @return Nothing.
      */
     void vfs_file_cache_clear_entry(VfsFileCacheEntry* entry) {
-        if ((entry == NULL) || !entry->used) {
+        VfsFileCacheEntry* current;
+        VfsFileCacheEntry* previous = NULL;
+
+        if (entry == NULL) {
             return;
         }
 
@@ -71,7 +175,23 @@ namespace {
             g_vfs_file_cache_bytes = 0U;
         }
 
-        memzero(entry, sizeof(*entry));
+        current = g_vfs_file_cache;
+        while (current != NULL) {
+            if (current == entry) {
+                if (previous != NULL) {
+                    previous->next = current->next;
+                }
+                else {
+                    g_vfs_file_cache = current->next;
+                }
+
+                Heap::free(current);
+                return;
+            }
+
+            previous = current;
+            current = current->next;
+        }
     }
 
     /*
@@ -83,8 +203,8 @@ namespace {
      * @return Nothing.
      */
     void vfs_file_cache_invalidate_all(void) {
-        for (Size index = 0U; index < COUNT_OF(g_vfs_file_cache); ++index) {
-            vfs_file_cache_clear_entry(&g_vfs_file_cache[index]);
+        while (g_vfs_file_cache != NULL) {
+            vfs_file_cache_clear_entry(g_vfs_file_cache);
         }
 
         g_vfs_file_cache_bytes = 0U;
@@ -97,17 +217,16 @@ namespace {
      * @return Nothing.
      */
     void vfs_file_cache_prune_expired(U64 now_msec) {
-        for (Size index = 0U; index < COUNT_OF(g_vfs_file_cache); ++index) {
-            VfsFileCacheEntry* entry = &g_vfs_file_cache[index];
+        for (VfsFileCacheEntry* entry = g_vfs_file_cache; entry != NULL;) {
+            VfsFileCacheEntry* next = entry->next;
 
-            if (!entry->used) {
-                continue;
-            }
             if (entry->expires_at_msec > now_msec) {
+                entry = next;
                 continue;
             }
 
             vfs_file_cache_clear_entry(entry);
+            entry = next;
         }
     }
 
@@ -140,7 +259,6 @@ namespace {
      */
     bool vfs_file_cache_entry_matches_node(const VfsFileCacheEntry* entry, const VfsNode* node) {
         return (entry != NULL)
-            && entry->used
             && (node != NULL)
             && (entry->volume_letter == node->volume_letter)
             && (entry->inode == node->inode)
@@ -158,9 +276,7 @@ namespace {
     VfsFileCacheEntry* vfs_file_cache_find(const VfsNode* node, U64 now_msec) {
         vfs_file_cache_prune_expired(now_msec);
 
-        for (Size index = 0U; index < COUNT_OF(g_vfs_file_cache); ++index) {
-            VfsFileCacheEntry* entry = &g_vfs_file_cache[index];
-
+        for (VfsFileCacheEntry* entry = g_vfs_file_cache; entry != NULL; entry = entry->next) {
             if (!vfs_file_cache_entry_matches_node(entry, node)) {
                 continue;
             }
@@ -181,12 +297,7 @@ namespace {
     VfsFileCacheEntry* vfs_file_cache_find_lru(void) {
         VfsFileCacheEntry* best = NULL;
 
-        for (Size index = 0U; index < COUNT_OF(g_vfs_file_cache); ++index) {
-            VfsFileCacheEntry* entry = &g_vfs_file_cache[index];
-
-            if (!entry->used) {
-                continue;
-            }
+        for (VfsFileCacheEntry* entry = g_vfs_file_cache; entry != NULL; entry = entry->next) {
             if ((best == NULL) || (entry->last_used_msec < best->last_used_msec)) {
                 best = entry;
             }
@@ -250,7 +361,7 @@ namespace {
         Size available;
         Size copy_bytes;
 
-        if ((entry == NULL) || ((buffer == NULL) && (length != 0U)) || !entry->used || (entry->data == NULL)) {
+        if ((entry == NULL) || ((buffer == NULL) && (length != 0U)) || (entry->data == NULL)) {
             return StatusInvalidArgument;
         }
         if ((length == 0U) || (offset >= entry->size_bytes)) {
@@ -302,28 +413,20 @@ namespace {
             return NULL;
         }
 
-        for (Size index = 0U; index < COUNT_OF(g_vfs_file_cache); ++index) {
-            if (!g_vfs_file_cache[index].used) {
-                slot = &g_vfs_file_cache[index];
-                break;
-            }
-        }
-        if (slot == NULL) {
-            slot = vfs_file_cache_find_lru();
-        }
+        slot = vfs_allocate_file_cache_entry();
         if (slot == NULL) {
             Heap::free(bytes);
             return NULL;
         }
 
-        vfs_file_cache_clear_entry(slot);
-        slot->used = true;
         slot->volume_letter = node->volume_letter;
         slot->inode = node->inode;
         slot->size_bytes = node->size_bytes;
         slot->expires_at_msec = now_msec + VfsFileCacheTtlMsec;
         slot->last_used_msec = now_msec;
         slot->data = bytes;
+        slot->next = g_vfs_file_cache;
+        g_vfs_file_cache = slot;
         g_vfs_file_cache_bytes += static_cast<Size>(slot->size_bytes);
         return slot;
     }
@@ -391,9 +494,9 @@ namespace {
     }
 
     VfsDeviceAliasEntry* find_device_alias(const char* name) {
-        for (Size index = 0; index < COUNT_OF(g_device_aliases); ++index) {
-            if (g_device_aliases[index].used && same_text_case_insensitive(g_device_aliases[index].name, name)) {
-                return &g_device_aliases[index];
+        for (VfsDeviceAliasEntry* entry = g_device_aliases; entry != NULL; entry = entry->next) {
+            if (entry->used && same_text_case_insensitive(entry->name, name)) {
+                return entry;
             }
         }
 
@@ -516,7 +619,7 @@ namespace {
     }
 
     Status vfs_mount_volume_impl(const VfsMount* mount) {
-        int volume_index;
+        VfsVolumeEntry* volume_entry;
         Status status;
 
         if (mount == NULL) {
@@ -526,11 +629,10 @@ namespace {
             return StatusInvalidArgument;
         }
 
-        volume_index = volume_index_for_letter(mount->drive_letter);
-        if (volume_index < 0) {
+        if (volume_index_for_letter(mount->drive_letter) < 0) {
             return StatusInvalidArgument;
         }
-        if (g_volume_table[volume_index].mounted) {
+        if (vfs_find_volume(mount->drive_letter) != NULL) {
             return StatusAlreadyExists;
         }
         if ((mount->filesystem->ops == NULL) || (mount->filesystem->ops->mount == NULL)) {
@@ -542,14 +644,22 @@ namespace {
             return status;
         }
 
-        g_volume_table[volume_index].mounted = true;
-        g_volume_table[volume_index].mount = *mount;
-        g_volume_table[volume_index].mount.drive_letter = (char)ascii_upper(mount->drive_letter);
+        volume_entry = vfs_allocate_volume_entry();
+        if (volume_entry == NULL) {
+            return StatusNoMemory;
+        }
+
+        volume_entry->mounted = true;
+        volume_entry->mount = *mount;
+        volume_entry->mount.drive_letter = (char)ascii_upper(mount->drive_letter);
+        volume_entry->next = g_volume_table;
+        g_volume_table = volume_entry;
         return StatusOK;
     }
 
     Status vfs_register_device_name_impl(const char* name, Device* device) {
         char normalized_name[VFS_DEVICE_NAME_CAPACITY];
+        VfsDeviceAliasEntry* alias_entry;
 
         if ((name == NULL) || (device == NULL)) {
             return StatusInvalidArgument;
@@ -564,16 +674,17 @@ namespace {
             return StatusAlreadyExists;
         }
 
-        for (Size index = 0; index < COUNT_OF(g_device_aliases); ++index) {
-            if (!g_device_aliases[index].used) {
-                g_device_aliases[index].used = true;
-                g_device_aliases[index].device = device;
-                copy_upper_text(g_device_aliases[index].name, COUNT_OF(g_device_aliases[index].name), normalized_name);
-                return StatusOK;
-            }
+        alias_entry = vfs_allocate_device_alias_entry();
+        if (alias_entry == NULL) {
+            return StatusNoMemory;
         }
 
-        return StatusNoSpace;
+        alias_entry->used = true;
+        alias_entry->device = device;
+        copy_upper_text(alias_entry->name, COUNT_OF(alias_entry->name), normalized_name);
+        alias_entry->next = g_device_aliases;
+        g_device_aliases = alias_entry;
+        return StatusOK;
     }
 
     Status vfs_resolve_impl(const char* path, VfsNode* node) {
@@ -581,9 +692,9 @@ namespace {
         const char* volume_suffix;
         char normalized_path[VFS_PATH_CAPACITY];
         char normalized_name[VFS_DEVICE_NAME_CAPACITY];
-        int volume_index;
         FilesystemNode filesystem_node;
         VfsDeviceAliasEntry* alias;
+        VfsVolumeEntry* volume;
 
         if ((path == NULL) || (node == NULL)) {
             return StatusInvalidArgument;
@@ -591,12 +702,12 @@ namespace {
 
         memzero(node, sizeof(*node));
         if (parse_volume_path(path, &drive_letter, &volume_suffix)) {
-            volume_index = volume_index_for_letter(drive_letter);
-            if ((volume_index < 0) || !g_volume_table[volume_index].mounted) {
+            volume = vfs_find_volume(drive_letter);
+            if ((volume == NULL) || !volume->mounted) {
                 return StatusNotFound;
             }
-            if ((g_volume_table[volume_index].mount.filesystem->ops == NULL) ||
-                (g_volume_table[volume_index].mount.filesystem->ops->lookup == NULL)) {
+            if ((volume->mount.filesystem->ops == NULL) ||
+                (volume->mount.filesystem->ops->lookup == NULL)) {
                 return StatusNotSupported;
             }
 
@@ -611,8 +722,8 @@ namespace {
 
             memzero(&filesystem_node, sizeof(filesystem_node));
             {
-                Status status = g_volume_table[volume_index].mount.filesystem->ops->lookup(
-                    g_volume_table[volume_index].mount.filesystem_state,
+                Status status = volume->mount.filesystem->ops->lookup(
+                    volume->mount.filesystem_state,
                     normalized_path,
                     &filesystem_node);
 
@@ -621,7 +732,7 @@ namespace {
                 }
             }
 
-            populate_filesystem_node(node, &g_volume_table[volume_index], &filesystem_node);
+            populate_filesystem_node(node, volume, &filesystem_node);
             return StatusOK;
         }
 
@@ -684,7 +795,7 @@ namespace {
     Status resolve_filesystem_path(const char* path, const VfsVolumeEntry** volume_out, char normalized_path[VFS_PATH_CAPACITY]) {
         char drive_letter;
         const char* volume_suffix;
-        int volume_index;
+        VfsVolumeEntry* volume;
 
         if ((path == NULL) || (volume_out == NULL) || (normalized_path == NULL)) {
             return StatusInvalidArgument;
@@ -693,8 +804,8 @@ namespace {
             return StatusInvalidArgument;
         }
 
-        volume_index = volume_index_for_letter(drive_letter);
-        if ((volume_index < 0) || !g_volume_table[volume_index].mounted) {
+        volume = vfs_find_volume(drive_letter);
+        if ((volume == NULL) || !volume->mounted) {
             return StatusNotFound;
         }
 
@@ -707,7 +818,7 @@ namespace {
             }
         }
 
-        *volume_out = &g_volume_table[volume_index];
+        *volume_out = volume;
         return StatusOK;
     }
 
@@ -848,7 +959,6 @@ namespace {
     Status vfs_enumerate_impl(const VfsNode* node, void* context, VfsEnumerateVisitor visitor) {
         VfsEnumerateBridgeContext bridge = {};
         VfsVolumeEntry* volume = NULL;
-        int volume_index;
 
         if ((node == NULL) || (visitor == NULL)) {
             return StatusInvalidArgument;
@@ -860,12 +970,11 @@ namespace {
             return StatusNotSupported;
         }
 
-        volume_index = volume_index_for_letter(node->volume_letter);
-        if ((volume_index < 0) || !g_volume_table[volume_index].mounted) {
+        volume = vfs_find_volume(node->volume_letter);
+        if ((volume == NULL) || !volume->mounted) {
             return StatusNotFound;
         }
 
-        volume = &g_volume_table[volume_index];
         bridge.directory_node = node;
         bridge.volume = volume;
         bridge.user_context = context;
@@ -876,9 +985,11 @@ namespace {
 } // namespace
 
 Status VirtualFileSystem::init(void) {
-    memzero(g_volume_table, sizeof(g_volume_table));
-    memzero(g_device_aliases, sizeof(g_device_aliases));
-    memzero(g_vfs_file_cache, sizeof(g_vfs_file_cache));
+    vfs_release_volume_registry();
+    vfs_release_device_alias_registry();
+    g_volume_table = NULL;
+    g_device_aliases = NULL;
+    vfs_file_cache_invalidate_all();
     g_vfs_file_cache_bytes = 0U;
     return StatusOK;
 }

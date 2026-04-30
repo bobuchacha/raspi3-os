@@ -1,6 +1,13 @@
 #pragma once
 #include "types.h"
 
+typedef struct RectHeader {
+    U32 x;
+    U32 y;
+    U32 width;
+    U32 height;
+} RectHeader;
+
 typedef struct Rect {
     U32 x;
     U32 y;

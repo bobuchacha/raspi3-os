@@ -4,6 +4,8 @@
 #include "process.h"
 #include "thread.h"
 
+struct AArch64ExceptionFrame;
+
 enum class WaitReason : U32 {
     None = 0,
     Delay,
@@ -12,6 +14,22 @@ enum class WaitReason : U32 {
     Semaphore,
     Message,
     IO,
+};
+
+/**
+ * SchedulerIrqAction
+ *
+ * Describes what the assembly IRQ epilogue should do after the C-side IRQ
+ * handler finishes scheduler bookkeeping.
+ *
+ * The active AArch64 IRQ path now performs any real thread switch before the
+ * common vector epilogue runs, so the assembly side only needs one contract:
+ * restore whichever frame is live on the active kernel stack and return
+ * through `eret`. Keeping this enum single-valued makes that ownership clear
+ * and avoids splitting the IRQ return path across scheduler and assembly code.
+ */
+enum class SchedulerIrqAction : U64 {
+    ResumeCurrent = 0ULL,
 };
 
 class Scheduler final {
@@ -43,6 +61,34 @@ public:
      * @return StatusOK on success, or an error when the thread is invalid or already tracked.
      */
     static Status enqueue(Thread* thread);
+
+    /**
+     * Change the priority of the currently running thread.
+     *
+     * User-mode components such as Explorer occasionally need one control
+     * thread to stay responsive while a background helper continues running in
+     * the same process. Restricting this helper to the current thread keeps the
+     * ownership rules simple and avoids exposing arbitrary cross-thread priority
+     * changes before the process/thread permission model is richer.
+     *
+     * @param priority New scheduler priority where lower numeric values mean higher priority.
+     * @return StatusOK on success, or an error when the current thread cannot be adjusted.
+     */
+    static Status set_current_priority(U8 priority);
+
+    /**
+     * Change the priority of one managed thread.
+     *
+     * The current-thread helper keeps the common case simple, but a few
+     * userspace probes need to stage multiple peer threads before yielding the
+     * CPU. This variant lets the syscall layer retune a READY sibling thread in
+     * the same process without forcing it to run first.
+     *
+     * @param thread Managed thread whose scheduler priority should change.
+     * @param priority New scheduler priority where lower numeric values mean higher priority.
+     * @return StatusOK on success, or an error when the thread cannot be adjusted.
+     */
+    static Status set_thread_priority(Thread* thread, U8 priority);
 
     /**
      * Park the current thread until another kernel path makes it runnable again.
@@ -138,6 +184,31 @@ public:
     * a safe thread-context polling site.
     */
     static void timer_tick(void);
+
+    /**
+     * Handle one timer IRQ that interrupted kernel EL1 execution.
+     *
+     * Kernel threads such as the async launch worker can spend long stretches
+     * inside loader or VFS code. They should still be preemptible by the timer,
+     * but they do not need the special lower-EL exception-frame handoff path
+     * used for interrupted EL0 execution. This helper keeps current-EL timer
+     * preemption on the normal kernel context-switch path.
+     *
+     * @return Action the assembly IRQ epilogue should take after the handler.
+     */
+    static SchedulerIrqAction handle_current_el_timer_irq(void);
+
+    /**
+     * Handle one lower-EL timer IRQ using the saved architectural exception frame.
+     *
+     * Lower-EL preemption cannot rely on resuming the abandoned kernel call
+     * chain later, so this helper persists the interrupted EL0 frame before it
+     * switches away.
+     *
+     * @param frame Saved lower-EL exception frame captured by the IRQ vector.
+     * @return Action the assembly IRQ epilogue should take after the handler.
+     */
+    static SchedulerIrqAction handle_lower_el_timer_irq(AArch64ExceptionFrame* frame);
 
     /**
      * Report the thread that currently owns execution on the boot CPU.

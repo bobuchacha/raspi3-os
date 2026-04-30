@@ -120,6 +120,7 @@ namespace {
     Status reserve_queue_capacity(EventSubscriber* subscriber, U32 required_capacity) {
         KernelEventRecord* queue;
         U32 grown_capacity;
+        U32 target_capacity;
 
         if (subscriber == NULL) {
             return StatusInvalidArgument;
@@ -128,16 +129,27 @@ namespace {
             return StatusOK;
         }
 
+        target_capacity = required_capacity;
+        if (target_capacity > static_cast<U32>(KERNEL_EVENT_QUEUE_MAX_CAPACITY)) {
+            target_capacity = static_cast<U32>(KERNEL_EVENT_QUEUE_MAX_CAPACITY);
+        }
+        if (target_capacity <= subscriber->queue_capacity) {
+            return StatusNoSpace;
+        }
+
         grown_capacity = (subscriber->queue_capacity == 0U)
             ? static_cast<U32>(KERNEL_EVENT_QUEUE_INITIAL_CAPACITY)
             : subscriber->queue_capacity;
-        while (grown_capacity < required_capacity) {
+        while (grown_capacity < target_capacity) {
             if (grown_capacity > (0xFFFFFFFFU / 2U)) {
-                grown_capacity = required_capacity;
+                grown_capacity = target_capacity;
                 break;
             }
 
             grown_capacity *= 2U;
+            if (grown_capacity > static_cast<U32>(KERNEL_EVENT_QUEUE_MAX_CAPACITY)) {
+                grown_capacity = static_cast<U32>(KERNEL_EVENT_QUEUE_MAX_CAPACITY);
+            }
         }
 
         queue = static_cast<KernelEventRecord*>(Heap::alloc(sizeof(KernelEventRecord) * grown_capacity, alignof(KernelEventRecord)));
@@ -254,10 +266,15 @@ namespace {
             subscriber->dropped_count++;
             return;
         }
+        if ((status == StatusNoSpace) && (subscriber->queue_capacity != 0U)) {
+            subscriber->dropped_count++;
+        }
         if (subscriber->queued_count == subscriber->queue_capacity) {
             subscriber->read_index = (subscriber->read_index + 1U) % subscriber->queue_capacity;
             subscriber->queued_count--;
-            subscriber->dropped_count++;
+            if (status != StatusNoSpace) {
+                subscriber->dropped_count++;
+            }
         }
 
         subscriber->queue[subscriber->write_index] = *record;
@@ -333,7 +350,7 @@ Status KernelEventBroker::subscribe(
         return StatusNoMemory;
     }
 
-    reset_subscriber(subscriber);
+    memzero(subscriber, sizeof(*subscriber));
     subscriber->subscription_id = g_next_subscription_id++;
     subscriber->owner_process_id = owner_process_id;
     subscriber->request = *request;

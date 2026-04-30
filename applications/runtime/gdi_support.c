@@ -1,5 +1,8 @@
+#define ROS_BUILDING_GDI_DLL 1
 #define ROS_GDI_EXPORTS 1
 #define ROS_WINDOW_SERVER_ONLY 1
+#define ROS_WINDOW_NO_IMPORTS 1
+#include "app/window.h"
 #include "app/gdi.h"
 
 DLL_EXPORT(GdiGetWindowSurface);
@@ -13,18 +16,17 @@ DLL_EXPORT(GdiMeasureText);
 DLL_EXPORT(GdiDrawTextSurfaceEx);
 DLL_EXPORT(GdiDrawTextSurface);
 DLL_EXPORT(GdiDrawTextEx);
-DLL_EXPORT(GdiDrawText);
 
 #define GDI_WAIT_MSEC 100UL
 #define GDI_WAIT_RETRIES 50UL
 #define GDI_STATUS_INVALID_ARGUMENT (-1L)
 #define GDI_STATUS_ERROR (-4L)
-#define GDI_SURFACE_CACHE_CAPACITY ROS_KERNEL_GUI_WINDOW_SURFACE_MAX_SLOTS
 
 typedef struct GdiSurfaceCacheEntry {
-    int in_use;
     HWND hwnd;
     GuiWindowSurfaceView view;
+    struct GdiSurfaceCacheEntry* next;
+    struct GdiSurfaceCacheEntry* prev;
 } GdiSurfaceCacheEntry;
 
 typedef struct GdiBackend {
@@ -32,7 +34,8 @@ typedef struct GdiBackend {
 } GdiBackend;
 
 static long gdi_gwes_pid = ROS_USER_IPC_STATUS_NOT_FOUND;
-static GdiSurfaceCacheEntry gdi_surface_cache[GDI_SURFACE_CACHE_CAPACITY];
+static GdiSurfaceCacheEntry* g_gdi_surface_cache_head = 0;
+static GdiSurfaceCacheEntry* g_gdi_surface_cache_tail = 0;
 
 /*
  * Clear one caller-owned byte range without depending on hosted libc.
@@ -55,6 +58,26 @@ static void gdi_zero_memory(void* destination, unsigned long size) {
 }
 
 /*
+ * Allocate one small GDI bookkeeping node from the process heap.
+ *
+ * @param size Requested byte count.
+ * @return Allocated buffer, or null on failure.
+ */
+static void* gdi_heap_alloc(unsigned long size) {
+    return user_shared_heap_malloc((size_t)size);
+}
+
+/*
+ * Release one small GDI bookkeeping node back to the process heap.
+ *
+ * @param memory Buffer previously returned by `gdi_heap_alloc`.
+ * @return Nothing.
+ */
+static void gdi_heap_free(void* memory) {
+    user_shared_heap_free(memory);
+}
+
+/*
  * Pack two 32-bit values into one 64-bit IPC scalar.
  *
  * The GWES invalidate path only needs coordinates and dimensions, so packing
@@ -72,18 +95,25 @@ static unsigned long gdi_pack_pair(unsigned long first, unsigned long second) {
 /*
  * Translate one surface color into the active shared-surface pixel format.
  *
+ * GWES now composites the shared window surface alpha channel, so every
+ * format-aware GDI write must stamp an opaque top byte when the caller only
+ * supplies an RGB color.
+ *
  * @param pixel_format Target `ROS_KERNEL_GUI_PIXEL_FORMAT_*` value.
  * @param color Caller-supplied RGB color value.
  * @return Encoded 32-bit surface pixel.
  */
 static unsigned long gdi_encode_color(unsigned long pixel_format, unsigned long color) {
+    const unsigned long rgb = color & 0x00FFFFFFUL;
+
     if (pixel_format != ROS_KERNEL_GUI_PIXEL_FORMAT_XBGR8888) {
-        return color;
+        return 0xFF000000UL | rgb;
     }
 
-    return ((color & 0x000000FFUL) << 16) |
-        (color & 0x0000FF00UL) |
-        ((color & 0x00FF0000UL) >> 16);
+    return 0xFF000000UL
+        | ((rgb & 0x000000FFUL) << 16)
+        | (rgb & 0x0000FF00UL)
+        | ((rgb & 0x00FF0000UL) >> 16);
 }
 
 /*
@@ -171,17 +201,82 @@ static long gdi_send_request(UserIpcMessage* packet) {
 }
 
 /*
+ * Link one cached surface entry into the process-local registry.
+ *
+ * @param entry Entry to publish.
+ * @return Nothing.
+ */
+static void gdi_link_surface_entry(GdiSurfaceCacheEntry* entry) {
+    if (!entry) {
+        return;
+    }
+
+    entry->prev = g_gdi_surface_cache_tail;
+    entry->next = 0;
+    if (g_gdi_surface_cache_tail) {
+        g_gdi_surface_cache_tail->next = entry;
+    }
+    else {
+        g_gdi_surface_cache_head = entry;
+    }
+    g_gdi_surface_cache_tail = entry;
+}
+
+/*
+ * Unlink one cached surface entry from the process-local registry.
+ *
+ * @param entry Entry to remove.
+ * @return Nothing.
+ */
+static void gdi_unlink_surface_entry(GdiSurfaceCacheEntry* entry) {
+    if (!entry) {
+        return;
+    }
+
+    if (entry->prev) {
+        entry->prev->next = entry->next;
+    }
+    else {
+        g_gdi_surface_cache_head = entry->next;
+    }
+    if (entry->next) {
+        entry->next->prev = entry->prev;
+    }
+    else {
+        g_gdi_surface_cache_tail = entry->prev;
+    }
+    entry->next = 0;
+    entry->prev = 0;
+}
+
+/*
+ * Release one cached surface entry and its bookkeeping storage.
+ *
+ * @param entry Entry to recycle.
+ * @return Nothing.
+ */
+static void gdi_release_surface_entry(GdiSurfaceCacheEntry* entry) {
+    if (!entry) {
+        return;
+    }
+
+    gdi_unlink_surface_entry(entry);
+    gdi_zero_memory(entry, sizeof(*entry));
+    gdi_heap_free(entry);
+}
+
+/*
  * Find one cached shared-surface mapping by window handle.
  *
  * @param hwnd Window handle associated with the mapping.
  * @return Matching cache entry, or NULL when no view is cached.
  */
 static GdiSurfaceCacheEntry* gdi_find_surface_entry(HWND hwnd) {
-    unsigned long index;
+    GdiSurfaceCacheEntry* entry;
 
-    for (index = 0UL; index < GDI_SURFACE_CACHE_CAPACITY; ++index) {
-        if (gdi_surface_cache[index].in_use && gdi_surface_cache[index].hwnd == hwnd) {
-            return &gdi_surface_cache[index];
+    for (entry = g_gdi_surface_cache_head; entry; entry = entry->next) {
+        if (entry->hwnd == hwnd) {
+            return entry;
         }
     }
 
@@ -194,15 +289,15 @@ static GdiSurfaceCacheEntry* gdi_find_surface_entry(HWND hwnd) {
  * @return Empty slot, or NULL when the cache is full.
  */
 static GdiSurfaceCacheEntry* gdi_reserve_surface_entry(void) {
-    unsigned long index;
+    GdiSurfaceCacheEntry* entry = (GdiSurfaceCacheEntry*)gdi_heap_alloc(sizeof(*entry));
 
-    for (index = 0UL; index < GDI_SURFACE_CACHE_CAPACITY; ++index) {
-        if (!gdi_surface_cache[index].in_use) {
-            return &gdi_surface_cache[index];
-        }
+    if (!entry) {
+        return NULL;
     }
 
-    return NULL;
+    gdi_zero_memory(entry, sizeof(*entry));
+    gdi_link_surface_entry(entry);
+    return entry;
 }
 
 /*
@@ -251,6 +346,8 @@ static void gdi_build_surface(const GdiSurfaceCacheEntry* entry, RosGdiSurface* 
  */
 static long gdi_acquire_surface(HWND hwnd, GdiSurfaceCacheEntry** entry) {
     GdiSurfaceCacheEntry* cache_entry;
+    GdiSurfaceCacheEntry* next_entry;
+    GdiSurfaceCacheEntry* prev_entry;
     GuiWindowSurfaceView view;
     long status;
 
@@ -259,27 +356,30 @@ static long gdi_acquire_surface(HWND hwnd, GdiSurfaceCacheEntry** entry) {
     }
 
     cache_entry = gdi_find_surface_entry(hwnd);
-    if (cache_entry) {
-        *entry = cache_entry;
-        return ROS_USER_IPC_STATUS_OK;
-    }
 
-    cache_entry = gdi_reserve_surface_entry();
     if (!cache_entry) {
-        return ROS_USER_IPC_STATUS_NO_SPACE;
+        cache_entry = gdi_reserve_surface_entry();
+        if (!cache_entry) {
+            return ROS_USER_IPC_STATUS_NO_SPACE;
+        }
     }
 
     gdi_initialize_surface_view(&view, hwnd);
     status = controlGui(ROS_KERNEL_GUI_CONTROL_WINDOW_SURFACE_ACQUIRE, (unsigned long)&view);
     if (status < 0) {
+        gdi_release_surface_entry(cache_entry);
         return status;
     }
     if (view.view_address == 0ULL || view.width == 0U || view.height == 0U || view.pitch < (view.width * 4UL)) {
+        gdi_release_surface_entry(cache_entry);
         return ROS_USER_IPC_STATUS_NOT_FOUND;
     }
 
+    next_entry = cache_entry->next;
+    prev_entry = cache_entry->prev;
     gdi_zero_memory(cache_entry, sizeof(*cache_entry));
-    cache_entry->in_use = 1;
+    cache_entry->next = next_entry;
+    cache_entry->prev = prev_entry;
     cache_entry->hwnd = hwnd;
     cache_entry->view = view;
     *entry = cache_entry;
@@ -345,8 +445,15 @@ static const GdiBackend gdi_software_backend = {
  * @return Nothing.
  */
 static void gdi_reset_state(void) {
+    GdiSurfaceCacheEntry* entry = g_gdi_surface_cache_head;
+    GdiSurfaceCacheEntry* next;
+
     gdi_gwes_pid = ROS_USER_IPC_STATUS_NOT_FOUND;
-    gdi_zero_memory(gdi_surface_cache, sizeof(gdi_surface_cache));
+    while (entry) {
+        next = entry->next;
+        gdi_release_surface_entry(entry);
+        entry = next;
+    }
 }
 
 long GdiGetWindowSurface(HWND hwnd, RosGdiSurface* surface) {
@@ -383,7 +490,7 @@ long GdiReleaseWindowSurface(HWND hwnd) {
     gdi_initialize_surface_view(&view, hwnd);
     status = controlGui(ROS_KERNEL_GUI_CONTROL_WINDOW_SURFACE_RELEASE, (unsigned long)&view);
     if (status >= 0) {
-        gdi_zero_memory(entry, sizeof(*entry));
+        gdi_release_surface_entry(entry);
     }
 
     return status;

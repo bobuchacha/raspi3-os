@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import hashlib
 import json
 import os
 import shutil
@@ -480,13 +481,50 @@ def is_runtime_support_source(source_path: Path, project_root: Path) -> bool:
     return relative_path.parts[:2] == ("applications", "runtime")
 
 
-def object_path_for_source(project_root: Path, build_dir: Path, source_path: Path) -> Path:
+def object_variant_key(cfg: BuildConfig, project_root: Path, source_path: Path) -> str:
+    """
+    Return one stable cache key for the compile settings of a source file.
+
+    Userspace runtime sources such as `cpp_runtime.cpp` are injected into many
+    artifacts, but they are not all compiled with the same flags. EXE, DLL, and
+    GUI-specific builds vary by include roots and `-fPIC`, so a cache key that
+    only uses the source path causes targets to overwrite each other's objects
+    and forces rebuild churn on every subsequent artifact.
+
+    Args:
+        cfg: Build recipe for the current artifact.
+        project_root: Repository root used to resolve include directories.
+        source_path: Source path being compiled.
+
+    Returns:
+        Short hexadecimal cache key suitable for embedding in object filenames.
+    """
+    compiler = resolve_cxx_compiler() if is_cxx_source(source_path) else resolve_compiler()
+    signature_parts: List[str] = list(compiler)
+
+    signature_parts.extend(["-c", "-ffreestanding", "-fno-builtin", "-fno-stack-protector"])
+    signature_parts.extend(cfg.cflags)
+    for inc in cfg.include_dirs:
+        signature_parts.extend(["-I", str((project_root / inc).resolve())])
+    for define in cfg.defines:
+        signature_parts.append(f"-D{define}")
+    if cfg.kind == "dll":
+        signature_parts.append("-fPIC")
+    if is_cxx_source(source_path):
+        signature_parts.extend(["-fno-exceptions", "-fno-rtti", "-fno-threadsafe-statics", "-fno-use-cxa-atexit"])
+
+    return hashlib.sha1("\n".join(signature_parts).encode("utf-8")).hexdigest()[:12]
+
+
+def object_path_for_source(cfg: BuildConfig, project_root: Path, build_dir: Path, source_path: Path) -> Path:
     """
     Derive one stable unique object path for a source file.
 
     The builder injects support sources like `applications/runtime/ros_support.c`
     into many targets. Using only `stem + .o` makes source-to-object mapping
     ambiguous and risks collisions when different directories reuse `main.c`.
+    The compile-variant suffix also keeps EXE and DLL builds from fighting over
+    the same cached object when their flags differ.
     """
     try:
         relative_path = source_path.resolve().relative_to(project_root.resolve())
@@ -494,7 +532,221 @@ def object_path_for_source(project_root: Path, build_dir: Path, source_path: Pat
     except ValueError:
         stem = source_path.stem
 
-    return build_dir / f"{stem}.o"
+    variant = object_variant_key(cfg, project_root, source_path)
+    return build_dir / f"{stem}__{variant}.o"
+
+
+def depfile_path_for_object(obj_path: Path) -> Path:
+    """
+    Return the dependency-file path associated with one compiled object.
+
+    GCC and clang can emit Make-style dependency files during compilation.
+    Keeping the depfile beside the object lets the builder detect header-only
+    changes without recompiling every source in the same image on every run.
+
+    Args:
+        obj_path: Object-file path produced from one source.
+
+    Returns:
+        Sidecar dependency-file path.
+    """
+    return obj_path.with_suffix(".d")
+
+
+def command_path_for_object(obj_path: Path) -> Path:
+    """
+    Return the command-signature path associated with one compiled object.
+
+    Incremental object reuse must invalidate cleanly when compiler flags,
+    include roots, defines, or the compiler binary itself change. This sidecar
+    stores the exact compile argv so the builder can detect configuration drift.
+
+    Args:
+        obj_path: Object-file path produced from one source.
+
+    Returns:
+        Sidecar command-signature path.
+    """
+    return obj_path.with_suffix(".cmd")
+
+
+def artifact_depfile_path(artifact_path: Path) -> Path:
+    """
+    Return the Make dependency manifest path associated with one artifact.
+
+    Make needs one dependency file whose target matches the final `.exe` or
+    `.dll` path, otherwise header-only changes never wake the artifact target at
+    the top-level build graph. Keeping the manifest beside the final artifact
+    makes it easy for the Makefile to include every userspace depfile with a
+    single `$(addsuffix .d, ...)` expansion.
+
+    Args:
+        artifact_path: Final packaged artifact path.
+
+    Returns:
+        Sidecar dependency-manifest path.
+    """
+    return artifact_path.with_name(f"{artifact_path.name}.d")
+
+
+def make_path_literal(path: Path, project_root: Path) -> str:
+    """
+    Convert one filesystem path into the spelling that Make should consume.
+
+    Top-level userspace targets are declared with project-relative output paths
+    like `output/boards/virt/userspace/core.exe`. If the generated depfile used
+    absolute target paths instead, GNU Make would treat them as a different
+    target and ignore header-only changes for the declared artifact rule.
+
+    Args:
+        path: Filesystem path to serialize.
+        project_root: Repository root used for relative conversion.
+
+    Returns:
+        Make-safe path text.
+    """
+    candidate_path = path if path.is_absolute() else (project_root / path)
+
+    try:
+        literal = candidate_path.resolve().relative_to(project_root.resolve()).as_posix()
+    except ValueError:
+        literal = str(candidate_path.resolve())
+
+    return literal.replace(" ", "\\ ")
+
+
+def write_artifact_depfile(cfg: BuildConfig, artifact_path: Path, project_root: Path, build_dir: Path) -> None:
+    """
+    Write one final-artifact dependency manifest for GNU Make.
+
+    The object-level depfiles produced during compilation are enough for the
+    Python builder to skip unchanged sources, but Make still needs one rule that
+    says `artifact -> headers` so header-only edits will rerun the builder in
+    the first place. This helper folds all per-object prerequisites into a
+    single artifact-scoped depfile.
+
+    Args:
+        cfg: Build recipe for the current artifact.
+        artifact_path: Final packaged artifact path.
+        project_root: Repository root used for relative path emission.
+        build_dir: Directory where object/dep sidecars live.
+
+    Returns:
+        None.
+    """
+    prerequisite_literals: List[str] = []
+    seen_literals: set[str] = set()
+
+    for src in cfg.sources:
+        source_path = (project_root / src).resolve()
+        object_path = object_path_for_source(cfg, project_root, build_dir, source_path)
+        depfile_path = depfile_path_for_object(object_path)
+        source_literal = make_path_literal(source_path, project_root)
+
+        if source_literal not in seen_literals:
+            prerequisite_literals.append(source_literal)
+            seen_literals.add(source_literal)
+
+        if not depfile_path.exists():
+            continue
+
+        for prerequisite in parse_make_depfile(depfile_path):
+            prerequisite_literal = make_path_literal(prerequisite, project_root)
+            if prerequisite_literal in seen_literals:
+                continue
+            prerequisite_literals.append(prerequisite_literal)
+            seen_literals.add(prerequisite_literal)
+
+    # Use chr(92) to emit a single backslash character without escaping hell
+    backslash = chr(92)
+    depfile_lines = [f"{make_path_literal(artifact_path, project_root)}: " + backslash]
+    for index, prerequisite_literal in enumerate(prerequisite_literals):
+        suffix = (" " + backslash) if index + 1 < len(prerequisite_literals) else ""
+        depfile_lines.append(f"  {prerequisite_literal}{suffix}")
+
+    artifact_depfile_path(artifact_path).write_text("\n".join(depfile_lines) + "\n", encoding="utf-8")
+
+
+def serialize_command_signature(cmd: List[str]) -> str:
+    """
+    Serialize one compile command into a stable comparison string.
+
+    Args:
+        cmd: Full compiler argv list.
+
+    Returns:
+        Stable text representation of the compile command.
+    """
+    return "\n".join(cmd) + "\n"
+
+
+def parse_make_depfile(depfile_path: Path) -> List[Path]:
+    """
+    Parse one Make-style dependency file into a flat prerequisite list.
+
+    The dependency files emitted by `-MMD` use line continuations and a leading
+    `target:` field. The builder only needs the prerequisite paths so it can
+    compare mtimes against the compiled object.
+
+    Args:
+        depfile_path: Path to the dependency file produced for one object.
+
+    Returns:
+        List of prerequisite paths referenced by the depfile.
+    """
+    raw_text = depfile_path.read_text(encoding="utf-8")
+    normalized = raw_text.replace("\\\n", " ")
+    prerequisites: List[Path] = []
+
+    for logical_line in normalized.splitlines():
+        if not logical_line.strip():
+            continue
+
+        target_and_deps = logical_line.split(":", 1)
+        if len(target_and_deps) != 2:
+            continue
+
+        for token in target_and_deps[1].split():
+            prerequisites.append(Path(token))
+
+    return prerequisites
+
+
+def object_is_up_to_date(obj_path: Path, depfile_path: Path, command_path: Path, command_signature: str) -> bool:
+    """
+    Check whether one compiled object can be safely reused.
+
+    Reuse is allowed only when the object, depfile, and recorded compile command
+    all exist, the command signature still matches, and every source/header in
+    the depfile is older than the object.
+
+    Args:
+        obj_path: Candidate object file.
+        depfile_path: Sidecar dependency file.
+        command_path: Sidecar command-signature file.
+        command_signature: Current compile-command signature.
+
+    Returns:
+        True when the object can be reused as-is.
+    """
+    if not obj_path.exists() or not depfile_path.exists() or not command_path.exists():
+        return False
+
+    if command_path.read_text(encoding="utf-8") != command_signature:
+        return False
+
+    object_mtime = obj_path.stat().st_mtime
+    prerequisites = parse_make_depfile(depfile_path)
+    if not prerequisites:
+        return False
+
+    for prerequisite in prerequisites:
+        if not prerequisite.exists():
+            return False
+        if prerequisite.stat().st_mtime > object_mtime:
+            return False
+
+    return True
 
 
 def module_object_paths(cfg: BuildConfig, project_root: Path, build_dir: Path) -> List[Path]:
@@ -508,7 +760,7 @@ def module_object_paths(cfg: BuildConfig, project_root: Path, build_dir: Path) -
         source_path = (project_root / src).resolve()
         if is_runtime_support_source(source_path, project_root):
             continue
-        objects.append(object_path_for_source(project_root, build_dir, source_path))
+        objects.append(object_path_for_source(cfg, project_root, build_dir, source_path))
 
     return objects
 
@@ -553,7 +805,9 @@ def compile_sources(cfg: BuildConfig, project_root: Path, build_dir: Path) -> Li
 
     for src in cfg.sources:
         src_path = (project_root / src).resolve()
-        obj_path = object_path_for_source(project_root, build_dir, src_path)
+        obj_path = object_path_for_source(cfg, project_root, build_dir, src_path)
+        depfile_path = depfile_path_for_object(obj_path)
+        command_path = command_path_for_object(obj_path)
         compiler = resolve_cxx_compiler() if is_cxx_source(src_path) else resolve_compiler()
         source_flags = list(common_flags)
 
@@ -563,9 +817,27 @@ def compile_sources(cfg: BuildConfig, project_root: Path, build_dir: Path) -> Li
         if is_cxx_source(src_path):
             source_flags.extend(["-fno-exceptions", "-fno-rtti", "-fno-threadsafe-statics", "-fno-use-cxa-atexit"])
 
+        obj_path.parent.mkdir(parents=True, exist_ok=True)
+
         # Compile each source independently so diagnostics map to a single file.
-        cmd = compiler + source_flags + [str(src_path), "-o", str(obj_path)]
-        run(cmd)
+        cmd = compiler + source_flags + [
+            "-MMD",
+            "-MF",
+            str(depfile_path),
+            "-MT",
+            str(obj_path),
+            str(src_path),
+            "-o",
+            str(obj_path),
+        ]
+        command_signature = serialize_command_signature(cmd)
+
+        if object_is_up_to_date(obj_path, depfile_path, command_path, command_signature):
+            print(f"[skip] {src_path}")
+        else:
+            run(cmd)
+            command_path.write_text(command_signature, encoding="utf-8")
+
         objects.append(obj_path)
 
     return objects
@@ -1127,6 +1399,8 @@ def extract_relocations_from_elf(
             symbol_name = read_c_string(strings, st_name)
             if st_shndx == SHN_UNDEF:
                 if r_type in (R_AARCH64_ABS64, R_AARCH64_GLOB_DAT, R_AARCH64_JUMP_SLOT):
+                    if (st_info >> 4) == STB_WEAK:
+                        continue
                     if not symbol_name:
                         raise RuntimeError("undefined import relocation has no symbol name")
                     imports.append({
@@ -1927,8 +2201,7 @@ def main(argv: List[str]) -> int:
 
         # Compile and link AArch64 objects into one ELF.
         objs = compile_sources(cfg, project_root, build_dir)
-        module_objs = module_object_paths(cfg, project_root, build_dir)
-        apply_inline_metadata(cfg, module_objs)
+        apply_inline_metadata(cfg, objs)
         if cfg.kind == "dll" and not cfg.exports:
             raise RuntimeError(f"{cfg.name}: DLL exports must be declared with ROS_DLL_EXPORT metadata")
         if cfg.kind == "sys" and not cfg.exports:
@@ -1952,6 +2225,7 @@ def main(argv: List[str]) -> int:
         ext = "." + cfg.kind
         out_file = build_dir / f"{cfg.name}{ext}"
         pack_image(cfg, elf, sections, entry, out_file, cfg.entry_symbol)
+        write_artifact_depfile(cfg, out_file, project_root, build_dir)
 
         print(f"[ok] wrote {out_file}")
         return 0

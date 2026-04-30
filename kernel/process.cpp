@@ -1,5 +1,6 @@
 #include "process.h"
 
+#include "file_mapping.h"
 #include "gui_service.h"
 #include "heap.h"
 #include "heap_list.h"
@@ -10,6 +11,7 @@
 #include "shared_memory.h"
 #include "thread.h"
 #include "user_heap.h"
+#include "user_address_space_layout.h"
 
 namespace {
 
@@ -68,6 +70,77 @@ namespace {
         }
 
         return false;
+    }
+
+    /*
+     * Report whether one process belongs to the launcher subtree rooted at a PID.
+     *
+     * The process model treats parent links as launcher metadata, but keeping the
+     * full chain walk here still lets fatal user faults collapse the spawned app
+     * tree instead of leaving descendants running after their parent died.
+     *
+     * @param process Candidate process.
+     * @param root_id Root launcher PID that anchors the subtree.
+     * @return True when the process is the root or a transitive launched child.
+     */
+    bool process_is_in_tree(const Process* process, Pid root_id) {
+        Pid cursor_id;
+
+        if ((process == NULL) || (root_id == 0U)) {
+            return false;
+        }
+
+        if (process->id == root_id) {
+            return true;
+        }
+
+        cursor_id = process->parent_process_id;
+        while (cursor_id != 0U) {
+            const Process* parent = ProcessManager::find_process(cursor_id);
+
+            if (cursor_id == root_id) {
+                return true;
+            }
+            if ((parent == NULL) || (parent == process)) {
+                break;
+            }
+
+            cursor_id = parent->parent_process_id;
+        }
+
+        return false;
+    }
+
+    /*
+     * Mark every process in one launched subtree as exiting with the same code.
+     *
+     * Using one pre-pass avoids partially destroyed trees inheriting mixed exit
+     * codes and makes later reaping deterministic even if parents are removed
+     * before their children in the intrusive process list.
+     *
+     * @param root_id Root PID whose subtree should be marked.
+     * @param exit_code Exit code to record on every member.
+     * @return Number of marked processes.
+     */
+    Size mark_process_tree_for_exit(Pid root_id, U64 exit_code) {
+        Size marked = 0U;
+
+        for (Process* process = process_head; process != NULL; process = process->next) {
+            if (!process_is_in_tree(process, root_id)) {
+                continue;
+            }
+            if (object_has_flag(process->header.flags, ObjectFlags::Permanent)) {
+                continue;
+            }
+
+            process->exit_code = exit_code;
+            if (process->current_state != ProcessState::Terminated) {
+                process->current_state = ProcessState::Exiting;
+            }
+            ++marked;
+        }
+
+        return marked;
     }
 
     Process* allocate_process_slot(void) {
@@ -180,6 +253,7 @@ namespace {
 
         (void)GuiService::release_process_surfaces(process);
         (void)SharedMemoryManager::release_process_mappings(process);
+        (void)FileMapping::release_process_mappings(process);
         (void)UserHeap::release_process(process);
         (void)Loader::release_user_process_resources(process);
         (void)mm::MemoryManager::destroy_user_address_space(&process->process_address_space);
@@ -212,6 +286,10 @@ namespace {
         process->loader_image_bytes = 0U;
         process->loader_stack_backing = NULL;
         process->loader_stack_bytes = 0U;
+        process->user_stack_slot_bitmap = 0U;
+        process->user_stack_slot_bytes = user_process ? user_address_space::InitialThreadStackSlotBytes : 0U;
+        process->user_heap_base = user_process ? user_address_space::HeapBase : 0U;
+        process->user_heap_reserved_bytes = user_process ? user_address_space::HeapReservedBytes : 0U;
         process->parent_process_id = 0U;
         copy_text(process->name, COUNT_OF(process->name), name, user_process ? "user" : "process");
 
@@ -338,6 +416,38 @@ Status ProcessManager::terminate_process(Pid id, U64 exit_code) {
     process->current_state = ProcessState::Exiting;
     process->exit_code = exit_code;
     return destroy_process(process);
+}
+
+Status ProcessManager::terminate_process_tree(Pid root_id, U64 exit_code, Pid exempt_process_id) {
+    Process* root = find_process(root_id);
+
+    if (root == NULL) {
+        return StatusNotFound;
+    }
+    if (object_has_flag(root->header.flags, ObjectFlags::Permanent)) {
+        return StatusBusy;
+    }
+
+    if (mark_process_tree_for_exit(root_id, exit_code) == 0U) {
+        return StatusNotFound;
+    }
+
+    for (Process* process = process_head, *next_process = NULL; process != NULL; process = next_process) {
+        next_process = process->next;
+        if (!process_is_in_tree(process, root_id)) {
+            continue;
+        }
+        if (process->id == exempt_process_id) {
+            continue;
+        }
+        if (object_has_flag(process->header.flags, ObjectFlags::Permanent)) {
+            continue;
+        }
+
+        (void)destroy_process(process);
+    }
+
+    return StatusOK;
 }
 
 Status ProcessManager::reap_exiting(void) {

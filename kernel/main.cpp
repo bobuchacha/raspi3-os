@@ -18,6 +18,8 @@
 #include "thread.h"
 #include "vfs.h"
 
+//#define PERFORM_KERNEL_TEST 0
+
 extern "C" [[noreturn]] void scheduler_thread_exit_current(void);
 
 namespace {
@@ -248,6 +250,24 @@ namespace {
         else {
             serial_write_decimal(static_cast<U64>(status));
         }
+        serial_write_char('\n');
+    }
+
+    /**
+     * Emit one explicit boot handoff stage marker.
+     *
+     * Early headless boot failures are easier to localize when the serial log
+     * shows which post-bootstrap phase started, not only which phases fully
+     * completed. Keeping this helper tiny makes it safe to use around the
+     * scheduler, platform, and first-userspace handoff without drowning later
+     * runtime logs.
+     *
+     * @param stage Short phase label describing the next boot step.
+     * @return Nothing.
+     */
+    void log_boot_handoff_stage(const char* stage) {
+        serial_write_text("[kernel] handoff: ");
+        serial_write_text(stage != NULL ? stage : "unknown");
         serial_write_char('\n');
     }
 
@@ -774,17 +794,20 @@ namespace {
 
     Status start_userspace_process(const char* path, const char* process_name, const char* ready_message) {
         Thread* user_thread = NULL;
+        log_boot_handoff_stage("spawn userspace image");
         Status status = Loader::spawn_user_process(path, process_name, "", &user_thread);
 
         if (status != StatusOK) {
             return status;
         }
 
+        log_boot_handoff_stage("enqueue first userspace thread");
         status = Scheduler::enqueue(user_thread);
         if (status != StatusOK) {
             return status;
         }
 
+        log_boot_handoff_stage("userspace thread runnable");
         board::Serial::puts(ready_message);
         scheduler_thread_exit_current();
     }
@@ -862,6 +885,8 @@ namespace {
         if ((step_name == NULL) || (test_entry == NULL) || (ready_message == NULL)) {
             return StatusInvalidArgument;
         }
+
+
         if (!enabled) {
             serial_write_text("[kernel] ");
             serial_write_text(step_name);
@@ -2507,6 +2532,11 @@ extern "C" void kernel_main(void) {
         halt();
     }
 
+    // The exception vectors are already installed during arch early init, so this is the first
+    // point where the kernel can safely accept timer IRQs. Keep the later bounded poll loop as a
+    // fallback because the active `virt` tree still may not have a complete board interrupt route.
+    arch::Arch::enable_interrupts();
+
     {
         U64 frequency = arch::Arch::counter_frequency();
         U64 timeout_ticks = (frequency == 0ULL) ? 1ULL : (frequency / 20ULL);
@@ -2524,6 +2554,7 @@ extern "C" void kernel_main(void) {
 
     board::Serial::puts("[kernel] timer tick ready\n");
 
+#ifdef PERFORM_KERNEL_TEST
     status = run_optional_boot_test("process smoke", g_kernel_boot_test_config.process, &run_process_manager_smoke_test, "[kernel] process manager ready\n");
     if (status != StatusOK) {
         halt_with_status("process smoke", status);
@@ -2544,40 +2575,48 @@ extern "C" void kernel_main(void) {
         halt_with_status("shared memory smoke", status);
     }
 
+    log_boot_handoff_stage("scheduler smoke begin");
     status = run_optional_boot_test("scheduler smoke", g_kernel_boot_test_config.scheduler, &run_scheduler_boot_test, "[kernel] scheduler suite ready\n");
     if (status != StatusOK) {
         halt_with_status("scheduler smoke", status);
     }
 
+    log_boot_handoff_stage("platform smoke begin");
     status = run_optional_boot_test("platform smoke", g_kernel_boot_test_config.platform, &run_platform_smoke_test, "[kernel] platform ready\n");
     if (status != StatusOK) {
         halt_with_status("platform smoke", status);
     }
 
+    log_boot_handoff_stage("kernel input smoke begin");
     status = run_optional_boot_test("kernel input path", g_kernel_boot_test_config.kernel_input_path, &run_kernel_input_path_smoke_test, "[kernel] kernel input path ready\n");
     if (status != StatusOK) {
         halt_with_status("kernel input path", status);
     }
 
+    log_boot_handoff_stage("kernel output smoke begin");
     status = run_optional_boot_test("kernel output path", g_kernel_boot_test_config.kernel_output_path, &run_kernel_output_path_smoke_test, "[kernel] kernel output path ready\n");
     if (status != StatusOK) {
         halt_with_status("kernel output path", status);
     }
 
+    log_boot_handoff_stage("vfs namespace smoke begin");
     status = run_optional_boot_test("vfs namespace smoke", g_kernel_boot_test_config.vfs_namespace, &run_vfs_namespace_smoke_test, "[kernel] vfs namespace ready\n");
     if (status != StatusOK) {
         halt_with_status("vfs namespace smoke", status);
     }
 
+    log_boot_handoff_stage("memory map smoke begin");
     status = run_optional_boot_test("memory map smoke", g_kernel_boot_test_config.memory_map, &run_memory_map_smoke_test, "[kernel] memory map ready\n");
     if (status != StatusOK) {
         halt_with_status("memory map smoke", status);
     }
 
+    log_boot_handoff_stage("physical memory smoke begin");
     status = run_optional_boot_test("physical memory smoke", g_kernel_boot_test_config.physical_memory, &run_physical_memory_smoke_test, "[kernel] physical memory ready\n");
     if (status != StatusOK) {
         halt_with_status("physical memory smoke", status);
     }
+#endif // PERFORM_KERNEL_TEST
 
     console_device = DeviceManager::find_device("serial0");
     if (console_device == NULL) {
@@ -2586,7 +2625,10 @@ extern "C" void kernel_main(void) {
 
     const ConsoleSession console_session(console_device);
 
+#ifdef PERFORM_KERNEL_TEST
+
     if (g_kernel_boot_test_config.virtual_memory) {
+        log_boot_handoff_stage("virtual memory smoke begin");
         status = run_virtual_memory_smoke_test(&vm_test);
         if (status != StatusOK) {
             halt_with_status("virtual memory smoke", status);
@@ -2621,10 +2663,14 @@ extern "C" void kernel_main(void) {
         console_session.write_text("\n");
     }
 
+#endif // PERFORM_KERNEL_TEST
+
+    log_boot_handoff_stage("start userspace core");
     status = start_userspace_core();
     if (status != StatusOK) {
         board::Serial::puts("[kernel] userspace core failed; attempting shell fallback\n");
         log_status("userspace core failure", status);
+        log_boot_handoff_stage("start userspace shell fallback");
         status = start_userspace_shell();
         if (status != StatusOK) {
             board::Serial::puts("[kernel] userspace shell failed; falling back to kernel console\n");

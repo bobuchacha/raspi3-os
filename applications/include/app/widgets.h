@@ -41,6 +41,10 @@ typedef struct RosWidgetPaintContext {
     RosWidgetSurface surface;
 } RosWidgetPaintContext;
 
+#if defined(ROS_WIDGET_EXPORTS) && !defined(ROS_BUILDING_WIDGETS_DLL)
+#error "ROS_WIDGET_EXPORTS is reserved for the dedicated widgets.dll wrapper build"
+#endif
+
 #if defined(ROS_WIDGET_EXPORTS)
 
 /*

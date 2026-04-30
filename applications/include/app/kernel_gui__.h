@@ -36,9 +36,11 @@
 #define ROS_KERNEL_GUI_INPUT_EVENT_KEY_DOWN 5U
 #define ROS_KERNEL_GUI_INPUT_EVENT_KEY_UP 6U
 
+#define ROS_KERNEL_GUI_POINTER_BUTTON_LEFT 0x00000001U
+#define ROS_KERNEL_GUI_POINTER_BUTTON_RIGHT 0x00000002U
+
 #define ROS_KERNEL_GUI_SHARED_INPUT_MAGIC 0x53474955U
 #define ROS_KERNEL_GUI_SHARED_INPUT_VERSION 1U
-#define ROS_KERNEL_GUI_SHARED_INPUT_MAX_CONSUMERS 8U
 #define ROS_KERNEL_GUI_SHARED_INPUT_CAPACITY 64U
 #define ROS_KERNEL_GUI_WINDOW_SURFACE_VIEW_VERSION 1U
 #define ROS_KERNEL_GUI_WINDOW_SURFACE_FLAG_MAPPED 0x00000001U
@@ -105,6 +107,9 @@ typedef struct RosKernelGuiSharedInputRegionStruct {
     uint16_t max_consumers;
     uint32_t capacity;
     uint32_t record_size;
+    uint32_t consumer_size;
+    uint32_t records_offset;
+    uint32_t consumers_offset;
     uint64_t tail_sequence;
     uint64_t produced_count;
     uint64_t overflow_count;
@@ -113,9 +118,75 @@ typedef struct RosKernelGuiSharedInputRegionStruct {
     RosKernelGuiPointerState last_pointer_state;
     uint32_t reserved0;
     uint32_t reserved1;
-    RosKernelGuiSharedInputConsumer consumers[ROS_KERNEL_GUI_SHARED_INPUT_MAX_CONSUMERS];
-    RosKernelGuiSharedInputRecord records[ROS_KERNEL_GUI_SHARED_INPUT_CAPACITY];
 } RosKernelGuiSharedInputRegion;
+
+/*
+ * Report the minimum mapped byte count required for one valid shared-input view.
+ *
+ * The shared ring keeps a fixed record capacity but now grows its consumer
+ * registry inside a variable-sized mapped region. Callers use this helper to
+ * reject truncated mappings while leaving the actual consumer ceiling to the
+ * runtime `max_consumers` field published by the kernel.
+ *
+ * @return Minimum byte count that can hold the header, one consumer, and the ring.
+ */
+static inline uint32_t ros_kernel_gui_shared_input_min_bytes(void) {
+    return (uint32_t)(sizeof(RosKernelGuiSharedInputRegion)
+        + (sizeof(RosKernelGuiSharedInputRecord) * ROS_KERNEL_GUI_SHARED_INPUT_CAPACITY)
+        + sizeof(RosKernelGuiSharedInputConsumer));
+}
+
+/*
+ * Return one shared-input consumer record by runtime index.
+ *
+ * @param region Base address of the mapped shared-input region.
+ * @param index Zero-based consumer slot index published by the kernel.
+ * @return Pointer to the requested consumer record.
+ */
+static inline RosKernelGuiSharedInputConsumer* ros_kernel_gui_shared_input_consumer_at(
+    RosKernelGuiSharedInputRegion* region,
+    uint32_t index) {
+    return (RosKernelGuiSharedInputConsumer*)((uint8_t*)region + (uintptr_t)region->consumers_offset + ((uintptr_t)index * (uintptr_t)region->consumer_size));
+}
+
+/*
+ * Return one shared-input consumer record by runtime index from a volatile view.
+ *
+ * @param region Volatile base address of the mapped shared-input region.
+ * @param index Zero-based consumer slot index published by the kernel.
+ * @return Pointer to the requested volatile consumer record.
+ */
+static inline volatile RosKernelGuiSharedInputConsumer* ros_kernel_gui_shared_input_consumer_at_volatile(
+    volatile RosKernelGuiSharedInputRegion* region,
+    uint32_t index) {
+    return (volatile RosKernelGuiSharedInputConsumer*)((volatile uint8_t*)region + (uintptr_t)region->consumers_offset + ((uintptr_t)index * (uintptr_t)region->consumer_size));
+}
+
+/*
+ * Return one shared-input ring record by runtime index.
+ *
+ * @param region Base address of the mapped shared-input region.
+ * @param index Zero-based record slot index inside the fixed ring.
+ * @return Pointer to the requested ring record.
+ */
+static inline RosKernelGuiSharedInputRecord* ros_kernel_gui_shared_input_record_at(
+    RosKernelGuiSharedInputRegion* region,
+    uint32_t index) {
+    return (RosKernelGuiSharedInputRecord*)((uint8_t*)region + (uintptr_t)region->records_offset + ((uintptr_t)index * (uintptr_t)region->record_size));
+}
+
+/*
+ * Return one shared-input ring record by runtime index from a volatile view.
+ *
+ * @param region Volatile base address of the mapped shared-input region.
+ * @param index Zero-based record slot index inside the fixed ring.
+ * @return Pointer to the requested volatile ring record.
+ */
+static inline volatile RosKernelGuiSharedInputRecord* ros_kernel_gui_shared_input_record_at_volatile(
+    volatile RosKernelGuiSharedInputRegion* region,
+    uint32_t index) {
+    return (volatile RosKernelGuiSharedInputRecord*)((volatile uint8_t*)region + (uintptr_t)region->records_offset + ((uintptr_t)index * (uintptr_t)region->record_size));
+}
 
 typedef struct RosKernelGuiSharedInputViewStruct {
     uint32_t version;

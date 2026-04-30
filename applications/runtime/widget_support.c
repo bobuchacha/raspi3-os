@@ -1,3 +1,4 @@
+#define ROS_BUILDING_WIDGETS_DLL 1
 #define ROS_WIDGET_EXPORTS 1
 #include "app/syscall.h"
 #include "app/widgets.h"
@@ -91,21 +92,17 @@ static unsigned long widget_measure_text(const char* text);
 static void widget_release_instance_record(WidgetInstance* instance);
 
 /*
- * Allocate one widget-framework heap block directly from the kernel-backed
- * userspace allocator.
+ * Allocate one widget-framework heap block from the shared in-process heap.
  *
- * widgets.dll is a thin helper DLL and does not link the full `ros_support.c`
- * malloc/free runtime. Using the raw syscall-backed allocator keeps the new
- * dynamic registries self-contained without introducing a new DLL import.
+ * widgets.dll now shares the same per-process allocator metadata as ros_support
+ * and window.dll, so widget state stays inside the demand-paged heap instead of
+ * competing with a legacy raw syscall heap path.
  *
  * @param size Bytes required for the allocation.
  * @return Heap block on success, or null when the allocation fails.
  */
 static void* widget_heap_alloc(unsigned long size) {
-    unsigned long bytes = size != 0UL ? size : 1UL;
-    long result = (long)invokeSyscall1(SYS_MALLOC, bytes);
-
-    return result < 0L ? 0 : (void*)(unsigned long)result;
+    return user_shared_heap_malloc((size_t)size);
 }
 
 /*
@@ -115,11 +112,7 @@ static void* widget_heap_alloc(unsigned long size) {
  * @return Nothing.
  */
 static void widget_heap_free(void* memory) {
-    if (!memory) {
-        return;
-    }
-
-    (void)invokeSyscall1(SYS_FREE, (unsigned long)memory);
+    user_shared_heap_free(memory);
 }
 
 /*
@@ -503,18 +496,25 @@ static int widget_text_equals(const char* left, const char* right) {
 /*
  * Encode one RGB color for the active surface pixel format.
  *
+ * Widget helpers draw opaque UI primitives unless a caller explicitly writes
+ * the surface memory itself, so they need to stamp `0xFF` alpha now that GWES
+ * composites window surfaces with per-pixel transparency.
+ *
  * @param pixel_format Target surface pixel format.
  * @param color Caller-visible RGB value.
  * @return Encoded 32-bit pixel.
  */
 static unsigned long widget_encode_color(unsigned long pixel_format, unsigned long color) {
+    const unsigned long rgb = color & 0x00FFFFFFUL;
+
     if (pixel_format != ROS_KERNEL_GUI_PIXEL_FORMAT_XBGR8888) {
-        return color;
+        return 0xFF000000UL | rgb;
     }
 
-    return ((color & 0x000000FFUL) << 16) |
-        (color & 0x0000FF00UL) |
-        ((color & 0x00FF0000UL) >> 16);
+    return 0xFF000000UL
+        | ((rgb & 0x000000FFUL) << 16)
+        | (rgb & 0x0000FF00UL)
+        | ((rgb & 0x00FF0000UL) >> 16);
 }
 
 /*

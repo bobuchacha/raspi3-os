@@ -2,17 +2,27 @@
 #define ROS_APP_KERNEL_H
 
 #include "app/syscall.h"
+#include "user_runtime.h"
 
 static inline long user_kernel_write(const char* text) {
     return call_sys_write((char*)text);
 }
 
+/*
+ * Keep the legacy helper name while routing allocations through the current
+ * in-process shared heap instead of the removed syscall-era compatibility shim.
+ */
 static inline unsigned long user_kernel_alloc(unsigned long size) {
-    return call_sys_malloc(size);
+    return (unsigned long)user_shared_heap_malloc((size_t)size);
 }
 
+/*
+ * Preserve the legacy helper signature while releasing memory through the
+ * shared userspace heap that now owns ordinary EL0 allocations.
+ */
 static inline long user_kernel_free(void* ptr) {
-    return call_sys_free(ptr);
+    user_shared_heap_free(ptr);
+    return 0L;
 }
 
 static inline long user_kernel_sleep(unsigned long msec) {
@@ -51,6 +61,26 @@ static inline unsigned long user_kernel_shared_library_local(const char* path, u
     return call_sys_shlib_local(path, size);
 }
 
+static inline unsigned long user_kernel_create_file_mapping(const char* path, unsigned long size) {
+    return call_sys_file_mapping_create(path, size);
+}
+
+static inline unsigned long user_kernel_open_file_mapping(const char* path, unsigned long size) {
+    return call_sys_file_mapping_open(path, size);
+}
+
+static inline long user_kernel_close_file_mapping(unsigned long handle) {
+    return call_sys_file_mapping_close(handle);
+}
+
+static inline unsigned long user_kernel_map_file_view(unsigned long handle, unsigned long offset, unsigned long size) {
+    return call_sys_file_mapping_map(handle, offset, size);
+}
+
+static inline long user_kernel_unmap_file_view(unsigned long address) {
+    return call_sys_file_mapping_unmap(address);
+}
+
 static inline long user_kernel_unload_driver(const char* path) {
     return call_sys_driver_unload(path);
 }
@@ -81,6 +111,10 @@ static inline long user_kernel_read_file(const char* path, unsigned long offset,
 
 static inline long user_kernel_dir_entry(const char* path, unsigned long entry_index, UserDirectoryEntry* entry) {
     return call_sys_dir_entry(path, entry_index, entry);
+}
+
+static inline long user_kernel_path_info(const char* path, UserPathInfo* info) {
+    return call_sys_path_info(path, info);
 }
 
 static inline long user_kernel_mkdir(const char* path) {

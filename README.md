@@ -13,11 +13,41 @@ Clean-room rewrite of a small 64-bit operating system for multiple embedded boar
 ## Repository Layout
 
 ```text
+applications/       userspace applications, DLLs, shared headers, and runtime glue
 docs/               design notes for boot flow and memory layout
 kernel/             higher-half kernel sources and second-stage bootloader
 tools/              image packing, flashing, emulation, and inspection helpers
 .old/               archived code kept only as reference during the rewrite
 ```
+
+## Applications Layout
+
+The userspace tree is split into executable fronts, shared DLLs, and a small
+built-in runtime layer:
+
+```text
+applications/
+|-- apps/                 executable entrypoints, now built as C++ fronts
+|-- libs/                 shared DLL entrypoints and reusable user libraries
+|-- runtime/              built-in runtime pieces such as `_start`, heap/syscall glue,
+|                         DLL attach helpers, and the shared C++ runtime shim
+|-- include/
+|   |-- app/app.h         feature-gated umbrella include for applications
+|   `-- ...               app-facing runtime and DLL headers
+`-- assets/               fonts, cursors, wallpapers, and other staged user assets
+```
+
+The current rule is:
+
+- EXEs build through `_start` and expose a normal `main()`.
+- Shared user-facing runtime code lives in DLLs such as `window.dll`,
+  `widgets.dll`, `gdi.dll`, `crt.dll`, and `samplemath.dll`.
+- Only the low-level bootstrap path stays built in: syscalls, heap access,
+  image import/export attachment, DLL load plumbing, and the shared C++
+  constructor/destructor runtime.
+
+See [applications/README.md](applications/README.md) for the userspace-specific
+layout and include conventions.
 
 ## Kernel Layout
 

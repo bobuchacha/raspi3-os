@@ -2,6 +2,7 @@
 #define KERNEL_INCLUDE_PLATFORM_BOARD_VIRT_INPUT_BACKEND_H
 
 #include "device.h"
+#include "debug-message.h"
 #include "framebuffer.h"
 #include "gui_service.h"
 #include "mm.h"
@@ -133,6 +134,7 @@ namespace board {
             VirtioInputAbsX = 0U,
             VirtioInputAbsY = 1U,
             VirtioInputButtonLeft = 272U,
+            VirtioInputButtonRight = 273U,
             VirtioInputButtonTouch = 330U,
             VirtioInputKeyEsc = 1U,
             VirtioInputKey1 = 2U,
@@ -277,8 +279,8 @@ namespace board {
             bool absolute_pointer;
             bool relative_pointer;
             bool shift_down;
-            bool button_down;
-            bool last_button_down;
+            U32 button_mask;
+            U32 last_button_mask;
             bool have_abs_x;
             bool have_abs_y;
             bool pointer_initialized;
@@ -296,6 +298,7 @@ namespace board {
             U32 traced_event_count;
             U32 traced_pointer_commit_count;
             U32 traced_poll_count;
+            U32 descriptor_repair_count;
             char name[33];
             InputQueue event_queue;
             InputQueue status_queue;
@@ -313,9 +316,11 @@ namespace board {
          * @return Nothing.
          */
         static void trace_line(const char* text) {
+#ifdef ENABLE_TRACING
             Serial::puts_raw("[virtio-input] ");
             Serial::puts_raw(text);
             Serial::putc_raw('\n');
+#endif
         }
 
         /**
@@ -346,6 +351,7 @@ namespace board {
          * @return Nothing.
          */
         static void trace_ready_device(const DeviceState* device) {
+#ifdef ENABLE_TRACING
             if (device == NULL) {
                 return;
             }
@@ -367,6 +373,7 @@ namespace board {
                 Serial::puts_raw(device->name);
             }
             Serial::putc_raw('\n');
+#endif
         }
 
         /**
@@ -382,6 +389,7 @@ namespace board {
          * @return Nothing.
          */
         static void trace_input_event(DeviceState* device, const VirtioInputEvent* event) {
+#ifdef ENABLE_TRACING
             if ((device == NULL) || (event == NULL) || (device->traced_event_count >= 24U)) {
                 return;
             }
@@ -396,6 +404,7 @@ namespace board {
             Serial::puts_raw(" value=");
             trace_u32(event->value);
             Serial::putc_raw('\n');
+#endif
         }
 
         /**
@@ -409,6 +418,7 @@ namespace board {
          * @return Nothing.
          */
         static void trace_pointer_commit(DeviceState* device, U32 x, U32 y, U32 buttons) {
+#ifdef ENABLE_TRACING
             if ((device == NULL) || (device->traced_pointer_commit_count >= 16U)) {
                 return;
             }
@@ -423,6 +433,7 @@ namespace board {
             Serial::puts_raw(" buttons=");
             trace_u32(buttons);
             Serial::putc_raw('\n');
+#endif // ENABLE_TRACING
         }
 
         /**
@@ -436,6 +447,7 @@ namespace board {
          * @return Nothing.
          */
         static void trace_poll_state(DeviceState* device, const char* phase, U32 interrupt_status, U16 used_index) {
+#ifdef ENABLE_TRACING
             if ((device == NULL) || (phase == NULL)) {
                 return;
             }
@@ -451,6 +463,7 @@ namespace board {
             Serial::puts_raw(" last=");
             trace_u32(static_cast<U32>(device->event_queue.last_used_idx));
             Serial::putc_raw('\n');
+#endif// ENABLE_TRACING
         }
 
         /**
@@ -978,8 +991,10 @@ namespace board {
             U32 height;
             U32 x;
             U32 y;
+            U32 current_buttons;
+            U32 previous_buttons;
+            U32 changed_buttons;
             bool moved;
-            bool button_changed;
 
             if ((device == NULL) || !device->pointer) {
                 return;
@@ -1002,31 +1017,27 @@ namespace board {
             device->pending_rel_x = 0;
             device->pending_rel_y = 0;
             moved = !device->pointer_initialized || (x != device->pointer_x) || (y != device->pointer_y);
-            button_changed = device->button_down != device->last_button_down;
+            current_buttons = device->button_mask;
+            previous_buttons = device->last_button_mask;
+            changed_buttons = current_buttons ^ previous_buttons;
             device->pointer_x = x;
             device->pointer_y = y;
             device->pointer_initialized = true;
-            if (moved || button_changed) {
-                trace_pointer_commit(device, x, y, device->button_down ? 1U : 0U);
+            if (moved || changed_buttons != 0U) {
+                trace_pointer_commit(device, x, y, current_buttons);
             }
 
             if (moved) {
-                publish_pointer_event(ROS_KERNEL_GUI_INPUT_EVENT_POINTER_MOVE, x, y, device->button_down ? 1U : 0U);
+                publish_pointer_event(ROS_KERNEL_GUI_INPUT_EVENT_POINTER_MOVE, x, y, current_buttons);
             }
-            if (!device->last_button_down && device->button_down) {
-                publish_pointer_event(ROS_KERNEL_GUI_INPUT_EVENT_POINTER_DOWN, x, y, 1U);
+            if ((changed_buttons & current_buttons) != 0U) {
+                publish_pointer_event(ROS_KERNEL_GUI_INPUT_EVENT_POINTER_DOWN, x, y, current_buttons);
             }
-            else if (device->last_button_down && !device->button_down) {
-                publish_pointer_event(ROS_KERNEL_GUI_INPUT_EVENT_POINTER_UP, x, y, 0U);
-            }
-            else if (button_changed) {
-                publish_pointer_event(device->button_down ? ROS_KERNEL_GUI_INPUT_EVENT_POINTER_DOWN : ROS_KERNEL_GUI_INPUT_EVENT_POINTER_UP,
-                    x,
-                    y,
-                    device->button_down ? 1U : 0U);
+            if ((changed_buttons & previous_buttons) != 0U) {
+                publish_pointer_event(ROS_KERNEL_GUI_INPUT_EVENT_POINTER_UP, x, y, current_buttons);
             }
 
-            device->last_button_down = device->button_down;
+            device->last_button_mask = current_buttons;
         }
 
         /**
@@ -1072,7 +1083,20 @@ namespace board {
             switch (event->type) {
             case VirtioInputEventTypeKey:
                 if ((event->code == VirtioInputButtonLeft) || (event->code == VirtioInputButtonTouch)) {
-                    device->button_down = event->value != 0U;
+                    if (event->value != 0U) {
+                        device->button_mask |= ROS_KERNEL_GUI_POINTER_BUTTON_LEFT;
+                    }
+                    else {
+                        device->button_mask &= ~ROS_KERNEL_GUI_POINTER_BUTTON_LEFT;
+                    }
+                }
+                else if (event->code == VirtioInputButtonRight) {
+                    if (event->value != 0U) {
+                        device->button_mask |= ROS_KERNEL_GUI_POINTER_BUTTON_RIGHT;
+                    }
+                    else {
+                        device->button_mask &= ~ROS_KERNEL_GUI_POINTER_BUTTON_RIGHT;
+                    }
                 }
                 break;
             case VirtioInputEventTypeRel:
@@ -1138,6 +1162,65 @@ namespace board {
         }
 
         /**
+         * Restore the immutable event-descriptor layout when some other bug
+         * scribbles over the virtio-input descriptor table.
+         *
+         * QEMU raises `virtio: bogus descriptor or out of resources` when it
+         * pops an input-event buffer whose guest physical address no longer
+         * maps to RAM. The event queue descriptors should be write-only,
+         * single-buffer entries for the per-slot `events[]` storage for the
+         * entire lifetime of the device, so it is safe to verify and repair
+         * them during polling.
+         *
+         * @param device Device state whose event queue should be validated.
+         * @return `true` when at least one descriptor had to be repaired.
+         */
+        static bool refresh_event_descriptors(DeviceState* device) {
+            InputQueue* queue;
+            bool repaired = false;
+
+            if ((device == NULL) || !device->ready) {
+                return false;
+            }
+
+            queue = &device->event_queue;
+            for (U32 descriptor_index = 0U; descriptor_index < QueueSize; ++descriptor_index) {
+                const PhysAddr expected_addr = phys_addr(&queue->events[descriptor_index]);
+                volatile VirtqDesc* desc = &queue->desc[descriptor_index];
+
+                if ((desc->addr == expected_addr)
+                    && (desc->len == sizeof(VirtioInputEvent))
+                    && (desc->flags == VirtqDescFlagWrite)
+                    && (desc->next == 0U)) {
+                    continue;
+                }
+
+                if (!repaired) {
+                    ++device->descriptor_repair_count;
+                    if ((device->descriptor_repair_count <= 8U)
+                        || ((device->descriptor_repair_count & (device->descriptor_repair_count - 1U)) == 0U)) {
+                        KERROR(
+                            "[virtio-input] repaired event descriptors slot=%u repair=%u\n",
+                            static_cast<unsigned>(device->slot_index),
+                            static_cast<unsigned>(device->descriptor_repair_count));
+                    }
+                }
+
+                desc->addr = expected_addr;
+                desc->len = sizeof(VirtioInputEvent);
+                desc->flags = VirtqDescFlagWrite;
+                desc->next = 0U;
+                repaired = true;
+            }
+
+            if (repaired) {
+                barrier();
+            }
+
+            return repaired;
+        }
+
+        /**
          * Drain all used descriptors for one device.
          *
          * @param device Device state to poll.
@@ -1152,6 +1235,8 @@ namespace board {
             if ((device == NULL) || !device->ready) {
                 return;
             }
+
+            (void)refresh_event_descriptors(device);
 
             interrupt_status = read_reg(device->slot_index, VirtioMmioInterruptStatus);
             if (interrupt_status != 0U) {
@@ -1186,11 +1271,6 @@ namespace board {
 
             if (interrupt_status != 0U) {
                 trace_poll_state(device, "irq", interrupt_status, used_ring->idx);
-            }
-            else if ((device->traced_poll_count <= 16U)
-                || (device->traced_poll_count == 1024U)
-                || ((device->traced_poll_count % 65536U) == 0U)) {
-                trace_poll_state(device, "idle", interrupt_status, used_ring->idx);
             }
 
             if (queue_changed) {

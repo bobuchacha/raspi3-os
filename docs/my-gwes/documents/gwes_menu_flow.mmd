@@ -1,0 +1,33 @@
+flowchart TD
+    A[Caller requests popup menu] --> B[Create or reuse GWE_MENU model]
+    B --> C[Measure items and compute popup geometry]
+    C --> D[Create popup GWE_WINDOW]
+    D --> E[Set capture to popup window]
+    E --> F[Enter menu tracking loop]
+
+    F --> G{Incoming event}
+    G -->|Pointer move inside menu| H[Update highlighted item]
+    G -->|Pointer up on command| I[Execute command]
+    G -->|Pointer on submenu item| J[Open or arm submenu]
+    G -->|Pointer outside menu| K[Dismiss popup tree]
+    G -->|Key up or down| L[Move selection]
+    G -->|Enter| I
+    G -->|Escape| K
+
+    H --> F
+    J --> F
+    L --> F
+
+    I --> M{Return command mode?}
+    M -->|Yes| N[Store command id for caller]
+    M -->|No| O[Send command notification to owner window]
+    N --> P[Dismiss popup tree]
+    O --> P
+
+    K --> Q{Outside click pending?}
+    P --> R[Release capture]
+    Q -->|Yes| S[Replay click to underlying target]
+    Q -->|No| R
+    S --> R
+    R --> T[Destroy popup window or cascade]
+    T --> U[Exit menu loop]

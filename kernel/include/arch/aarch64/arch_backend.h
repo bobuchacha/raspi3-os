@@ -60,7 +60,16 @@ namespace arch {
         static U64 counter_value(void) {
             U64 counter;
 
+#if defined(BOARD_VIRT)
+            // The `virt` board currently drives the periodic IRQ from the
+            // virtual EL1 timer registers, so deadline accounting must read the
+            // matching virtual counter instead of the physical counter. Mixing
+            // `cntpct` with `cntv_cval` can arm the first interrupt close
+            // enough to fire, then push later compares onto the wrong timeline.
+            __asm__ volatile("mrs %0, cntvct_el0" : "=r"(counter));
+#else
             __asm__ volatile("mrs %0, cntpct_el0" : "=r"(counter));
+#endif
             return counter;
         }
 
@@ -86,8 +95,9 @@ namespace arch {
             }
 
             timer_interval_ticks_ = ticks;
-            // The active boards still use a polled scheduler clock, so the kernel tracks the next
-            // architected-counter deadline in software instead of depending on a board IRQ route.
+            // Keep the software deadline even while arming the architected timer IRQ source. The
+            // active `virt` tree still needs the poll path as a fallback until the board-level IRQ
+            // route is fully wired, so both views of time must stay in sync.
             timer_deadline_ticks_ = counter_value() + ticks;
             timer_enabled_ = true;
             rearm_periodic_timer();
@@ -100,6 +110,7 @@ namespace arch {
             }
 
             timer_deadline_ticks_ = counter_value() + timer_interval_ticks_;
+            program_periodic_timer_compare(timer_deadline_ticks_);
         }
 
         static U32 poll_periodic_timer(void) {
@@ -118,6 +129,10 @@ namespace arch {
             // Advance by whole quanta so long UART waits or idle spins keep scheduler time monotonic.
             elapsed_ticks = 1ULL + ((now - timer_deadline_ticks_) / timer_interval_ticks_);
             timer_deadline_ticks_ += elapsed_ticks * timer_interval_ticks_;
+            // Re-arm the architected timer from the advanced software deadline too, otherwise a
+            // missing board IRQ route would leave the hardware timer permanently expired after the
+            // first missed interrupt and later IRQ bring-up would resume with a stale level.
+            program_periodic_timer_compare(timer_deadline_ticks_);
             if (elapsed_ticks > static_cast<U64>(static_cast<U32>(-1))) {
                 return static_cast<U32>(-1);
             }
@@ -126,6 +141,7 @@ namespace arch {
         }
 
         static void disable_periodic_timer(void) {
+            disable_periodic_timer_compare();
             timer_enabled_ = false;
             timer_interval_ticks_ = 0ULL;
             timer_deadline_ticks_ = 0ULL;
@@ -144,6 +160,64 @@ namespace arch {
         }
 
     private:
+        /**
+         * Program the EL1 physical timer compare register so the CPU can take a real timer IRQ
+         * when the board interrupt route exists.
+         *
+         * @param compare_value Absolute architected-counter value for the next timer firing.
+         * @return Nothing.
+         */
+        static void program_periodic_timer_compare(U64 compare_value) {
+            const U64 control = 1ULL;
+
+            // Use the absolute compare register rather than TVAL so the software deadline and the
+            // hardware IRQ source share the same target tick even if execution was delayed.
+#if defined(BOARD_VIRT)
+            // QEMU `virt` runs this kernel in non-secure EL1 under EL2 bring-up, and the virtual
+            // timer PPI is the reliable architected route exposed to that guest-style context.
+            __asm__ volatile(
+                "msr cntv_cval_el0, %0\n\t"
+                "msr cntv_ctl_el0, %1\n\t"
+                "isb"
+                :
+            : "r"(compare_value), "r"(control)
+                : "memory");
+#else
+            __asm__ volatile(
+                "msr cntp_cval_el0, %0\n\t"
+                "msr cntp_ctl_el0, %1\n\t"
+                "isb"
+                :
+            : "r"(compare_value), "r"(control)
+                : "memory");
+#endif
+        }
+
+        /**
+         * Disable the EL1 physical timer compare register while tearing the timer device down.
+         *
+         * @return Nothing.
+         */
+        static void disable_periodic_timer_compare(void) {
+            const U64 control = 0ULL;
+
+#if defined(BOARD_VIRT)
+            __asm__ volatile(
+                "msr cntv_ctl_el0, %0\n\t"
+                "isb"
+                :
+            : "r"(control)
+                : "memory");
+#else
+            __asm__ volatile(
+                "msr cntp_ctl_el0, %0\n\t"
+                "isb"
+                :
+            : "r"(control)
+                : "memory");
+#endif
+        }
+
         inline static U64 timer_interval_ticks_ = 0ULL;
         inline static U64 timer_deadline_ticks_ = 0ULL;
         inline static bool timer_enabled_ = false;

@@ -1,6 +1,8 @@
 #include "scheduler.h"
 
+#include "arch/aarch64/exception_frame.h"
 #include "arch.h"
+#include "debug-message.h"
 #include "kernel_event_broker.h"
 #include "mm.h"
 #include "platform.h"
@@ -37,6 +39,82 @@ namespace {
     Thread* g_retired_thread_head;
     Thread* g_retired_thread_tail;
     bool g_reschedule_pending;
+    bool g_lower_el_irq_preempt_trace_emitted;
+    bool g_lower_el_irq_resume_current_trace_emitted;
+    U32 g_irqhandoff_bind_trace_count;
+    U32 g_irqhandoff_ready_trace_count;
+
+    /**
+     * Report whether one C string starts with one fixed prefix.
+     *
+     * The `irqhandoff` proof probes must stay tightly scoped so the serial log
+     * shows only the scheduler decisions relevant to the current handoff gap.
+     * A small local helper keeps those gates explicit inside this file.
+     *
+     * @param text Full text to inspect.
+     * @param prefix Required starting substring.
+     * @return True when `text` begins with `prefix`.
+     */
+    bool text_has_prefix(const char* text, const char* prefix) {
+        U32 index = 0U;
+
+        if ((text == NULL) || (prefix == NULL)) {
+            return false;
+        }
+
+        while (prefix[index] != '\0') {
+            if (text[index] != prefix[index]) {
+                return false;
+            }
+            ++index;
+        }
+
+        return true;
+    }
+
+    bool thread_name_has_prefix(const Thread* thread, const char* prefix) {
+        return (thread != NULL) && text_has_prefix(thread->name, prefix);
+    }
+
+    void trace_irqhandoff_bind_window(const Thread* thread) {
+        if ((thread == NULL) || !thread_name_has_prefix(thread, "irqhandoff.")) {
+            return;
+        }
+        if (g_irqhandoff_bind_trace_count >= 4U) {
+            return;
+        }
+
+        ++g_irqhandoff_bind_trace_count;
+        KRETAIL(
+            "[sched-irq] irqhandoff bind count=%u tid=%llu name=%s priority=%u quantum=%u ready=%zu\n",
+            static_cast<unsigned int>(g_irqhandoff_bind_trace_count),
+            static_cast<unsigned long long>(thread->id),
+            thread->name,
+            static_cast<unsigned int>(thread->current_priority),
+            static_cast<unsigned int>(thread->quantum_ticks_remaining),
+            static_cast<size_t>(g_ready_count));
+    }
+
+    void trace_irqhandoff_ready_window(const char* event, const Thread* thread, U8 priority) {
+        if ((thread == NULL) || (event == NULL) || !thread_name_has_prefix(thread, "irqhandoff.")) {
+            return;
+        }
+        if (g_irqhandoff_ready_trace_count >= 12U) {
+            return;
+        }
+
+        ++g_irqhandoff_ready_trace_count;
+        KRETAIL(
+            "[sched-irq] irqhandoff ready count=%u event=%s tid=%llu name=%s state=%u in_ready=%u priority=%u ready=%zu\n",
+            static_cast<unsigned int>(g_irqhandoff_ready_trace_count),
+            event,
+            static_cast<unsigned long long>(thread->id),
+            thread->name,
+            static_cast<unsigned int>(thread->current_state),
+            thread->in_ready_queue ? 1U : 0U,
+            static_cast<unsigned int>(priority),
+            static_cast<size_t>(g_ready_count));
+    }
 
     bool thread_is_runnable(const Thread* thread) {
         if (thread == NULL) {
@@ -306,10 +384,14 @@ namespace {
             }
 
             thread = queue->head;
+            trace_irqhandoff_ready_window("candidate", thread, static_cast<U8>(priority));
             ready_queue_remove(thread);
             if (thread_can_enter_ready_queue(thread) && (thread->current_state == ThreadState::Ready)) {
+                trace_irqhandoff_ready_window("selected", thread, static_cast<U8>(priority));
                 return thread;
             }
+
+            trace_irqhandoff_ready_window("discarded", thread, static_cast<U8>(priority));
         }
 
         return NULL;
@@ -367,6 +449,7 @@ namespace {
         }
 
         thread->current_state = ThreadState::Running;
+        trace_irqhandoff_bind_window(thread);
         if (previous_state != static_cast<U32>(ThreadState::Running)) {
             KernelEventBroker::publish_thread_event(
                 KernelEventTypeThreadRunning,
@@ -473,6 +556,165 @@ namespace {
         }
     }
 
+    /**
+     * Copy one lower-EL exception frame into the current thread's owned context.
+     *
+     * IRQ-time preemption cannot rely on the original vector stack frame staying
+     * live because the scheduler may switch to a different thread and never
+     * return to that abandoned kernel call chain. Persisting the full frame in
+     * `CpuContext` lets the low-level switcher resume EL0 directly later.
+     *
+     * @param frame Saved lower-EL exception frame captured by the vector entry.
+     * @return True when the current thread now owns a resumable frame.
+     */
+    bool save_current_lower_el_exception_frame(const AArch64ExceptionFrame* frame) {
+        Thread* current = g_current_thread;
+
+        if ((current == NULL) || (frame == NULL)) {
+            return false;
+        }
+
+        current->context.saved_exception_frame = *frame;
+        current->context.program_counter = frame->elr;
+        current->context.processor_state = (frame->spsr & CpuContextProcessorStateMask) | CpuContextResumeExceptionFrameFlag;
+        return true;
+    }
+
+    /**
+     * Emit one serial proof that a timer IRQ preempted live EL0 execution.
+     *
+     * The goal of this trace is not ongoing scheduler telemetry. It exists only
+     * to prove that execution reached the real lower-EL IRQ preemption path and
+     * chose to switch away from the interrupted thread before it hit a normal
+     * cooperative polling site. Logging only the first confirmed event keeps the
+     * serial output narrow and avoids perturbing the hot IRQ path repeatedly.
+     *
+     * @param reason Short static text describing why the IRQ forced reschedule.
+     * @param frame Saved lower-EL exception frame for the interrupted thread.
+     * @param best_priority Highest ready priority seen at decision time.
+     * @return Nothing.
+     */
+    void trace_lower_el_irq_preemption_once(const char* reason, const AArch64ExceptionFrame* frame, int best_priority) {
+        Thread* current;
+
+        if (g_lower_el_irq_preempt_trace_emitted) {
+            return;
+        }
+
+        current = g_current_thread;
+        if ((current == NULL) || (frame == NULL)) {
+            return;
+        }
+
+        g_lower_el_irq_preempt_trace_emitted = true;
+        KRETAIL(
+            "[sched-irq] lower-el timer preemption reason=%s tick=%llu tid=%llu name=%s elr=0x%llx ready=%llu best-priority=%d\n",
+            reason,
+            static_cast<unsigned long long>(g_tick_count),
+            static_cast<unsigned long long>(current->id),
+            current->name,
+            static_cast<unsigned long long>(frame->elr),
+            static_cast<unsigned long long>(g_ready_count),
+            best_priority);
+    }
+
+    /**
+     * Emit one serial proof that the timer IRQ resumed the interrupted thread.
+     *
+     * The synthetic `irqhandoff` workload should force the scheduler to switch
+     * away once another equal-priority worker is ready. When that does not
+     * happen, one narrow resume-current trace is the cheapest way to tell
+     * whether the IRQ path is still running and what scheduler state it saw.
+     *
+     * @param frame Saved lower-EL exception frame for the interrupted thread.
+     * @param best_priority Highest ready priority visible at decision time.
+     * @return Nothing.
+     */
+    void trace_lower_el_irq_resume_current_once(const AArch64ExceptionFrame* frame, int best_priority) {
+        Thread* current;
+
+        if (g_lower_el_irq_resume_current_trace_emitted) {
+            return;
+        }
+
+        current = g_current_thread;
+        if ((current == NULL) || (frame == NULL)) {
+            return;
+        }
+
+        g_lower_el_irq_resume_current_trace_emitted = true;
+        KRETAIL(
+            "[sched-irq] lower-el timer resume-current tick=%llu tid=%llu name=%s elr=0x%llx ready=%llu best-priority=%d quantum=%u current-priority=%u\n",
+            static_cast<unsigned long long>(g_tick_count),
+            static_cast<unsigned long long>(current->id),
+            current->name,
+            static_cast<unsigned long long>(frame->elr),
+            static_cast<unsigned long long>(g_ready_count),
+            best_priority,
+            current->quantum_ticks_remaining,
+            static_cast<unsigned int>(current->current_priority));
+    }
+
+    /**
+     * Perform one immediate scheduler decision from a lower-EL timer IRQ.
+     *
+     * The normal thread-context poll path can defer switching because it is safe
+     * to return to the caller and revisit the scheduler later. Once execution is
+     * inside a lower-EL IRQ, that strategy is no longer enough because the point
+     * of true preemption is to leave the interrupted thread before it reaches the
+     * next cooperative poll site.
+     *
+     * @param frame Saved lower-EL exception frame captured by the IRQ vector.
+     * @return True when this helper consumed the pending reschedule decision.
+     */
+    bool process_pending_reschedule_from_lower_el_irq(const AArch64ExceptionFrame* frame) {
+        int best_priority;
+
+        if (!g_reschedule_pending) {
+            return false;
+        }
+
+        g_reschedule_pending = false;
+        if ((g_current_thread == NULL) || (g_current_thread == g_idle_thread)) {
+            if (g_ready_count != 0U) {
+                (void)switch_to_thread(pick_next_thread(false));
+                return true;
+            }
+
+            return false;
+        }
+
+        best_priority = highest_ready_priority();
+        if ((best_priority >= 0) && (static_cast<U8>(best_priority) < g_current_thread->current_priority)) {
+            if (!save_current_lower_el_exception_frame(frame)) {
+                g_reschedule_pending = true;
+                return false;
+            }
+
+            trace_lower_el_irq_preemption_once("higher-priority-ready", frame, best_priority);
+            (void)dispatch(true, false, false, false);
+            return true;
+        }
+        if ((g_current_thread->quantum_ticks_remaining == 0U) && (g_ready_count != 0U)) {
+            if (!save_current_lower_el_exception_frame(frame)) {
+                g_reschedule_pending = true;
+                return false;
+            }
+
+            trace_lower_el_irq_preemption_once("quantum-expired", frame, best_priority);
+            (void)dispatch(true, true, true, false);
+            return true;
+        }
+        if (g_current_thread->quantum_ticks_remaining == 0U) {
+            reset_quantum(g_current_thread);
+            trace_lower_el_irq_resume_current_once(frame, best_priority);
+            return true;
+        }
+
+        trace_lower_el_irq_resume_current_once(frame, best_priority);
+        return false;
+    }
+
     [[noreturn]] void exit_current_thread(void) {
         bool interrupts_enabled = arch::Arch::save_and_disable_interrupts();
         Thread* current = g_current_thread;
@@ -524,6 +766,10 @@ Status Scheduler::init(void) {
     g_retired_thread_head = NULL;
     g_retired_thread_tail = NULL;
     g_reschedule_pending = false;
+    g_lower_el_irq_preempt_trace_emitted = false;
+    g_lower_el_irq_resume_current_trace_emitted = false;
+    g_irqhandoff_bind_trace_count = 0U;
+    g_irqhandoff_ready_trace_count = 0U;
     return StatusOK;
 }
 
@@ -601,6 +847,92 @@ Status Scheduler::enqueue(Thread* thread) {
     }
 
     status = transition_thread_to_ready(thread, true);
+    arch::Arch::restore_interrupts(interrupts_enabled);
+    return status;
+}
+
+Status Scheduler::set_current_priority(U8 priority) {
+    bool interrupts_enabled;
+    Thread* current;
+    int best_priority;
+    Status status = StatusOK;
+
+    if (priority >= ThreadPriorityLevelCount) {
+        return StatusInvalidArgument;
+    }
+
+    interrupts_enabled = arch::Arch::save_and_disable_interrupts();
+    reap_retired_threads();
+
+    current = g_current_thread;
+    if ((current == NULL) || (current == g_idle_thread)) {
+        arch::Arch::restore_interrupts(interrupts_enabled);
+        return StatusBusy;
+    }
+    if (current->current_state != ThreadState::Running) {
+        arch::Arch::restore_interrupts(interrupts_enabled);
+        return StatusBusy;
+    }
+
+    current->base_priority = priority;
+    current->current_priority = priority;
+    reset_quantum(current);
+
+    best_priority = highest_ready_priority();
+    if ((best_priority >= 0) && (static_cast<U8>(best_priority) < current->current_priority)) {
+        status = dispatch(true, false, false, false);
+    }
+
+    arch::Arch::restore_interrupts(interrupts_enabled);
+    return status;
+}
+
+Status Scheduler::set_thread_priority(Thread* thread, U8 priority) {
+    bool interrupts_enabled;
+    Status status = StatusOK;
+
+    if (priority >= ThreadPriorityLevelCount) {
+        return StatusInvalidArgument;
+    }
+
+    interrupts_enabled = arch::Arch::save_and_disable_interrupts();
+    reap_retired_threads();
+
+    if ((thread == NULL) || (ThreadManager::find_thread(thread->id) != thread)) {
+        arch::Arch::restore_interrupts(interrupts_enabled);
+        return StatusNotFound;
+    }
+    if ((thread == g_idle_thread) || (thread->current_state == ThreadState::Terminated)) {
+        arch::Arch::restore_interrupts(interrupts_enabled);
+        return StatusBusy;
+    }
+
+    if (thread == g_current_thread) {
+        arch::Arch::restore_interrupts(interrupts_enabled);
+        return set_current_priority(priority);
+    }
+
+    if (thread->in_ready_queue) {
+        ready_queue_remove(thread);
+    }
+
+    thread->base_priority = priority;
+    thread->current_priority = priority;
+    reset_quantum(thread);
+
+    if (thread->current_state == ThreadState::Ready) {
+        status = ready_queue_push(thread, true);
+        if (status != StatusOK) {
+            arch::Arch::restore_interrupts(interrupts_enabled);
+            return status;
+        }
+        if ((g_current_thread != NULL)
+            && (g_current_thread != g_idle_thread)
+            && (thread->current_priority < g_current_thread->current_priority)) {
+            g_reschedule_pending = true;
+        }
+    }
+
     arch::Arch::restore_interrupts(interrupts_enabled);
     return status;
 }
@@ -849,6 +1181,36 @@ void Scheduler::timer_tick(void) {
     }
 
     arch::Arch::restore_interrupts(interrupts_enabled);
+}
+
+SchedulerIrqAction Scheduler::handle_lower_el_timer_irq(AArch64ExceptionFrame* frame) {
+    bool interrupts_enabled;
+
+    // Lower-EL timer IRQs are the first place where true preemption becomes
+    // observable. Advance the normal tick bookkeeping first, then consume any
+    // pending reschedule immediately while the saved architectural frame is
+    // still available for handoff into `CpuContext`.
+    timer_tick();
+
+    interrupts_enabled = arch::Arch::save_and_disable_interrupts();
+    (void)process_pending_reschedule_from_lower_el_irq(frame);
+    arch::Arch::restore_interrupts(interrupts_enabled);
+    return SchedulerIrqAction::ResumeCurrent;
+}
+
+SchedulerIrqAction Scheduler::handle_current_el_timer_irq(void) {
+    bool interrupts_enabled;
+
+    // Current-EL timer preemption can resume the interrupted kernel call chain
+    // later because the thread-private EL1 stack frame remains valid across a
+    // normal context switch. Unlike EL0 preemption, no exception-frame copy is
+    // needed before switching away.
+    timer_tick();
+
+    interrupts_enabled = arch::Arch::save_and_disable_interrupts();
+    process_pending_reschedule();
+    arch::Arch::restore_interrupts(interrupts_enabled);
+    return SchedulerIrqAction::ResumeCurrent;
 }
 
 Thread* Scheduler::current(void) {

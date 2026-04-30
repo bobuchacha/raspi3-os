@@ -10,17 +10,23 @@
 /*
  * Classify one tracked kernel resource allocation.
  *
- * The current table focuses on loader-facing growth hotspots because those are
- * the objects that historically hit fixed ceilings first during repeated GUI
- * process launches.
+ * The current table focuses on kernel-owned growth hotspots so repeated loads,
+ * GUI activity, and user-heap demand paging can expose the same bookkeeping
+ * pressure points through one shared stats surface.
  */
 enum class KernelResourceKind : U32 {
     LoaderStackBacking = 0,
     LoaderImageBacking = 1,
     LoaderModuleRecord = 2,
-    LoaderImageCachePayload = 3,
-    LoaderImageCacheRecord = 4,
-    Count = 5,
+    LoaderSharedImageRecord = 3,
+    LoaderImageCachePayload = 4,
+    LoaderImageCacheRecord = 5,
+    UserHeapAllocationRecord = 6,
+    UserHeapMappedPageRecord = 7,
+    GuiSurfaceRecord = 8,
+    GuiSurfaceBacking = 9,
+    FileMappingBacking = 10,
+    Count = 11,
 };
 
 /*
@@ -36,9 +42,10 @@ typedef struct KernelResourceStats {
 /*
  * Central bookkeeping for dynamically growing kernel resources.
  *
- * The loader previously relied on several fixed arrays and byte caps. This
- * manager replaces those hard ceilings with a single heap-backed registry that
- * tracks live allocations and high-water marks per resource kind.
+ * Subsystems such as the loader and user-heap manager previously relied on
+ * ad-hoc growth accounting. This manager replaces those hard ceilings with one
+ * heap-backed registry that tracks live allocations and high-water marks per
+ * resource kind.
  */
 class KernelResourceManager final {
 public:

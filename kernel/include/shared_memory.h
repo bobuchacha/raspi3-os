@@ -10,8 +10,9 @@
 struct Process;
 
 /*
- * The shared-memory manager owns named EL0 mappings backed by one kernel heap
- * block so multiple user processes can observe the same writable bytes.
+ * The shared-memory manager owns named EL0 mappings backed by dedicated
+ * physical pages so multiple user processes can observe the same writable
+ * bytes without depending on kernel heap allocations.
  */
 class SharedMemoryManager final {
 public:

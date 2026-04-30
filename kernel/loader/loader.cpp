@@ -3,18 +3,19 @@
 #include "debug-message.h"
 #include "dll_loader.h"
 #include "heap.h"
+#include "kernel_time.h"
 #include "mm.h"
 #include "process.h"
 #include "resource_manager.h"
+#include "scheduler.h"
 #include "thread.h"
+#include "user_address_space_layout.h"
 
 namespace {
 
-    // The current MMU mapper only supports L2 block mappings, so each userspace
-    // region must start on its own L2 boundary.
-    inline constexpr VirtAddr UserImageBase = mm::backend::L2BlockSize;
-    inline constexpr VirtAddr UserStackBase = UserImageBase + mm::backend::L2BlockSize;
-    inline constexpr VirtAddr UserStackTop = UserStackBase + mm::backend::L2BlockSize;
+    inline constexpr bool LoaderUserStackPreferBlockMappings = false;
+    inline constexpr Size LoaderUserStackBytes = LoaderUserStackPreferBlockMappings ? mm::backend::L2BlockSize : user_address_space::InitialThreadStackSlotBytes;
+    inline constexpr VirtAddr UserStackTop = user_address_space::InitialStackBase + LoaderUserStackBytes;
 
     /**
      * Validate heap integrity at one loader subsystem boundary.
@@ -58,6 +59,19 @@ namespace {
             static_cast<unsigned long>(stats.peak_count),
             static_cast<unsigned long>(stats.live_bytes),
             static_cast<unsigned long>(stats.peak_bytes));
+    }
+
+    /**
+     * Return one scheduler-backed millisecond timestamp for spawn profiling.
+     *
+     * Spawn latency can come from process creation, image loading, mapping, or
+     * thread bootstrap. Using the same time source for each boundary keeps the
+     * breakdown internally comparable.
+     *
+     * @return Current uptime in milliseconds.
+     */
+    U64 loader_now_msec(void) {
+        return KernelTime::ticks_to_milliseconds(Scheduler::tick_count());
     }
 
     void copy_text(char* destination, Size capacity, const char* source, const char* fallback) {
@@ -125,7 +139,7 @@ namespace {
     U8* allocate_user_block(void) {
         U8* block = static_cast<U8*>(KernelResourceManager::allocate(
             KernelResourceKind::LoaderStackBacking,
-            mm::backend::L2BlockSize,
+            LoaderUserStackBytes,
             mm::PageSize,
             0ULL,
             "user-stack"));
@@ -248,6 +262,8 @@ Status Loader::release_user_process_resources(Process* process) {
         return status;
     }
 
+    DllLoader::release_process_image_private_pages(process);
+
     if (process->loader_image_backing != NULL) {
         DllLoader::release_image_backing(process->loader_image_backing, process->loader_image_bytes);
         process->loader_image_backing = NULL;
@@ -271,6 +287,13 @@ Status Loader::spawn_user_process(const char* path, const char* process_name, co
     VirtAddr entry_point = 0U;
     Status status;
     char derived_name[ProcessNameCapacity];
+    U64 total_start_msec = loader_now_msec();
+    U64 stage_start_msec = total_start_msec;
+    U64 create_process_msec = 0U;
+    U64 stack_ready_msec = 0U;
+    U64 load_image_msec = 0U;
+    U64 map_msec = 0U;
+    U64 thread_create_msec = 0U;
 
     if ((path == NULL) || (out_thread == NULL)) {
         return StatusInvalidArgument;
@@ -287,12 +310,16 @@ Status Loader::spawn_user_process(const char* path, const char* process_name, co
     }
 
     copy_text(derived_name, sizeof(derived_name), process_name, path_basename(path));
+    stage_start_msec = loader_now_msec();
     status = ProcessManager::create_user_process(derived_name, &process);
+    create_process_msec = loader_now_msec() - stage_start_msec;
     if (status != StatusOK) {
         return status;
     }
 
+    stage_start_msec = loader_now_msec();
     stack_backing = allocate_user_block();
+    stack_ready_msec = loader_now_msec() - stage_start_msec;
     if (stack_backing == NULL) {
         (void)ProcessManager::destroy_process(process);
         (void)loader_heap_checkpoint_status("loader:spawn:stack-failure");
@@ -305,7 +332,9 @@ Status Loader::spawn_user_process(const char* path, const char* process_name, co
         return status;
     }
 
+    stage_start_msec = loader_now_msec();
     status = DllLoader::load_user_executable(process, path, reinterpret_cast<void**>(&image_backing), &image_bytes, &entry_point);
+    load_image_msec = loader_now_msec() - stage_start_msec;
     if (status != StatusOK) {
         release_user_block(stack_backing);
         (void)ProcessManager::destroy_process(process);
@@ -331,7 +360,10 @@ Status Loader::spawn_user_process(const char* path, const char* process_name, co
     process->loader_image_backing = image_backing;
     process->loader_image_bytes = image_bytes;
     process->loader_stack_backing = stack_backing;
-    process->loader_stack_bytes = mm::backend::L2BlockSize;
+    process->loader_stack_bytes = LoaderUserStackBytes;
+    process->user_stack_slot_bytes = LoaderUserStackBytes;
+    process->user_stack_slot_bitmap = 1U;
+    copy_text(process->image_path, sizeof(process->image_path), path, "");
     status = loader_heap_checkpoint_status("loader:spawn:arguments-ready");
     if (status != StatusOK) {
         (void)ProcessManager::destroy_process(process);
@@ -339,23 +371,19 @@ Status Loader::spawn_user_process(const char* path, const char* process_name, co
     }
 
     {
-        const VmMapping image_mapping = {
-            UserImageBase,
-            mm::MemoryManager::kernel_to_physical(reinterpret_cast<VirtAddr>(image_backing)),
-            image_bytes,
-            PagePresent | PageWritable | PageExecutable | PageUser,
-        };
         const VmMapping stack_mapping = {
-            UserStackBase,
+            user_address_space::InitialStackBase,
             mm::MemoryManager::kernel_to_physical(reinterpret_cast<VirtAddr>(stack_backing)),
-            mm::backend::L2BlockSize,
+            LoaderUserStackBytes,
             PagePresent | PageWritable | PageUser,
         };
 
-        status = mm::MemoryManager::map(&process->process_address_space, &image_mapping);
+        stage_start_msec = loader_now_msec();
+        status = DllLoader::map_user_executable(process, image_backing);
         if (status == StatusOK) {
             status = mm::MemoryManager::map(&process->process_address_space, &stack_mapping);
         }
+        map_msec = loader_now_msec() - stage_start_msec;
     }
     if (status != StatusOK) {
         (void)ProcessManager::destroy_process(process);
@@ -368,7 +396,9 @@ Status Loader::spawn_user_process(const char* path, const char* process_name, co
         return status;
     }
 
+    stage_start_msec = loader_now_msec();
     status = ThreadManager::create_user_thread(process, "main", entry_point, UserStackTop, &thread);
+    thread_create_msec = loader_now_msec() - stage_start_msec;
     if (status != StatusOK) {
         (void)ProcessManager::destroy_process(process);
         (void)loader_heap_checkpoint_status("loader:spawn:thread-failure");
@@ -376,5 +406,14 @@ Status Loader::spawn_user_process(const char* path, const char* process_name, co
     }
 
     *out_thread = thread;
+    KRETAIL(
+        "[loader-prof] spawn path=%s create_process_ms=%llu stack_ms=%llu load_image_ms=%llu map_ms=%llu thread_ms=%llu total_ms=%llu\n",
+        path,
+        static_cast<unsigned long long>(create_process_msec),
+        static_cast<unsigned long long>(stack_ready_msec),
+        static_cast<unsigned long long>(load_image_msec),
+        static_cast<unsigned long long>(map_msec),
+        static_cast<unsigned long long>(thread_create_msec),
+        static_cast<unsigned long long>(loader_now_msec() - total_start_msec));
     return loader_heap_checkpoint_status("loader:spawn:success");
 }

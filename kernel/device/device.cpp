@@ -1,12 +1,23 @@
 #include "device.h"
 
+#include "heap.h"
 #include "kernel_event_broker.h"
 
 namespace {
 
-    Device* g_devices[32];
+    typedef struct DeviceRegistryEntry {
+        Device* device;
+        struct DeviceRegistryEntry* next;
+    } DeviceRegistryEntry;
+
+    typedef struct DriverRegistryEntry {
+        DeviceDriver* driver;
+        struct DriverRegistryEntry* next;
+    } DriverRegistryEntry;
+
+    DeviceRegistryEntry* g_device_head;
     Size g_device_count;
-    DeviceDriver* g_drivers[32];
+    DriverRegistryEntry* g_driver_head;
     Size g_driver_count;
 
     bool same_text(const char* lhs, const char* rhs) {
@@ -28,13 +39,83 @@ namespace {
         return *lhs == *rhs;
     }
 
+    /**
+     * Release every heap-backed device registry entry.
+     *
+     * `DeviceManager::init()` is still written as a full reset hook, so the
+     * dynamic registry must drop any previously allocated nodes before the
+     * kernel starts re-registering devices during a reinitialization pass.
+     *
+     * @return Nothing.
+     */
+    void release_device_registry(void) {
+        while (g_device_head != NULL) {
+            DeviceRegistryEntry* next = g_device_head->next;
+
+            Heap::free(g_device_head);
+            g_device_head = next;
+        }
+    }
+
+    /**
+     * Release every heap-backed driver registry entry.
+     *
+     * @return Nothing.
+     */
+    void release_driver_registry(void) {
+        while (g_driver_head != NULL) {
+            DriverRegistryEntry* next = g_driver_head->next;
+
+            Heap::free(g_driver_head);
+            g_driver_head = next;
+        }
+    }
+
+    /**
+     * Allocate one registry node for a device pointer.
+     *
+     * @param device Device to publish through the registry.
+     * @return Heap-backed registry node, or NULL on allocation failure.
+     */
+    DeviceRegistryEntry* allocate_device_entry(Device* device) {
+        DeviceRegistryEntry* entry = static_cast<DeviceRegistryEntry*>(Heap::alloc(sizeof(DeviceRegistryEntry), alignof(DeviceRegistryEntry)));
+
+        if (entry == NULL) {
+            return NULL;
+        }
+
+        entry->device = device;
+        entry->next = NULL;
+        return entry;
+    }
+
+    /**
+     * Allocate one registry node for a driver pointer.
+     *
+     * @param driver Driver to publish through the registry.
+     * @return Heap-backed registry node, or NULL on allocation failure.
+     */
+    DriverRegistryEntry* allocate_driver_entry(DeviceDriver* driver) {
+        DriverRegistryEntry* entry = static_cast<DriverRegistryEntry*>(Heap::alloc(sizeof(DriverRegistryEntry), alignof(DriverRegistryEntry)));
+
+        if (entry == NULL) {
+            return NULL;
+        }
+
+        entry->driver = driver;
+        entry->next = NULL;
+        return entry;
+    }
+
 } // namespace
 
 Status DeviceManager::init(void) {
+    release_device_registry();
+    release_driver_registry();
+    g_device_head = NULL;
+    g_driver_head = NULL;
     g_device_count = 0;
     g_driver_count = 0;
-    memzero(g_devices, sizeof(g_devices));
-    memzero(g_drivers, sizeof(g_drivers));
     return StatusOK;
 }
 
@@ -45,14 +126,10 @@ Status DeviceManager::register_device(Device* device) {
         return StatusInvalidArgument;
     }
 
-    for (Size index = 0; index < g_device_count; ++index) {
-        if (g_devices[index] == device) {
+    for (DeviceRegistryEntry* entry = g_device_head; entry != NULL; entry = entry->next) {
+        if (entry->device == device) {
             return StatusAlreadyExists;
         }
-    }
-
-    if (g_device_count == COUNT_OF(g_devices)) {
-        return StatusNoSpace;
     }
 
     if (device->driver != NULL) {
@@ -62,7 +139,18 @@ Status DeviceManager::register_device(Device* device) {
         }
     }
 
-    g_devices[g_device_count++] = device;
+    {
+        DeviceRegistryEntry* entry = allocate_device_entry(device);
+
+        if (entry == NULL) {
+            return StatusNoMemory;
+        }
+
+        entry->next = g_device_head;
+        g_device_head = entry;
+        ++g_device_count;
+    }
+
     // Emit registration once the device table owns the slot so later lookups match what subscribers observe.
     KernelEventBroker::publish_registration_event(KernelEventTypeDeviceRegistered, device->name, StatusOK);
     return StatusOK;
@@ -73,17 +161,24 @@ Status DeviceManager::register_driver(DeviceDriver* driver) {
         return StatusInvalidArgument;
     }
 
-    for (Size index = 0; index < g_driver_count; ++index) {
-        if (g_drivers[index] == driver) {
+    for (DriverRegistryEntry* entry = g_driver_head; entry != NULL; entry = entry->next) {
+        if (entry->driver == driver) {
             return StatusAlreadyExists;
         }
     }
 
-    if (g_driver_count == COUNT_OF(g_drivers)) {
-        return StatusNoSpace;
+    {
+        DriverRegistryEntry* entry = allocate_driver_entry(driver);
+
+        if (entry == NULL) {
+            return StatusNoMemory;
+        }
+
+        entry->next = g_driver_head;
+        g_driver_head = entry;
+        ++g_driver_count;
     }
 
-    g_drivers[g_driver_count++] = driver;
     KernelEventBroker::publish_registration_event(KernelEventTypeDriverRegistered, driver->name, StatusOK);
     return StatusOK;
 }
@@ -109,9 +204,9 @@ Device* DeviceManager::find_device(const char* name) {
         return NULL;
     }
 
-    for (Size index = 0; index < g_device_count; ++index) {
-        if (same_text(g_devices[index]->name, name)) {
-            return g_devices[index];
+    for (DeviceRegistryEntry* entry = g_device_head; entry != NULL; entry = entry->next) {
+        if ((entry->device != NULL) && same_text(entry->device->name, name)) {
+            return entry->device;
         }
     }
 
@@ -123,9 +218,9 @@ DeviceDriver* DeviceManager::find_driver(const char* name) {
         return NULL;
     }
 
-    for (Size index = 0; index < g_driver_count; ++index) {
-        if (same_text(g_drivers[index]->name, name)) {
-            return g_drivers[index];
+    for (DriverRegistryEntry* entry = g_driver_head; entry != NULL; entry = entry->next) {
+        if ((entry->driver != NULL) && same_text(entry->driver->name, name)) {
+            return entry->driver;
         }
     }
 

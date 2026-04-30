@@ -10,6 +10,7 @@ extern "C" {
     /* Keep the event ABI versioned so subscribers can reject mismatched layouts explicitly. */
 #define KERNEL_EVENT_ABI_VERSION 1U
 #define KERNEL_EVENT_QUEUE_INITIAL_CAPACITY 16U
+#define KERNEL_EVENT_QUEUE_MAX_CAPACITY 1024U
 #define KERNEL_EVENT_MAX_READ_BATCH 16U
 #define KERNEL_EVENT_NAME_CAPACITY 64U
 #define KERNEL_EVENT_PATH_CAPACITY 160U

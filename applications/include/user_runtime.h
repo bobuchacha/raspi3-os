@@ -4,6 +4,7 @@
 #include "dll_image.h"
 #include "user_ipc.h"
 #include <stddef.h>
+#include <stdint.h>
 
 /* Loader metadata constants consumed by the user-image packer. */
 #define USER_LDR_META_VERSION 2U
@@ -13,6 +14,11 @@
 
 /* Keep the executable image header at the aligned EL0 image base used by the kernel loader. */
 #define USER_EXE_IMAGE_BASE 0x00200000UL
+
+/* Standard userspace heap reservation mirrored from the kernel EL0 layout. */
+#define USER_HEAP_BASE 0x20000000UL
+#define USER_HEAP_LIMIT 0x40000000UL
+#define USER_HEAP_BYTES (USER_HEAP_LIMIT - USER_HEAP_BASE)
 
 /* Userspace syscall numbers mirrored from the kernel ABI. */
 #define USER_SYS_WRITE 0UL
@@ -31,6 +37,7 @@
 #define USER_SYS_KILL 18UL
 #define USER_SYS_REBOOT 19UL
 #define USER_SYS_DEBUG_SHELL 20UL
+#define USER_SYS_TASK_RESOURCE_INFO 21UL
 #define USER_SYS_TASK_ARGS 22UL
 #define USER_SYS_SHLIB_EXPORT 24UL
 #define USER_SYS_SHLIB_CLOSE 25UL
@@ -50,6 +57,27 @@
 #define USER_SYS_REMOVE 39UL
 #define USER_SYS_IPC_SEND 40UL
 #define USER_SYS_IPC_RECV 41UL
+#define USER_SYS_CREATE_THREAD 42UL
+#define USER_SYS_SET_THREAD_PRIORITY 43UL
+#define USER_SYS_SPAWN_ASYNC 44UL
+#define USER_SYS_SPAWN_ASYNC_RESULT 45UL
+#define USER_SYS_FILE_MAPPING_CREATE 46UL
+#define USER_SYS_FILE_MAPPING_OPEN 47UL
+#define USER_SYS_FILE_MAPPING_CLOSE 48UL
+#define USER_SYS_FILE_MAPPING_MAP 49UL
+#define USER_SYS_FILE_MAPPING_UNMAP 50UL
+#define USER_SYS_FILE_MAPPING_RESIZE 51UL
+#define USER_SYS_TASK_MODULES 52UL
+#define USER_SYS_PATH_INFO 53UL
+#define USER_SYS_EXIT_THREAD 54UL
+#define USER_SYS_SET_THREAD_PRIORITY_BY_ID 55UL
+
+/* Thread priority codes mirrored from the kernel scheduler ABI. Lower values run first. */
+#define USER_THREAD_PRIORITY_HIGHEST 0UL
+#define USER_THREAD_PRIORITY_ABOVE_NORMAL 8UL
+#define USER_THREAD_PRIORITY_NORMAL 16UL
+#define USER_THREAD_PRIORITY_BELOW_NORMAL 24UL
+#define USER_THREAD_PRIORITY_IDLE 31UL
 
 /* Task state codes mirrored from the kernel scheduler ABI. */
 #ifndef APPLICATIONS_USER_TASK_STATE_CODES_DEFINED
@@ -87,6 +115,19 @@ typedef struct UserDirectoryEntry {
 } UserDirectoryEntry;
 #endif
 
+/* One resolved VFS path snapshot returned by the path-info syscall. */
+#ifndef APPLICATIONS_USER_PATH_INFO_DEFINED
+#define APPLICATIONS_USER_PATH_INFO_DEFINED
+typedef struct UserPathInfo {
+    unsigned long size;
+    unsigned long type;
+    unsigned long backend_kind;
+    unsigned long flags;
+    unsigned long volume_letter;
+    char device_name[16];
+} UserPathInfo;
+#endif
+
 /* One userspace task snapshot returned by the task-info syscall. */
 #ifndef APPLICATIONS_USER_TASK_INFO_DEFINED
 #define APPLICATIONS_USER_TASK_INFO_DEFINED
@@ -104,6 +145,56 @@ typedef struct UserTaskInfo {
 } UserTaskInfo;
 #endif
 
+/* One task resource snapshot returned by the task-resource syscall. */
+#ifndef APPLICATIONS_USER_TASK_RESOURCE_INFO_DEFINED
+#define APPLICATIONS_USER_TASK_RESOURCE_INFO_DEFINED
+#define USER_TASK_RESOURCE_FLAG_IMAGE_SECTION_TRUNCATED 1UL
+#define USER_TASK_SECTION_FLAG_READ 1UL
+#define USER_TASK_SECTION_FLAG_WRITE 2UL
+#define USER_TASK_SECTION_FLAG_EXEC 4UL
+#define USER_TASK_SECTION_FLAG_BSS 8UL
+#define USER_TASK_LAYOUT_MAX_SECTIONS 16UL
+typedef struct UserTaskSectionInfo {
+    unsigned long start_address;
+    unsigned long end_address;
+    unsigned long flags;
+    char name[12];
+} UserTaskSectionInfo;
+typedef struct UserTaskResourceInfo {
+    unsigned long image_bytes;
+    unsigned long stack_bytes;
+    unsigned long heap_bytes;
+    unsigned long total_bytes;
+    unsigned long image_base;
+    unsigned long flags;
+    unsigned long image_section_count;
+    char image_path[260];
+    UserTaskSectionInfo image_sections[USER_TASK_LAYOUT_MAX_SECTIONS];
+} UserTaskResourceInfo;
+#endif
+
+/* One loaded-module snapshot returned for a process by the task-module syscall. */
+#ifndef APPLICATIONS_USER_TASK_MODULE_INFO_DEFINED
+#define APPLICATIONS_USER_TASK_MODULE_INFO_DEFINED
+#define USER_TASK_MODULE_FLAG_SHARED_BACKING 1UL
+#define USER_TASK_MODULE_FLAG_PENDING_ATTACH 2UL
+#define USER_TASK_MODULE_FLAG_PENDING_DETACH 4UL
+#define USER_TASK_MODULE_FLAG_PRIVATE_WRITABLE 8UL
+#define USER_TASK_MODULE_FLAG_SECTION_TRUNCATED 16UL
+typedef struct UserTaskModuleInfo {
+    unsigned long image_base;
+    unsigned long image_bytes;
+    unsigned long shared_backing_bytes;
+    unsigned long private_backing_bytes;
+    unsigned long shared_reference_count;
+    unsigned long flags;
+    char module_name[64];
+    char path[260];
+    unsigned long section_count;
+    UserTaskSectionInfo sections[USER_TASK_LAYOUT_MAX_SECTIONS];
+} UserTaskModuleInfo;
+#endif
+
 /* One memory usage snapshot returned by the mem-info syscall. */
 #ifndef APPLICATIONS_USER_MEM_INFO_DEFINED
 #define APPLICATIONS_USER_MEM_INFO_DEFINED
@@ -113,6 +204,79 @@ typedef struct UserMemInfo {
     unsigned long page_size;
     unsigned long free_pages;
 } UserMemInfo;
+#endif
+
+/* One completed async process-launch result returned by the kernel launch worker. */
+#ifndef APPLICATIONS_USER_ASYNC_SPAWN_RESULT_DEFINED
+#define APPLICATIONS_USER_ASYNC_SPAWN_RESULT_DEFINED
+typedef struct UserAsyncSpawnResult {
+    unsigned long request_id;
+    long status;
+    long pid;
+    unsigned long reserved0;
+} UserAsyncSpawnResult;
+#endif
+
+/* Synthetic status returned to timeout-driven async launch error callbacks. */
+#ifndef APPLICATIONS_USER_ASYNC_SPAWN_TIMEOUT_STATUS
+#define APPLICATIONS_USER_ASYNC_SPAWN_TIMEOUT_STATUS (-1000L)
+#endif
+
+/* Opaque file-mapping handle returned by the new file-mapping syscalls. */
+#ifndef APPLICATIONS_USER_FILE_MAPPING_HANDLE_DEFINED
+#define APPLICATIONS_USER_FILE_MAPPING_HANDLE_DEFINED
+typedef unsigned long FileMappingHandle;
+#endif
+
+/* Callback invoked when one queued async launch either succeeds or fails. */
+typedef void (*UserLaunchProcessCallback)(
+    const char* path,
+    long pid,
+    long status,
+    const char* name,
+    const char* args,
+    void* context);
+
+/* Spawn-task-specific callback alias for one successful async launch. */
+typedef UserLaunchProcessCallback SpawnTaskAsyncSuccessCallback;
+
+/* Spawn-task-specific callback alias for one failed or timed-out async launch. */
+typedef UserLaunchProcessCallback SpawnTaskAsyncErrorCallback;
+
+/* Compatibility alias for the older one-callback async launch helper. */
+typedef UserLaunchProcessCallback SpawnTaskAsyncCompletionCallback;
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+    /* Queue one async process launch with separate success and failure callbacks. */
+    long SpawnTaskAsyncCallbacks(
+        const char* path,
+        const char* name,
+        const char* args,
+        SpawnTaskAsyncSuccessCallback success_callback,
+        SpawnTaskAsyncErrorCallback error_callback,
+        void* context);
+
+    /* Queue one async process launch and invoke the callback when a result is ready. */
+    long SpawnTaskAsyncCallback(
+        const char* path,
+        const char* name,
+        const char* args,
+        SpawnTaskAsyncCompletionCallback callback,
+        void* context);
+
+    /* Compatibility wrapper around the async spawn callback helper. */
+    long UserLaunchProcess(
+        const char* path,
+        const char* name,
+        const char* args,
+        UserLaunchProcessCallback callback,
+        void* context);
+
+#ifdef __cplusplus
+}
 #endif
 
 /*
@@ -155,9 +319,15 @@ typedef struct __attribute__((packed)) UserLoaderImportMeta {
         }
 
 /* Emit one typed IAT slot and matching import metadata record. */
+#ifdef __cplusplus
+#define DLL_IMPORT_FUNCTION(module_name_literal, symbol_name_literal, function_type, slot_symbol) \
+    static function_type slot_symbol __asm__(#slot_symbol) __attribute__((used, section(".data"))) = (function_type)0; \
+    LDR_EMIT_IMPORT(module_name_literal, symbol_name_literal, #slot_symbol, slot_symbol)
+#else
 #define DLL_IMPORT_FUNCTION(module_name_literal, symbol_name_literal, function_type, slot_symbol) \
     static function_type __attribute__((used, section(".data"))) slot_symbol = (function_type)0; \
     LDR_EMIT_IMPORT(module_name_literal, symbol_name_literal, #slot_symbol, slot_symbol)
+#endif
 
 #define LDR_EMIT_EXPORT(export_name_literal, symbol_name_literal, unique_suffix) \
 	static const UserLoaderExportMeta __attribute__((used, aligned(1), section(".ldrmeta.exports"))) \
@@ -195,6 +365,399 @@ static inline long freeLibraryByName(const char* path);
 typedef unsigned long HMODULE;
 typedef unsigned long FARPROC;
 
+#ifndef APPLICATIONS_USER_SHARED_HEAP_ALLOCATOR_DEFINED
+#define APPLICATIONS_USER_SHARED_HEAP_ALLOCATOR_DEFINED
+
+typedef struct UserSharedHeapBlock UserSharedHeapBlock;
+
+typedef struct UserSharedHeapState {
+    unsigned long magic;
+    volatile unsigned long lock_word;
+    UserSharedHeapBlock* head;
+} UserSharedHeapState;
+
+struct UserSharedHeapBlock {
+    size_t payload_bytes;
+    unsigned long flags;
+    UserSharedHeapBlock* next;
+    UserSharedHeapBlock* prev;
+};
+
+#define USER_SHARED_HEAP_MAGIC 0x554845415031ULL
+#define USER_SHARED_HEAP_BLOCK_FREE 0x1UL
+
+/*
+ * Align one heap byte count to the runtime allocator granularity.
+ *
+ * Every module in one process must agree on block alignment or they will walk
+ * the shared heap metadata differently. Keeping this helper in the shared
+ * runtime header guarantees EXEs and DLLs split blocks on the same 16-byte
+ * boundaries while only depending on one runtime include.
+ *
+ * @param value Requested byte count.
+ * @return 16-byte aligned byte count.
+ */
+static inline size_t user_shared_heap_align_up(size_t value) {
+    const size_t mask = 15U;
+
+    return (value + mask) & ~mask;
+}
+
+/*
+ * Return the process-local shared heap state record stored at heap base.
+ *
+ * @return Pointer to the shared heap state header.
+ */
+static inline UserSharedHeapState* user_shared_heap_state(void) {
+    return (UserSharedHeapState*)(uintptr_t)USER_HEAP_BASE;
+}
+
+/*
+ * Return the first allocatable block inside the shared heap window.
+ *
+ * @return Pointer to the first heap block header.
+ */
+static inline UserSharedHeapBlock* user_shared_heap_first_block(void) {
+    const uintptr_t block_address = (uintptr_t)USER_HEAP_BASE + user_shared_heap_align_up(sizeof(UserSharedHeapState));
+
+    return (UserSharedHeapBlock*)block_address;
+}
+
+/*
+ * Return whether one pointer lies inside the shared heap reservation.
+ *
+ * @param ptr Candidate heap pointer.
+ * @return Non-zero when the pointer falls inside the heap reservation.
+ */
+static inline int user_shared_heap_contains_pointer(const void* ptr) {
+    const uintptr_t address = (uintptr_t)ptr;
+
+    return (address >= (uintptr_t)USER_HEAP_BASE) && (address < (uintptr_t)USER_HEAP_LIMIT);
+}
+
+/*
+ * Return whether one block is currently free.
+ *
+ * @param block Heap block to classify.
+ * @return Non-zero when the block is on the free list.
+ */
+static inline int user_shared_heap_block_is_free(const UserSharedHeapBlock* block) {
+    return (block != NULL) && ((block->flags & USER_SHARED_HEAP_BLOCK_FREE) != 0UL);
+}
+
+/*
+ * Attempt one acquire of the shared user-heap lock.
+ *
+ * All modules in the process share the same heap metadata, so allocator calls
+ * from GWES worker threads must serialize around the block list or one thread
+ * can observe partially split or coalesced neighbors from another thread.
+ *
+ * @param lock_word Shared heap lock word stored in the heap state header.
+ * @return Non-zero when the caller acquired the lock.
+ */
+static inline int user_shared_heap_try_lock_once(volatile unsigned long* lock_word) {
+    unsigned long observed = 0UL;
+    unsigned int store_failed = 0U;
+    const unsigned long locked = 1UL;
+
+    if (lock_word == NULL) {
+        return 0;
+    }
+
+    asm volatile(
+        "ldaxr %0, [%2]\n"
+        "cbnz %0, 1f\n"
+        "stxr %w1, %3, [%2]\n"
+        "b 2f\n"
+        "1:\n"
+        "mov %w1, #1\n"
+        "2:\n"
+        : "=&r"(observed), "=&r"(store_failed)
+        : "r"(lock_word), "r"(locked)
+        : "memory");
+
+    return (observed == 0UL) && (store_failed == 0U);
+}
+
+/*
+ * Initialize the shared heap state while the caller already holds the heap lock.
+ *
+ * Reusing the same header field for the lock and first-touch initialization keeps
+ * the allocator process-wide without adding a second shared global outside the
+ * heap reservation.
+ *
+ * @param state Shared heap state header guarded by the caller.
+ * @return Pointer to the initialized shared heap state record.
+ */
+static inline UserSharedHeapState* user_shared_heap_initialize_locked(UserSharedHeapState* state) {
+    if (state == NULL) {
+        return NULL;
+    }
+
+    if ((state->magic == USER_SHARED_HEAP_MAGIC) && (state->head != NULL)) {
+        return state;
+    }
+
+    state->magic = USER_SHARED_HEAP_MAGIC;
+    state->head = user_shared_heap_first_block();
+    state->head->payload_bytes = USER_HEAP_BYTES
+        - user_shared_heap_align_up(sizeof(UserSharedHeapState))
+        - sizeof(UserSharedHeapBlock);
+    state->head->flags = USER_SHARED_HEAP_BLOCK_FREE;
+    state->head->next = NULL;
+    state->head->prev = NULL;
+    return state;
+}
+
+/*
+ * Acquire the shared user-heap lock and return the initialized heap state.
+ *
+ * The lock is coarse by design: correctness matters more than allocator
+ * parallelism because every in-process module already shares one intrusive
+ * block list at a fixed virtual address.
+ *
+ * @return Pointer to the initialized shared heap state record.
+ */
+static inline UserSharedHeapState* user_shared_heap_lock(void) {
+    UserSharedHeapState* state = user_shared_heap_state();
+
+    while (!user_shared_heap_try_lock_once(&state->lock_word)) {
+        asm volatile("yield\n" ::: "memory");
+    }
+
+    return user_shared_heap_initialize_locked(state);
+}
+
+/*
+ * Release the shared user-heap lock.
+ *
+ * @param state Shared heap state header that currently owns the lock.
+ * @return Nothing.
+ */
+static inline void user_shared_heap_unlock(UserSharedHeapState* state) {
+    const unsigned long unlocked = 0UL;
+
+    if (state == NULL) {
+        return;
+    }
+
+    asm volatile("stlr %1, [%0]" : : "r"(&state->lock_word), "r"(unlocked) : "memory");
+}
+
+/*
+ * Split one oversized free block so the remainder stays reusable.
+ *
+ * @param block Free block selected for allocation.
+ * @param payload_bytes Aligned payload size being consumed.
+ * @return Nothing.
+ */
+static inline void user_shared_heap_split_block(UserSharedHeapBlock* block, size_t payload_bytes) {
+    UserSharedHeapBlock* remainder;
+
+    if (block == NULL) {
+        return;
+    }
+    if (block->payload_bytes <= (payload_bytes + sizeof(UserSharedHeapBlock) + 16U)) {
+        return;
+    }
+
+    remainder = (UserSharedHeapBlock*)((unsigned char*)(block + 1) + payload_bytes);
+    remainder->payload_bytes = block->payload_bytes - payload_bytes - sizeof(UserSharedHeapBlock);
+    remainder->flags = USER_SHARED_HEAP_BLOCK_FREE;
+    remainder->next = block->next;
+    remainder->prev = block;
+    if (remainder->next != NULL) {
+        remainder->next->prev = remainder;
+    }
+
+    block->payload_bytes = payload_bytes;
+    block->next = remainder;
+}
+
+/*
+ * Merge one free block with adjacent free neighbors.
+ *
+ * @param block Newly freed block.
+ * @return Nothing.
+ */
+static inline void user_shared_heap_coalesce(UserSharedHeapBlock* block) {
+    if (block == NULL) {
+        return;
+    }
+
+    if ((block->next != NULL) && user_shared_heap_block_is_free(block->next)) {
+        UserSharedHeapBlock* next = block->next;
+
+        block->payload_bytes += sizeof(UserSharedHeapBlock) + next->payload_bytes;
+        block->next = next->next;
+        if (block->next != NULL) {
+            block->next->prev = block;
+        }
+    }
+
+    if ((block->prev != NULL) && user_shared_heap_block_is_free(block->prev)) {
+        UserSharedHeapBlock* prev = block->prev;
+
+        prev->payload_bytes += sizeof(UserSharedHeapBlock) + block->payload_bytes;
+        prev->next = block->next;
+        if (prev->next != NULL) {
+            prev->next->prev = prev;
+        }
+    }
+}
+
+/*
+ * Allocate one payload block while the caller already holds the heap lock.
+ *
+ * @param state Initialized shared heap state.
+ * @param payload_bytes Aligned payload size requested by the caller.
+ * @return Payload pointer on success, or null when the heap is exhausted.
+ */
+static inline void* user_shared_heap_malloc_locked(UserSharedHeapState* state, size_t payload_bytes) {
+    UserSharedHeapBlock* block;
+
+    if (state == NULL) {
+        return NULL;
+    }
+
+    for (block = state->head; block != NULL; block = block->next) {
+        if (!user_shared_heap_block_is_free(block) || (block->payload_bytes < payload_bytes)) {
+            continue;
+        }
+
+        user_shared_heap_split_block(block, payload_bytes);
+        block->flags &= ~USER_SHARED_HEAP_BLOCK_FREE;
+        return (void*)(block + 1);
+    }
+
+    return NULL;
+}
+
+/*
+ * Release one heap allocation while the caller already holds the heap lock.
+ *
+ * @param ptr Payload pointer previously returned by the shared heap.
+ * @return Nothing.
+ */
+static inline void user_shared_heap_free_locked(void* ptr) {
+    UserSharedHeapBlock* block;
+
+    if ((ptr == NULL) || !user_shared_heap_contains_pointer(ptr)) {
+        return;
+    }
+
+    block = ((UserSharedHeapBlock*)ptr) - 1;
+    block->flags |= USER_SHARED_HEAP_BLOCK_FREE;
+    user_shared_heap_coalesce(block);
+}
+
+/*
+ * Allocate one payload block from the shared in-process heap.
+ *
+ * @param size Requested payload bytes.
+ * @return Payload pointer on success, or null when the heap is exhausted.
+ */
+static inline void* user_shared_heap_malloc(size_t size) {
+    const size_t payload_bytes = user_shared_heap_align_up(size ? size : 1U);
+    UserSharedHeapState* state = user_shared_heap_lock();
+    void* allocation;
+
+    allocation = user_shared_heap_malloc_locked(state, payload_bytes);
+    user_shared_heap_unlock(state);
+
+    return allocation;
+}
+
+/*
+ * Release one shared heap allocation.
+ *
+ * @param ptr Payload pointer previously returned by user_shared_heap_malloc.
+ * @return Nothing.
+ */
+static inline void user_shared_heap_free(void* ptr) {
+    UserSharedHeapState* state;
+
+    if ((ptr == NULL) || !user_shared_heap_contains_pointer(ptr)) {
+        return;
+    }
+
+    state = user_shared_heap_lock();
+    user_shared_heap_free_locked(ptr);
+    user_shared_heap_unlock(state);
+}
+
+/*
+ * Resize one shared heap allocation.
+ *
+ * @param ptr Existing payload pointer, or null.
+ * @param size New requested payload bytes.
+ * @return Resized allocation, or null on failure.
+ */
+static inline void* user_shared_heap_realloc(void* ptr, size_t size) {
+    UserSharedHeapState* state;
+    UserSharedHeapBlock* block;
+    size_t payload_bytes;
+    void* replacement;
+
+    if (ptr == NULL) {
+        return user_shared_heap_malloc(size);
+    }
+    if (size == 0U) {
+        user_shared_heap_free(ptr);
+        return NULL;
+    }
+    if (!user_shared_heap_contains_pointer(ptr)) {
+        return NULL;
+    }
+
+    state = user_shared_heap_lock();
+    block = ((UserSharedHeapBlock*)ptr) - 1;
+    payload_bytes = user_shared_heap_align_up(size);
+    if (block->payload_bytes >= payload_bytes) {
+        user_shared_heap_split_block(block, payload_bytes);
+        user_shared_heap_unlock(state);
+        return ptr;
+    }
+
+    if ((block->next != NULL)
+        && user_shared_heap_block_is_free(block->next)
+        && ((block->payload_bytes + sizeof(UserSharedHeapBlock) + block->next->payload_bytes) >= payload_bytes)) {
+        UserSharedHeapBlock* next = block->next;
+
+        block->payload_bytes += sizeof(UserSharedHeapBlock) + next->payload_bytes;
+        block->next = next->next;
+        if (block->next != NULL) {
+            block->next->prev = block;
+        }
+        user_shared_heap_split_block(block, payload_bytes);
+        user_shared_heap_unlock(state);
+        return ptr;
+    }
+
+    replacement = user_shared_heap_malloc_locked(state, payload_bytes);
+    if (replacement == NULL) {
+        user_shared_heap_unlock(state);
+        return NULL;
+    }
+
+    {
+        unsigned char* destination = (unsigned char*)replacement;
+        unsigned char* source = (unsigned char*)ptr;
+        size_t copy_bytes = (block->payload_bytes < size) ? block->payload_bytes : size;
+        size_t index;
+
+        for (index = 0U; index < copy_bytes; ++index) {
+            destination[index] = source[index];
+        }
+    }
+
+    user_shared_heap_free_locked(ptr);
+    user_shared_heap_unlock(state);
+    return replacement;
+}
+
+#endif
+
 /*
  * Resolve one shared-library export and cache the address in a caller-owned slot.
  *
@@ -224,7 +787,9 @@ static inline unsigned long resolveSharedLibraryCached(const char* path, const c
 #define DEBUG_ENABLE_USER_LOADER_TRACE 0
 #endif
 
-/* Issue one zero-argument syscall. */
+/*
+ * Issue one zero-argument syscall.
+ */
 static inline unsigned long invokeSyscall0(unsigned long number) {
     register unsigned long x0 asm("x0");
     register unsigned long x8 asm("x8") = number;
@@ -233,7 +798,9 @@ static inline unsigned long invokeSyscall0(unsigned long number) {
     return x0;
 }
 
-/* Issue one one-argument syscall. */
+/*
+ * Issue one one-argument syscall.
+ */
 static inline unsigned long invokeSyscall1(unsigned long number, unsigned long arg0) {
     register unsigned long x0 asm("x0") = arg0;
     register unsigned long x8 asm("x8") = number;
@@ -242,7 +809,9 @@ static inline unsigned long invokeSyscall1(unsigned long number, unsigned long a
     return x0;
 }
 
-/* Issue one two-argument syscall. */
+/*
+ * Issue one two-argument syscall.
+ */
 static inline unsigned long invokeSyscall2(unsigned long number, unsigned long arg0, unsigned long arg1) {
     register unsigned long x0 asm("x0") = arg0;
     register unsigned long x1 asm("x1") = arg1;
@@ -252,7 +821,9 @@ static inline unsigned long invokeSyscall2(unsigned long number, unsigned long a
     return x0;
 }
 
-/* Issue one three-argument syscall. */
+/*
+ * Issue one three-argument syscall.
+ */
 static inline unsigned long invokeSyscall3(unsigned long number, unsigned long arg0, unsigned long arg1, unsigned long arg2) {
     register unsigned long x0 asm("x0") = arg0;
     register unsigned long x1 asm("x1") = arg1;
@@ -263,7 +834,9 @@ static inline unsigned long invokeSyscall3(unsigned long number, unsigned long a
     return x0;
 }
 
-/* Issue one four-argument syscall. */
+/*
+ * Issue one four-argument syscall.
+ */
 static inline unsigned long invokeSyscall4(unsigned long number, unsigned long arg0, unsigned long arg1, unsigned long arg2, unsigned long arg3) {
     register unsigned long x0 asm("x0") = arg0;
     register unsigned long x1 asm("x1") = arg1;
@@ -275,7 +848,9 @@ static inline unsigned long invokeSyscall4(unsigned long number, unsigned long a
     return x0;
 }
 
-/* Issue one five-argument syscall. */
+/*
+ * Issue one five-argument syscall.
+ */
 static inline unsigned long invokeSyscall5(unsigned long number, unsigned long arg0, unsigned long arg1, unsigned long arg2, unsigned long arg3, unsigned long arg4) {
     register unsigned long x0 asm("x0") = arg0;
     register unsigned long x1 asm("x1") = arg1;
@@ -445,6 +1020,75 @@ static inline void* acquireSharedMemory(const char* name, unsigned long size) {
     return address;
 }
 
+/* Create one file-mapping object and return its handle to the caller. */
+static inline long createFileMapping(const char* path, unsigned long size, FileMappingHandle* handleOut) {
+    unsigned long raw;
+
+    if (handleOut == 0) {
+        return -1;
+    }
+
+    *handleOut = 0;
+    raw = invokeSyscall2(USER_SYS_FILE_MAPPING_CREATE, (unsigned long)path, size);
+    if ((long)raw < 0) {
+        return (long)raw;
+    }
+
+    *handleOut = (FileMappingHandle)raw;
+    return 0;
+}
+
+/* Open one existing file-mapping object and return its handle to the caller. */
+static inline long openFileMapping(const char* path, unsigned long size, FileMappingHandle* handleOut) {
+    unsigned long raw;
+
+    if (handleOut == 0) {
+        return -1;
+    }
+
+    *handleOut = 0;
+    raw = invokeSyscall2(USER_SYS_FILE_MAPPING_OPEN, (unsigned long)path, size);
+    if ((long)raw < 0) {
+        return (long)raw;
+    }
+
+    *handleOut = (FileMappingHandle)raw;
+    return 0;
+}
+
+/* Release one file-mapping handle. */
+static inline long closeFileMapping(FileMappingHandle handle) {
+    return (long)invokeSyscall1(USER_SYS_FILE_MAPPING_CLOSE, handle);
+}
+
+/* Grow one file-mapping object to a larger logical size. */
+static inline long resizeFileMapping(FileMappingHandle handle, unsigned long size) {
+    return (long)invokeSyscall2(USER_SYS_FILE_MAPPING_RESIZE, handle, size);
+}
+
+/* Map one file-mapping handle into the current process and return the view address. */
+static inline long mapFileMappingView(FileMappingHandle handle, unsigned long offset, unsigned long size, void** addressOut) {
+    unsigned long raw;
+
+    if (addressOut == 0) {
+        return -1;
+    }
+
+    *addressOut = 0;
+    raw = invokeSyscall3(USER_SYS_FILE_MAPPING_MAP, handle, offset, size);
+    if ((long)raw < 0) {
+        return (long)raw;
+    }
+
+    *addressOut = (void*)raw;
+    return 0;
+}
+
+/* Unmap one previously returned file-mapping view address. */
+static inline long unmapFileMappingView(void* address) {
+    return (long)invokeSyscall1(USER_SYS_FILE_MAPPING_UNMAP, (unsigned long)address);
+}
+
 /* Read one character from the console input stream. */
 static inline long readConsole(void) {
     return (long)invokeSyscall0(USER_SYS_CONSOLE_READ);
@@ -486,9 +1130,127 @@ static inline long receiveIpc(UserIpcMessage* message, unsigned long flags) {
     return (long)invokeSyscall2(USER_SYS_IPC_RECV, (unsigned long)message, flags);
 }
 
+/* Canonical callback signature for one additional EL0 worker thread. */
+typedef void (*UserThreadEntryPoint)(unsigned long argument);
+
+/* One heap-backed bootstrap record passed to the shared thread trampoline. */
+typedef struct UserThreadStartContext {
+    UserThreadEntryPoint entry;
+    unsigned long argument;
+} UserThreadStartContext;
+
+/*
+ * Terminate the current EL0 thread without exiting the whole process.
+ *
+ * Background helpers inside EXEs and DLLs need a real thread-return path so a
+ * worker can stop cleanly during module or process teardown instead of parking
+ * forever inside module text that may later be unloaded.
+ *
+ * @return Zero on success, or a negative status code on failure.
+ */
+static inline long exitCurrentThread(void) {
+    return (long)invokeSyscall0(USER_SYS_EXIT_THREAD);
+}
+
+/*
+ * Enter one worker thread through a runtime-owned trampoline.
+ *
+ * The kernel thread syscall starts execution directly at the supplied program
+ * counter. Routing worker threads through one small bootstrap helper gives the
+ * runtime a guaranteed post-return path so a normal C function can finish and
+ * then terminate the thread with the dedicated exit-thread syscall.
+ *
+ * @param bootstrap_raw Heap-backed `UserThreadStartContext` pointer.
+ * @return Never returns.
+ */
+static void userThreadEntryTrampoline(unsigned long bootstrap_raw) {
+    UserThreadStartContext* bootstrap = (UserThreadStartContext*)bootstrap_raw;
+    UserThreadEntryPoint entry = 0;
+    unsigned long argument = 0UL;
+
+    if (bootstrap != 0) {
+        entry = bootstrap->entry;
+        argument = bootstrap->argument;
+        user_shared_heap_free(bootstrap);
+    }
+
+    if (entry != 0) {
+        entry(argument);
+    }
+
+    (void)exitCurrentThread();
+    for (;;) {
+        asm volatile("wfe" ::: "memory");
+    }
+}
+
+/*
+ * Start one additional EL0 thread inside the current process.
+ *
+ * The public helper now allocates a tiny bootstrap record and points the new
+ * thread at the shared trampoline above, which means user worker functions can
+ * simply return instead of depending on an ad hoc park-forever pattern.
+ *
+ * @param entryPoint Worker entrypoint with signature `void (*)(unsigned long)`.
+ * @param argument Caller-supplied worker argument.
+ * @param name Optional thread name copied into the kernel thread object.
+ * @return Non-negative thread id on success, or a negative status code on failure.
+ */
+static inline long startUserThread(unsigned long entryPoint, unsigned long argument, const char* name) {
+    UserThreadStartContext* bootstrap;
+    long thread_id;
+
+    if (entryPoint == 0UL) {
+        return -4L;
+    }
+
+    bootstrap = (UserThreadStartContext*)user_shared_heap_malloc(sizeof(*bootstrap));
+    if (bootstrap == 0) {
+        return -6L;
+    }
+
+    bootstrap->entry = (UserThreadEntryPoint)entryPoint;
+    bootstrap->argument = argument;
+    thread_id = (long)invokeSyscall3(
+        USER_SYS_CREATE_THREAD,
+        (unsigned long)&userThreadEntryTrampoline,
+        (unsigned long)bootstrap,
+        (unsigned long)name);
+    if (thread_id < 0L) {
+        user_shared_heap_free(bootstrap);
+    }
+
+    return thread_id;
+}
+
+/* Change the scheduler priority of the currently running EL0 thread. */
+static inline long setCurrentThreadPriority(unsigned long priority) {
+    return (long)invokeSyscall1(USER_SYS_SET_THREAD_PRIORITY, priority);
+}
+
+/* Change the scheduler priority of one EL0 thread in the current process. */
+static inline long setThreadPriority(long threadId, unsigned long priority) {
+    return (long)invokeSyscall2(USER_SYS_SET_THREAD_PRIORITY_BY_ID, (unsigned long)threadId, priority);
+}
+
 /* Query one task descriptor by PID. */
 static inline long getTaskInfo(long pid, UserTaskInfo* info) {
     return (long)invokeSyscall2(USER_SYS_TASK_INFO, (unsigned long)pid, (unsigned long)info);
+}
+
+/* Query one task resource snapshot by PID. */
+static inline long getTaskResourceInfo(long pid, UserTaskResourceInfo* info) {
+    return (long)invokeSyscall2(USER_SYS_TASK_RESOURCE_INFO, (unsigned long)pid, (unsigned long)info);
+}
+
+/* Query the loaded-module list for one task by PID. */
+static inline long getTaskModuleInfo(long pid, UserTaskModuleInfo* modules, unsigned long capacity, unsigned long* countOut) {
+    return (long)invokeSyscall4(USER_SYS_TASK_MODULES, (unsigned long)pid, (unsigned long)modules, capacity, (unsigned long)countOut);
+}
+
+/* Resolve one VFS path and return its userspace-visible node metadata. */
+static inline long getPathInfo(const char* path, UserPathInfo* info) {
+    return (long)invokeSyscall2(USER_SYS_PATH_INFO, (unsigned long)path, (unsigned long)info);
 }
 
 /* Wait for one child process to terminate and collect its result code. */
@@ -623,6 +1385,37 @@ static inline FARPROC getProcAddress(HMODULE module, const char* exportName) {
 /* Spawn one new user task with an optional visible name and launch arguments. */
 static inline long spawnTask(const char* path, const char* name, const char* args) {
     return (long)invokeSyscall3(USER_SYS_SPAWN, (unsigned long)path, (unsigned long)name, (unsigned long)args);
+}
+
+/* Queue one new user task on the kernel launch worker and return a request id immediately. */
+static inline long spawnTaskAsync(const char* path, const char* name, const char* args) {
+    return (long)invokeSyscall3(USER_SYS_SPAWN_ASYNC, (unsigned long)path, (unsigned long)name, (unsigned long)args);
+}
+
+/* Queue one async user task and invoke a callback when the result becomes available. */
+static inline long spawnTaskAsyncCallbacks(
+    const char* path,
+    const char* name,
+    const char* args,
+    SpawnTaskAsyncSuccessCallback success_callback,
+    SpawnTaskAsyncErrorCallback error_callback,
+    void* context) {
+    return SpawnTaskAsyncCallbacks(path, name, args, success_callback, error_callback, context);
+}
+
+/* Queue one async user task and invoke one callback on both success and failure. */
+static inline long spawnTaskAsyncCallback(
+    const char* path,
+    const char* name,
+    const char* args,
+    SpawnTaskAsyncCompletionCallback callback,
+    void* context) {
+    return SpawnTaskAsyncCallbacks(path, name, args, callback, callback, context);
+}
+
+/* Poll one completed async process-launch result for the current process. */
+static inline long pollAsyncSpawnResult(UserAsyncSpawnResult* result) {
+    return (long)invokeSyscall1(USER_SYS_SPAWN_ASYNC_RESULT, (unsigned long)result);
 }
 
 /* Resolve one exported symbol from a loaded shared library image by path. */

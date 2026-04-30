@@ -28,6 +28,11 @@ namespace mm {
         // The heap still relies on the direct-map physical-to-kernel alias, so
         // its expansion path must consume pages from a stable contiguous runway.
         static PhysAddr reserve_contiguous_pages(unsigned int page_count);
+        // Return one contiguous runway reservation to the free-page pool.
+        // Heap growth rolls this back when the direct-map append invariants do
+        // not hold, which prevents failed growth attempts from silently leaking
+        // the low-address pages reserved for future kernel-heap expansion.
+        static void release_contiguous_pages(PhysAddr base_phys, unsigned int page_count);
         // Return the physical base address where the dedicated heap carve-out starts.
         // When the physical manager is not initialized this returns the board-configured value.
         static PhysAddr reserved_heap_physical_base(void);

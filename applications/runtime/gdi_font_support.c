@@ -1,6 +1,16 @@
+#define ROS_BUILDING_GDI_DLL 1
+#define ROS_GDI_EXPORTS 1
 #include "user_runtime.h"
 #include "app/gdi.h"
 #include "app/mini_font.h"
+#include "../libs/gdi/gdi_private.h"
+
+DLL_EXPORT(GdiLoadFont);
+DLL_EXPORT(GdiUnloadFont);
+DLL_EXPORT(GdiMeasureText);
+DLL_EXPORT(GdiDrawTextSurfaceEx);
+DLL_EXPORT(GdiDrawTextSurface);
+DLL_EXPORT(GdiDrawTextEx);
 
 #ifndef GDI_STATUS_INVALID_ARGUMENT
 #define GDI_STATUS_INVALID_ARGUMENT (-1L)
@@ -12,13 +22,6 @@
 
 typedef struct GdiFontHandleStruct GdiFontHandle;
 
-/*
- * These helpers are defined in `gdi_support.c` and are shared through source
- * inclusion so the font renderer can stay in the same DLL image without adding
- * another private header.
- */
-static void gdi_zero_memory(void* destination, unsigned long size);
-static unsigned long gdi_encode_color(unsigned long pixel_format, unsigned long color);
 static long gdi_font_scale_metric_signed(long value, long scale_16);
 static long gdi_font_load_single_path(const char* path, unsigned long pixel_height, RosGdiFont* font);
 static long gdi_font_load_raster_file_static(const char* path, unsigned long pixel_height, RosGdiFont* font);
@@ -31,36 +34,35 @@ static int gdi_font_buffer_has_prefix(const unsigned char* buffer, unsigned long
 static unsigned long gdi_font_le_u32(const unsigned char* data);
 static long gdi_font_le_s32(const unsigned char* data);
 static long gdi_font_query_file_size(const char* path, unsigned long* size);
-
-#define GDI_FONT_USER_SYS_MALLOC 1UL
-#define GDI_FONT_USER_SYS_FREE 2UL
+static unsigned long gdi_font_now_msec(void);
+static unsigned long gdi_font_elapsed_msec(unsigned long start_msec);
+static char* gdi_font_append_signed_long(char* destination, long value);
+static void gdi_font_log_profile(
+    const char* phase,
+    const char* path,
+    unsigned long pixel_height,
+    unsigned long file_size,
+    const char* stage1_label,
+    unsigned long stage1_msec,
+    const char* stage2_label,
+    unsigned long stage2_msec,
+    const char* stage3_label,
+    unsigned long stage3_msec,
+    unsigned long total_msec,
+    long status);
 
 /*
- * Allocate process-local heap memory without depending on ros_support symbols.
+ * Allocate process-local heap memory from the shared in-process allocator.
  *
- * GDI is built as a thin wrapper DLL, so leaving hosted `malloc` unresolved
- * causes the builder to synthesize a fake `kernel` import that the loader later
- * fails to resolve. These helpers keep the font runtime self-contained.
+ * GDI keeps the font runtime self-contained by compiling the shared allocator
+ * helpers directly into the DLL, but the heap state itself lives in USER_HEAP_BASE
+ * so every module in the process still allocates from the same demand-paged arena.
  *
  * @param size Requested byte count.
  * @return Allocated buffer, or null on failure.
  */
 static void* gdi_font_heap_alloc(unsigned long size) {
-    typedef struct GdiFontAllocationHeader {
-        unsigned long payload_bytes;
-    } GdiFontAllocationHeader;
-    const unsigned long payload_bytes = size ? size : 1UL;
-    const unsigned long total_bytes = payload_bytes + sizeof(GdiFontAllocationHeader);
-    unsigned long address = invokeSyscall1(GDI_FONT_USER_SYS_MALLOC, total_bytes);
-    GdiFontAllocationHeader* header;
-
-    if ((long)address < 0L || address == 0UL) {
-        return 0;
-    }
-
-    header = (GdiFontAllocationHeader*)address;
-    header->payload_bytes = payload_bytes;
-    return (void*)(header + 1);
+    return user_shared_heap_malloc((size_t)size);
 }
 
 /*
@@ -70,21 +72,7 @@ static void* gdi_font_heap_alloc(unsigned long size) {
  * @return Nothing.
  */
 static void gdi_font_heap_free(void* ptr) {
-    typedef struct GdiFontAllocationHeader {
-        unsigned long payload_bytes;
-    } GdiFontAllocationHeader;
-    GdiFontAllocationHeader* header;
-
-    if (!ptr) {
-        return;
-    }
-
-    if ((long)(unsigned long)ptr < 0L) {
-        return;
-    }
-
-    header = ((GdiFontAllocationHeader*)ptr) - 1;
-    (void)invokeSyscall1(GDI_FONT_USER_SYS_FREE, (unsigned long)header);
+    user_shared_heap_free(ptr);
 }
 
 /*
@@ -95,39 +83,7 @@ static void gdi_font_heap_free(void* ptr) {
  * @return Resized payload pointer, or null on failure.
  */
 static void* gdi_font_heap_realloc(void* ptr, unsigned long size) {
-    typedef struct GdiFontAllocationHeader {
-        unsigned long payload_bytes;
-    } GdiFontAllocationHeader;
-    GdiFontAllocationHeader* header;
-    unsigned long copy_bytes;
-    unsigned char* source;
-    unsigned char* destination;
-    void* replacement;
-    unsigned long index;
-
-    if (!ptr) {
-        return gdi_font_heap_alloc(size);
-    }
-    if (size == 0UL) {
-        gdi_font_heap_free(ptr);
-        return 0;
-    }
-
-    header = ((GdiFontAllocationHeader*)ptr) - 1;
-    copy_bytes = (header->payload_bytes < size) ? header->payload_bytes : size;
-    replacement = gdi_font_heap_alloc(size);
-    if (!replacement) {
-        return 0;
-    }
-
-    source = (unsigned char*)ptr;
-    destination = (unsigned char*)replacement;
-    for (index = 0UL; index < copy_bytes; ++index) {
-        destination[index] = source[index];
-    }
-
-    gdi_font_heap_free(ptr);
-    return replacement;
+    return user_shared_heap_realloc(ptr, (size_t)size);
 }
 
 #define malloc(size) gdi_font_heap_alloc((unsigned long)(size))
@@ -138,7 +94,7 @@ static void* gdi_font_heap_realloc(void* ptr, unsigned long size) {
 #define GDI_FONT_STATUS_FORMAT (-6L)
 #define GDI_FONT_STATUS_NOT_SUPPORTED (-7L)
 
-#define GDI_FONT_FILE_CHUNK 256UL
+#define GDI_FONT_FILE_CHUNK (8UL * 1024UL)
 #define GDI_FONT_DESCRIPTOR_LINE_MAX 4096UL
 #define GDI_FONT_SAMPLE_GRID_DEFAULT 4UL
 #define GDI_FONT_ASCII_CACHE_SIZE 128UL
@@ -157,6 +113,50 @@ static void* gdi_font_heap_realloc(void* ptr, unsigned long size) {
 #define GDI_RASTER_FONT_HEADER_LINE_HEIGHT_OFFSET 20UL
 #define GDI_RASTER_FONT_HEADER_ASCENT_OFFSET 24UL
 #define GDI_RASTER_FONT_HEADER_DESCENT_OFFSET 28UL
+
+/*
+ * Yield between multi-chunk font file reads so pointer/input work keeps moving.
+ *
+ * The cooperative scheduler does not automatically hand the CPU to another EL0
+ * thread between back-to-back userspace syscalls. Font loading can therefore
+ * monopolize the session if it loops through many `readFile()` calls without a
+ * deliberate pause. One short sleep between chunks is enough to keep GWES input
+ * and repaint traffic observable while still finishing the load quickly.
+ *
+ * @param more_work_expected Non-zero when the caller expects another read chunk.
+ * @return Nothing.
+ */
+static void gdi_font_cooperative_file_yield(int more_work_expected) {
+    if (!more_work_expected) {
+        return;
+    }
+
+    (void)sleepMs(1UL);
+}
+
+/*
+ * Yield periodically during CPU-heavy font parsing and raster work.
+ *
+ * Async staging fixed the file-read side, but explicit TTF parsing and glyph
+ * rasterization can still run long enough to starve unrelated GUI work if they
+ * stay in one uninterrupted loop. Sleeping only every small batch keeps the
+ * session responsive without turning each inner iteration into a syscall.
+ *
+ * @param iteration Zero-based loop counter that just completed.
+ * @param stride Number of iterations to process before yielding once.
+ * @param more_work_expected Non-zero when more iterations remain after this one.
+ * @return Nothing.
+ */
+static void gdi_font_cooperative_work_yield(unsigned long iteration, unsigned long stride, int more_work_expected) {
+    if (!more_work_expected || stride == 0UL) {
+        return;
+    }
+    if (((iteration + 1UL) % stride) != 0UL) {
+        return;
+    }
+
+    (void)sleepMs(1UL);
+}
 #define GDI_RASTER_FONT_HEADER_GLYPH_COUNT_OFFSET 32UL
 #define GDI_RASTER_FONT_HEADER_GLYPH_TABLE_OFFSET 36UL
 #define GDI_RASTER_FONT_HEADER_GLYPH_ENTRY_SIZE_OFFSET 40UL
@@ -192,14 +192,14 @@ static void* gdi_font_heap_realloc(void* ptr, unsigned long size) {
 #define GDI_FONT_SHARED_RASTER_CACHE_ENTRY_COUNT 8UL
 #define GDI_FONT_STATIC_RASTER_MAX_FILE_SIZE 65536UL
 #define GDI_FONT_SHARED_RASTER_REGION_BYTES (2UL * 1024UL * 1024UL)
-#define GDI_FONT_ENABLE_SHARED_RASTER_CACHE 0UL
+#define GDI_FONT_ENABLE_SHARED_RASTER_CACHE 1UL
 #define GDI_FONT_SHARED_RASTER_OBJECT_MAGIC 0x31524647UL
 #define GDI_FONT_SHARED_RASTER_OBJECT_VERSION 1UL
 #define GDI_FONT_SHARED_RASTER_STATE_EMPTY 0UL
 #define GDI_FONT_SHARED_RASTER_STATE_INITIALIZING 1UL
 #define GDI_FONT_SHARED_RASTER_STATE_READY 2UL
 #define GDI_FONT_SHARED_RASTER_STATE_FAILED 3UL
-#define GDI_FONT_SHARED_RASTER_NAME_BYTES 64UL
+#define GDI_FONT_SHARED_RASTER_NAME_BYTES 192UL
 #define GDI_FONT_SHARED_RASTER_PATH_BYTES 128UL
 #define GDI_FONT_BITMAP_FIELD_COVERAGE 0x20UL
 #define GDI_FONT_BITMAP_FIELD_ALL \
@@ -295,10 +295,11 @@ typedef struct GdiFontHandleStruct {
 } GdiFontHandle;
 
 typedef struct GdiStaticRasterSlotStruct {
-    int in_use;
     GdiFontHandle handle;
     GdiGlyphBitmap glyphs[GDI_FONT_ASCII_CACHE_SIZE];
-    unsigned char file_buffer[GDI_FONT_STATIC_RASTER_MAX_FILE_SIZE + 1UL];
+    unsigned char* file_buffer;
+    struct GdiStaticRasterSlotStruct* next;
+    struct GdiStaticRasterSlotStruct* prev;
 } GdiStaticRasterSlot;
 
 typedef struct GdiSharedRasterGlyphStruct {
@@ -330,13 +331,15 @@ typedef struct GdiSharedRasterFontObjectStruct {
 } GdiSharedRasterFontObject;
 
 typedef struct GdiSharedRasterCacheEntryStruct {
-    int in_use;
     unsigned long reference_count;
     char path[GDI_FONT_SHARED_RASTER_PATH_BYTES];
     char object_name[GDI_FONT_SHARED_RASTER_NAME_BYTES];
     GdiSharedRasterFontObject* object;
     GdiFontHandle handle;
     GdiGlyphBitmap glyphs[GDI_FONT_ASCII_CACHE_SIZE];
+    int in_use;
+    struct GdiSharedRasterCacheEntryStruct* next;
+    struct GdiSharedRasterCacheEntryStruct* prev;
 } GdiSharedRasterCacheEntry;
 
 #define GDI_SHARED_RASTER_OBJECT_HEADER_BYTES ((unsigned long)(sizeof(GdiSharedRasterFontObject) - 1UL))
@@ -367,8 +370,10 @@ typedef struct GdiTtfSegmentBuilderStruct {
 
 static GdiFontHandle g_gdi_builtin_system_ui_font;
 static GdiGlyphBitmap g_gdi_builtin_system_ui_glyphs[GDI_FONT_ASCII_CACHE_SIZE];
-static GdiStaticRasterSlot g_gdi_static_raster_slots[GDI_FONT_STATIC_RASTER_SLOT_COUNT];
-static GdiSharedRasterCacheEntry g_gdi_shared_raster_cache[GDI_FONT_SHARED_RASTER_CACHE_ENTRY_COUNT];
+static GdiStaticRasterSlot* g_gdi_static_raster_slot_head;
+static GdiStaticRasterSlot* g_gdi_static_raster_slot_tail;
+static GdiSharedRasterCacheEntry* g_gdi_shared_raster_cache_head;
+static GdiSharedRasterCacheEntry* g_gdi_shared_raster_cache_tail;
 static const GdiRasterFontAsset g_gdi_default_raster_assets[] = {
     { 12UL, GDI_FONT_DEFAULT_RASTER_PATH_12 },
     { 14UL, GDI_FONT_DEFAULT_RASTER_PATH_14 },
@@ -402,29 +407,96 @@ static void gdi_font_copy_text(char* destination, unsigned long destination_size
     destination[index] = '\0';
 }
 
-static GdiStaticRasterSlot* gdi_font_reserve_static_raster_slot(void) {
-    unsigned long index;
-
-    for (index = 0UL; index < GDI_FONT_STATIC_RASTER_SLOT_COUNT; ++index) {
-        if (!g_gdi_static_raster_slots[index].in_use) {
-            g_gdi_static_raster_slots[index].in_use = 1;
-            gdi_zero_memory(&g_gdi_static_raster_slots[index].handle, sizeof(g_gdi_static_raster_slots[index].handle));
-            gdi_zero_memory(g_gdi_static_raster_slots[index].glyphs, sizeof(g_gdi_static_raster_slots[index].glyphs));
-            return &g_gdi_static_raster_slots[index];
-        }
-    }
-
-    return 0;
-}
-
-static void gdi_font_release_static_raster_slot(unsigned long slot_index) {
-    if (slot_index >= GDI_FONT_STATIC_RASTER_SLOT_COUNT) {
+/*
+ * Link one heap-backed static raster slot into the process-local registry.
+ *
+ * @param slot Slot to publish.
+ * @return Nothing.
+ */
+static void gdi_font_link_static_raster_slot(GdiStaticRasterSlot* slot) {
+    if (!slot) {
         return;
     }
 
-    gdi_zero_memory(&g_gdi_static_raster_slots[slot_index].handle, sizeof(g_gdi_static_raster_slots[slot_index].handle));
-    gdi_zero_memory(g_gdi_static_raster_slots[slot_index].glyphs, sizeof(g_gdi_static_raster_slots[slot_index].glyphs));
-    g_gdi_static_raster_slots[slot_index].in_use = 0;
+    slot->prev = g_gdi_static_raster_slot_tail;
+    slot->next = 0;
+    if (g_gdi_static_raster_slot_tail) {
+        g_gdi_static_raster_slot_tail->next = slot;
+    }
+    else {
+        g_gdi_static_raster_slot_head = slot;
+    }
+    g_gdi_static_raster_slot_tail = slot;
+}
+
+/*
+ * Unlink one heap-backed static raster slot from the process-local registry.
+ *
+ * @param slot Slot to remove.
+ * @return Nothing.
+ */
+static void gdi_font_unlink_static_raster_slot(GdiStaticRasterSlot* slot) {
+    if (!slot) {
+        return;
+    }
+
+    if (slot->prev) {
+        slot->prev->next = slot->next;
+    }
+    else {
+        g_gdi_static_raster_slot_head = slot->next;
+    }
+    if (slot->next) {
+        slot->next->prev = slot->prev;
+    }
+    else {
+        g_gdi_static_raster_slot_tail = slot->prev;
+    }
+    slot->next = 0;
+    slot->prev = 0;
+}
+
+/*
+ * Allocate one heap-backed slot for one statically parsed raster font.
+ *
+ * @return Fresh slot, or null on allocation failure.
+ */
+static GdiStaticRasterSlot* gdi_font_reserve_static_raster_slot(void) {
+    GdiStaticRasterSlot* slot = (GdiStaticRasterSlot*)malloc(sizeof(*slot));
+
+    if (!slot) {
+        return 0;
+    }
+
+    gdi_zero_memory(slot, sizeof(*slot));
+    slot->file_buffer = (unsigned char*)malloc(GDI_FONT_STATIC_RASTER_MAX_FILE_SIZE + 1UL);
+    if (!slot->file_buffer) {
+        free(slot);
+        return 0;
+    }
+
+    gdi_font_link_static_raster_slot(slot);
+    return slot;
+}
+
+/*
+ * Release one heap-backed static raster slot after its font handle is gone.
+ *
+ * @param slot Slot to recycle.
+ * @return Nothing.
+ */
+static void gdi_font_release_static_raster_slot(GdiStaticRasterSlot* slot) {
+    if (!slot) {
+        return;
+    }
+
+    gdi_font_unlink_static_raster_slot(slot);
+    if (slot->file_buffer) {
+        free(slot->file_buffer);
+    }
+    gdi_zero_memory(&slot->handle, sizeof(slot->handle));
+    gdi_zero_memory(slot->glyphs, sizeof(slot->glyphs));
+    free(slot);
 }
 
 /*
@@ -470,6 +542,127 @@ static void gdi_font_debug_line(const char* text) {
     }
 
     writeLine(text);
+}
+
+/*
+ * Return the current scheduler-backed uptime for font profiling.
+ *
+ * Once spawn latency dropped, the next visible stalls moved into post-launch
+ * font work. Using the same uptime source across all font phases keeps those
+ * timings comparable in one probe log.
+ *
+ * @return Current uptime in milliseconds.
+ */
+static unsigned long gdi_font_now_msec(void) {
+    return getUptimeMs();
+}
+
+/*
+ * Compute elapsed milliseconds since one earlier font profiling timestamp.
+ *
+ * @param start_msec Earlier timestamp captured from `gdi_font_now_msec`.
+ * @return Elapsed milliseconds, clamped at zero on wrap.
+ */
+static unsigned long gdi_font_elapsed_msec(unsigned long start_msec) {
+    unsigned long now_msec = gdi_font_now_msec();
+
+    return now_msec >= start_msec ? (now_msec - start_msec) : 0UL;
+}
+
+/*
+ * Append one signed decimal number to a debug line buffer.
+ *
+ * The runtime exposes unsigned formatting helpers already, so profiling only
+ * needs a tiny wrapper to include negative status codes in structured logs.
+ *
+ * @param destination Current output cursor.
+ * @param value Signed integer to append.
+ * @return Advanced cursor position.
+ */
+static char* gdi_font_append_signed_long(char* destination, long value) {
+    if (!destination) {
+        return destination;
+    }
+
+    if (value < 0L) {
+        *destination++ = '-';
+        return appendUnsignedLong(destination, (unsigned long)(-value));
+    }
+
+    return appendUnsignedLong(destination, (unsigned long)value);
+}
+
+/*
+ * Emit one structured font profiling line.
+ *
+ * Keeping the formatting here makes the probe output stable across the wrapper
+ * and TTF-specific paths while still exposing the timings needed to separate
+ * file IO from post-launch font initialization.
+ *
+ * @param phase Short phase label.
+ * @param path Source font path, or null for the default-font path.
+ * @param pixel_height Requested pixel height.
+ * @param file_size Source file size when known.
+ * @param stage1_label First stage label, or null to omit it.
+ * @param stage1_msec First stage duration.
+ * @param stage2_label Second stage label, or null to omit it.
+ * @param stage2_msec Second stage duration.
+ * @param stage3_label Third stage label, or null to omit it.
+ * @param stage3_msec Third stage duration.
+ * @param total_msec End-to-end duration.
+ * @param status Final status code.
+ * @return Nothing.
+ */
+static void gdi_font_log_profile(
+    const char* phase,
+    const char* path,
+    unsigned long pixel_height,
+    unsigned long file_size,
+    const char* stage1_label,
+    unsigned long stage1_msec,
+    const char* stage2_label,
+    unsigned long stage2_msec,
+    const char* stage3_label,
+    unsigned long stage3_msec,
+    unsigned long total_msec,
+    long status) {
+    char line[320];
+    char* cursor = line;
+
+    cursor = appendText(cursor, "gdi.dll: font-prof phase=");
+    cursor = appendText(cursor, phase ? phase : "<unknown>");
+    cursor = appendText(cursor, " path=");
+    cursor = appendText(cursor, (path && path[0] != '\0') ? path : "<default>");
+    cursor = appendText(cursor, " px=");
+    cursor = appendUnsignedLong(cursor, pixel_height);
+    cursor = appendText(cursor, " bytes=");
+    cursor = appendUnsignedLong(cursor, file_size);
+
+    if (stage1_label) {
+        cursor = appendText(cursor, " ");
+        cursor = appendText(cursor, stage1_label);
+        cursor = appendText(cursor, "=");
+        cursor = appendUnsignedLong(cursor, stage1_msec);
+    }
+    if (stage2_label) {
+        cursor = appendText(cursor, " ");
+        cursor = appendText(cursor, stage2_label);
+        cursor = appendText(cursor, "=");
+        cursor = appendUnsignedLong(cursor, stage2_msec);
+    }
+    if (stage3_label) {
+        cursor = appendText(cursor, " ");
+        cursor = appendText(cursor, stage3_label);
+        cursor = appendText(cursor, "=");
+        cursor = appendUnsignedLong(cursor, stage3_msec);
+    }
+
+    cursor = appendText(cursor, " total_ms=");
+    cursor = appendUnsignedLong(cursor, total_msec);
+    cursor = appendText(cursor, " status=");
+    cursor = gdi_font_append_signed_long(cursor, status);
+    *cursor = '\0';
+    gdi_font_debug_line(line);
 }
 
 /*
@@ -537,7 +730,34 @@ static unsigned long gdi_font_hash_ignore_case(const char* text) {
 }
 
 /*
- * Build the named shared-memory identifier for one raster font.
+ * Return the last path component of one font path.
+ *
+ * The cache name keeps the short basename for readability, while the full path
+ * still feeds the hash so two directories that contain the same font file do
+ * not collide.
+ *
+ * @param path Absolute font path.
+ * @return Pointer to the last path component, or the original string.
+ */
+static const char* gdi_font_path_leaf(const char* path) {
+    const char* leaf = path;
+    unsigned long index;
+
+    if (!path) {
+        return "";
+    }
+
+    for (index = 0UL; path[index] != '\0'; ++index) {
+        if (path[index] == '\\' || path[index] == '/') {
+            leaf = &path[index + 1UL];
+        }
+    }
+
+    return leaf;
+}
+
+/*
+ * Build the named file-mapping identifier for one raster font.
  *
  * @param destination Output buffer for the object name.
  * @param destination_size Size of the output buffer in bytes.
@@ -546,8 +766,10 @@ static unsigned long gdi_font_hash_ignore_case(const char* text) {
  */
 static void gdi_font_build_shared_raster_name(char* destination, unsigned long destination_size, const char* path) {
     static const char hex_digits[] = "0123456789abcdef";
-    const char* prefix = "gdi-font-";
+    const char* prefix = "fontcache://";
+    const char* leaf = gdi_font_path_leaf(path);
     unsigned long prefix_index = 0UL;
+    unsigned long leaf_index = 0UL;
     unsigned long write_index = 0UL;
     unsigned long hash = gdi_font_hash_ignore_case(path);
     int shift;
@@ -558,6 +780,17 @@ static void gdi_font_build_shared_raster_name(char* destination, unsigned long d
 
     while (prefix[prefix_index] != '\0' && (write_index + 1UL) < destination_size) {
         destination[write_index++] = prefix[prefix_index++];
+    }
+    while (leaf[leaf_index] != '\0' && (write_index + 1UL) < destination_size) {
+        char ch = leaf[leaf_index++];
+
+        if (ch >= 'A' && ch <= 'Z') {
+            ch = (char)(ch + ('a' - 'A'));
+        }
+        destination[write_index++] = ch;
+    }
+    if ((write_index + 1UL) < destination_size) {
+        destination[write_index++] = '#';
     }
     for (shift = (int)(sizeof(hash) * 8U) - 4; shift >= 0 && (write_index + 1UL) < destination_size; shift -= 4) {
         destination[write_index++] = hex_digits[(hash >> shift) & 0xFUL];
@@ -572,19 +805,68 @@ static void gdi_font_build_shared_raster_name(char* destination, unsigned long d
  * @return Matching cache entry, or null when this process has not bound it yet.
  */
 static GdiSharedRasterCacheEntry* gdi_font_find_shared_raster_cache_entry(const char* path) {
-    unsigned long index;
+    GdiSharedRasterCacheEntry* entry;
 
     if (!path) {
         return 0;
     }
 
-    for (index = 0UL; index < GDI_FONT_SHARED_RASTER_CACHE_ENTRY_COUNT; ++index) {
-        if (g_gdi_shared_raster_cache[index].in_use && gdi_font_text_equals_ignore_case(g_gdi_shared_raster_cache[index].path, path)) {
-            return &g_gdi_shared_raster_cache[index];
+    for (entry = g_gdi_shared_raster_cache_head; entry; entry = entry->next) {
+        if (entry->in_use && gdi_font_text_equals_ignore_case(entry->path, path)) {
+            return entry;
         }
     }
 
     return 0;
+}
+
+/*
+ * Link one process-local shared-raster cache entry into the active list.
+ *
+ * @param entry Entry to publish.
+ * @return Nothing.
+ */
+static void gdi_font_link_shared_raster_cache_entry(GdiSharedRasterCacheEntry* entry) {
+    if (!entry) {
+        return;
+    }
+
+    entry->prev = g_gdi_shared_raster_cache_tail;
+    entry->next = 0;
+    if (g_gdi_shared_raster_cache_tail) {
+        g_gdi_shared_raster_cache_tail->next = entry;
+    }
+    else {
+        g_gdi_shared_raster_cache_head = entry;
+    }
+    g_gdi_shared_raster_cache_tail = entry;
+}
+
+/*
+ * Unlink one process-local shared-raster cache entry from the active list.
+ *
+ * @param entry Entry to remove.
+ * @return Nothing.
+ */
+static void gdi_font_unlink_shared_raster_cache_entry(GdiSharedRasterCacheEntry* entry) {
+    if (!entry) {
+        return;
+    }
+
+    if (entry->prev) {
+        entry->prev->next = entry->next;
+    }
+    else {
+        g_gdi_shared_raster_cache_head = entry->next;
+    }
+    if (entry->next) {
+        entry->next->prev = entry->prev;
+    }
+    else {
+        g_gdi_shared_raster_cache_tail = entry->prev;
+    }
+    entry->next = 0;
+    entry->prev = 0;
 }
 
 /*
@@ -593,17 +875,16 @@ static GdiSharedRasterCacheEntry* gdi_font_find_shared_raster_cache_entry(const 
  * @return Free cache entry, or null when the local cache is full.
  */
 static GdiSharedRasterCacheEntry* gdi_font_reserve_shared_raster_cache_entry(void) {
-    unsigned long index;
+    GdiSharedRasterCacheEntry* entry = (GdiSharedRasterCacheEntry*)malloc(sizeof(*entry));
 
-    for (index = 0UL; index < GDI_FONT_SHARED_RASTER_CACHE_ENTRY_COUNT; ++index) {
-        if (!g_gdi_shared_raster_cache[index].in_use) {
-            gdi_zero_memory(&g_gdi_shared_raster_cache[index], sizeof(g_gdi_shared_raster_cache[index]));
-            g_gdi_shared_raster_cache[index].in_use = 1;
-            return &g_gdi_shared_raster_cache[index];
-        }
+    if (!entry) {
+        return 0;
     }
 
-    return 0;
+    gdi_zero_memory(entry, sizeof(*entry));
+    entry->in_use = 1;
+    gdi_font_link_shared_raster_cache_entry(entry);
+    return entry;
 }
 
 /*
@@ -826,6 +1107,36 @@ static long gdi_font_bind_shared_raster_cache_entry(
 }
 
 /*
+ * Release one process-local shared raster cache entry.
+ *
+ * Shared raster objects stay resident in the kernel-owned file-mapping table,
+ * but the process-local cache slot can be reused once the last font wrapper
+ * drops its reference.
+ *
+ * @param entry Cache entry to recycle.
+ * @return Nothing.
+ */
+static void gdi_font_release_shared_raster_cache_entry(GdiSharedRasterCacheEntry* entry) {
+    if (!entry) {
+        return;
+    }
+
+    if (entry->object) {
+        (void)unmapFileMappingView(entry->object);
+    }
+
+    gdi_font_unlink_shared_raster_cache_entry(entry);
+    gdi_zero_memory(&entry->handle, sizeof(entry->handle));
+    gdi_zero_memory(entry->glyphs, sizeof(entry->glyphs));
+    gdi_zero_memory(entry->path, sizeof(entry->path));
+    gdi_zero_memory(entry->object_name, sizeof(entry->object_name));
+    entry->object = 0;
+    entry->reference_count = 0UL;
+    entry->in_use = 0;
+    free(entry);
+}
+
+/*
  * Load one raster font through the cross-process shared-font cache.
  *
  * @param path Absolute raster-font path.
@@ -839,6 +1150,7 @@ static long gdi_font_load_raster_file_shared(const char* path, unsigned long pix
     char object_name[GDI_FONT_SHARED_RASTER_NAME_BYTES];
     unsigned long file_size = 0UL;
     unsigned long object_bytes;
+    FileMappingHandle file_mapping_handle = 0UL;
     void* object_view = 0;
     long status;
 
@@ -875,7 +1187,16 @@ static long gdi_font_load_raster_file_shared(const char* path, unsigned long pix
         return ROS_USER_IPC_STATUS_NO_SPACE;
     }
 
-    status = acquireSharedMemoryRegion(object_name, object_bytes, &object_view);
+    status = createFileMapping(object_name, object_bytes, &file_mapping_handle);
+    if (status == StatusAlreadyExists) {
+        status = openFileMapping(object_name, object_bytes, &file_mapping_handle);
+    }
+    if (status < 0L || file_mapping_handle == 0UL) {
+        return status < 0L ? status : GDI_STATUS_ERROR;
+    }
+
+    status = mapFileMappingView(file_mapping_handle, 0UL, object_bytes, &object_view);
+    (void)closeFileMapping(file_mapping_handle);
     if (status < 0L || !object_view) {
         return status < 0L ? status : GDI_STATUS_ERROR;
     }
@@ -884,19 +1205,24 @@ static long gdi_font_load_raster_file_shared(const char* path, unsigned long pix
     if (object->magic != GDI_FONT_SHARED_RASTER_OBJECT_MAGIC || object->version != GDI_FONT_SHARED_RASTER_OBJECT_VERSION || object->state == GDI_FONT_SHARED_RASTER_STATE_EMPTY) {
         status = gdi_font_populate_shared_raster_object(object, path, pixel_height);
         if (status < 0L) {
+            (void)unmapFileMappingView(object_view);
             return status;
         }
     }
     if (object->state == GDI_FONT_SHARED_RASTER_STATE_INITIALIZING) {
+        (void)unmapFileMappingView(object_view);
         return GDI_STATUS_ERROR;
     }
     if (object->state != GDI_FONT_SHARED_RASTER_STATE_READY) {
+        (void)unmapFileMappingView(object_view);
         return object->status < 0L ? object->status : GDI_STATUS_ERROR;
     }
     if (!gdi_font_text_equals_ignore_case(object->source_path, path)) {
+        (void)unmapFileMappingView(object_view);
         return GDI_STATUS_ERROR;
     }
     if (pixel_height != 0UL && pixel_height != object->pixel_height) {
+        (void)unmapFileMappingView(object_view);
         return GDI_FONT_STATUS_NOT_SUPPORTED;
     }
 
@@ -907,7 +1233,8 @@ static long gdi_font_load_raster_file_shared(const char* path, unsigned long pix
 
     status = gdi_font_bind_shared_raster_cache_entry(entry, object, path, object_name);
     if (status < 0L) {
-        gdi_zero_memory(entry, sizeof(*entry));
+        (void)unmapFileMappingView(object_view);
+        gdi_font_release_shared_raster_cache_entry(entry);
         return status;
     }
 
@@ -996,7 +1323,7 @@ static long gdi_font_ensure_glyph_cache(GdiFontHandle* handle) {
  */
 static void gdi_font_destroy_handle(GdiFontHandle* handle) {
     GdiSharedRasterCacheEntry* shared_cache;
-    unsigned long slot_index;
+    GdiStaticRasterSlot* static_slot;
     unsigned long storage_flags;
 
     if (!handle) {
@@ -1008,18 +1335,21 @@ static void gdi_font_destroy_handle(GdiFontHandle* handle) {
         if (shared_cache->reference_count != 0UL) {
             shared_cache->reference_count -= 1UL;
         }
+        if (shared_cache->reference_count == 0UL) {
+            gdi_font_release_shared_raster_cache_entry(shared_cache);
+        }
         return;
     }
 
-    slot_index = handle->static_slot_index;
+    static_slot = (GdiStaticRasterSlot*)handle->static_slot_index;
     storage_flags = handle->storage_flags;
     gdi_font_release_glyphs(handle);
     if (handle->file_buffer && (storage_flags & GDI_FONT_STORAGE_OWNS_FILE_BUFFER) != 0UL) {
         free(handle->file_buffer);
     }
     gdi_zero_memory(handle, sizeof(*handle));
-    if (slot_index != 0UL) {
-        gdi_font_release_static_raster_slot(slot_index - 1UL);
+    if (static_slot != 0) {
+        gdi_font_release_static_raster_slot(static_slot);
         return;
     }
     if ((storage_flags & GDI_FONT_STORAGE_OWNS_SELF) != 0UL) {
@@ -1164,6 +1494,7 @@ static long gdi_font_read_file_all(const char* path, unsigned char** data, unsig
         }
 
         total += (unsigned long)read;
+        gdi_font_cooperative_file_yield((unsigned long)read == GDI_FONT_FILE_CHUNK);
     }
 
     buffer[total] = 0U;
@@ -1212,6 +1543,7 @@ static long gdi_font_read_file_exact(const char* path, unsigned long offset, uns
         }
 
         total += (unsigned long)read;
+        gdi_font_cooperative_file_yield(total < size);
     }
 
     return ROS_USER_IPC_STATUS_OK;
@@ -2388,6 +2720,7 @@ static long gdi_font_parse_raster_file(GdiFontHandle* handle, const unsigned cha
         glyphs[glyph_index].ready = 1;
         glyphs[glyph_index].valid = 1;
         glyphs[glyph_index].coverage_owned = 0;
+        gdi_font_cooperative_work_yield(glyph_index, 16UL, glyph_index + 1UL < GDI_FONT_ASCII_CACHE_SIZE);
     }
 
     handle->kind = GDI_FONT_KIND_BITMAP;
@@ -3475,6 +3808,8 @@ static long gdi_ttf_rasterize_glyph(const GdiTtfFontState* font, unsigned long c
 
                         coverage[(row * width) + column] = (unsigned char)((hits * 255UL) / 16UL);
                     }
+
+                    gdi_font_cooperative_work_yield(row, 4UL, row + 1UL < height);
                 }
 
                 glyph->coverage = coverage;
@@ -3740,27 +4075,43 @@ static long gdi_font_load_ttf_stream(const char* path, unsigned long pixel_heigh
     long requested_height;
     long scale_16;
     long status;
+    unsigned long total_start_msec;
+    unsigned long stage_start_msec;
+    unsigned long query_size_msec = 0UL;
+    unsigned long directory_msec = 0UL;
+    unsigned long tables_msec = 0UL;
 
     if (!path || !font) {
         return GDI_STATUS_INVALID_ARGUMENT;
     }
 
+    total_start_msec = gdi_font_now_msec();
+
     gdi_font_copy_text(path_copy, sizeof(path_copy), path);
     path = path_copy;
 
+    stage_start_msec = gdi_font_now_msec();
     status = gdi_font_query_file_size(path, &file_size);
+    query_size_msec = gdi_font_elapsed_msec(stage_start_msec);
     if (status < 0L) {
+        gdi_font_log_profile("ttf-load", path, pixel_height, file_size, "query_ms", query_size_msec, 0, 0UL, 0, 0UL, gdi_font_elapsed_msec(total_start_msec), status);
         return status;
     }
     if (file_size < sizeof(header)) {
+        gdi_font_log_profile("ttf-load", path, pixel_height, file_size, "query_ms", query_size_msec, 0, 0UL, 0, 0UL, gdi_font_elapsed_msec(total_start_msec), GDI_FONT_STATUS_FORMAT);
         return GDI_FONT_STATUS_FORMAT;
     }
 
+    stage_start_msec = gdi_font_now_msec();
     status = gdi_font_read_file_exact(path, 0UL, header, sizeof(header));
     if (status < 0L) {
+        directory_msec = gdi_font_elapsed_msec(stage_start_msec);
+        gdi_font_log_profile("ttf-load", path, pixel_height, file_size, "query_ms", query_size_msec, "directory_ms", directory_msec, 0, 0UL, gdi_font_elapsed_msec(total_start_msec), status);
         return status;
     }
     if (!(gdi_font_be_u32(header) == 0x00010000UL || gdi_font_be_u32(header) == GDI_FONT_TTF_TAG('t', 'r', 'u', 'e'))) {
+        directory_msec = gdi_font_elapsed_msec(stage_start_msec);
+        gdi_font_log_profile("ttf-load", path, pixel_height, file_size, "query_ms", query_size_msec, "directory_ms", directory_msec, 0, 0UL, gdi_font_elapsed_msec(total_start_msec), GDI_FONT_STATUS_FORMAT);
         return GDI_FONT_STATUS_FORMAT;
     }
 
@@ -3771,8 +4122,10 @@ static long gdi_font_load_ttf_stream(const char* path, unsigned long pixel_heigh
     }
 
     status = gdi_font_read_file_exact(path, 0UL, directory, directory_size);
+    directory_msec = gdi_font_elapsed_msec(stage_start_msec);
     if (status < 0L) {
         free(directory);
+        gdi_font_log_profile("ttf-load", path, pixel_height, file_size, "query_ms", query_size_msec, "directory_ms", directory_msec, 0, 0UL, gdi_font_elapsed_msec(total_start_msec), status);
         return status;
     }
 
@@ -3807,6 +4160,7 @@ static long gdi_font_load_ttf_stream(const char* path, unsigned long pixel_heigh
     }
 
     cursor = table_bundle;
+    stage_start_msec = gdi_font_now_msec();
     cmap = cursor;
     status = gdi_font_read_file_exact(path, cmap_offset, cursor, cmap_size);
     if (status < 0L) {
@@ -3847,6 +4201,7 @@ static long gdi_font_load_ttf_stream(const char* path, unsigned long pixel_heigh
     if (status < 0L) {
         goto gdi_ttf_stream_fail;
     }
+    tables_msec = gdi_font_elapsed_msec(stage_start_msec);
 
     if (!gdi_ttf_select_cmap(cmap, cmap_size, &selected_cmap, &selected_cmap_size, &selected_cmap_format)) {
         status = -84L;
@@ -3907,12 +4262,38 @@ static long gdi_font_load_ttf_stream(const char* path, unsigned long pixel_heigh
 
     free(directory);
     gdi_font_apply_public_metrics(font, handle);
+    gdi_font_log_profile(
+        "ttf-load",
+        path,
+        pixel_height,
+        file_size,
+        "query_ms",
+        query_size_msec,
+        "directory_ms",
+        directory_msec,
+        "tables_ms",
+        tables_msec,
+        gdi_font_elapsed_msec(total_start_msec),
+        ROS_USER_IPC_STATUS_OK);
     return ROS_USER_IPC_STATUS_OK;
 
 gdi_ttf_stream_fail:
     free(directory);
     free(table_bundle);
     free(handle);
+    gdi_font_log_profile(
+        "ttf-load",
+        path,
+        pixel_height,
+        file_size,
+        "query_ms",
+        query_size_msec,
+        "directory_ms",
+        directory_msec,
+        "tables_ms",
+        tables_msec,
+        gdi_font_elapsed_msec(total_start_msec),
+        status);
     return status;
 }
 
@@ -3999,16 +4380,25 @@ static long gdi_font_load_default_raster_font(unsigned long pixel_height, RosGdi
 }
 
 long GdiLoadFont(const char* path, unsigned long pixel_height, RosGdiFont* font) {
+    unsigned long total_start_msec;
+    long status;
+
     if (!font) {
         return GDI_STATUS_INVALID_ARGUMENT;
     }
 
+    total_start_msec = gdi_font_now_msec();
+
     GdiUnloadFont(font);
     if (!path || path[0] == '\0') {
-        return gdi_font_load_default_raster_font(pixel_height, font);
+        status = gdi_font_load_default_raster_font(pixel_height, font);
+        gdi_font_log_profile("load-font", path, pixel_height, 0UL, 0, 0UL, 0, 0UL, 0, 0UL, gdi_font_elapsed_msec(total_start_msec), status);
+        return status;
     }
 
-    return gdi_font_load_single_path(path, pixel_height, font);
+    status = gdi_font_load_single_path(path, pixel_height, font);
+    gdi_font_log_profile("load-font", path, pixel_height, 0UL, 0, 0UL, 0, 0UL, 0, 0UL, gdi_font_elapsed_msec(total_start_msec), status);
+    return status;
 }
 
 static long gdi_font_load_raster_file_static(const char* path, unsigned long pixel_height, RosGdiFont* font) {
@@ -4045,7 +4435,7 @@ static long gdi_font_load_raster_file_static(const char* path, unsigned long pix
     handle->file_buffer = slot->file_buffer;
     handle->file_size = file_size;
     handle->glyphs = slot->glyphs;
-    handle->static_slot_index = (unsigned long)((slot - g_gdi_static_raster_slots) + 1);
+    handle->static_slot_index = (unsigned long)slot;
 
     status = gdi_font_read_file_exact(path, 0UL, slot->file_buffer, file_size);
     if (status < 0L) {
@@ -4325,6 +4715,7 @@ long GdiDrawTextEx(HWND hwnd,
     unsigned long foreground_color,
     int opaque_background,
     unsigned long background_color) {
+
     RosGdiSurface surface;
     unsigned long text_width = 0UL;
     unsigned long text_height = 0UL;
@@ -4356,6 +4747,4 @@ long GdiDrawTextEx(HWND hwnd,
     return GdiInvalidateRect(hwnd, x, y, text_width, text_height);
 }
 
-long GdiDrawText(HWND hwnd, const RosGdiFont* font, unsigned long x, unsigned long y, const char* text, unsigned long color) {
-    return GdiDrawTextEx(hwnd, font, x, y, text, color, 0, 0UL);
-}
+

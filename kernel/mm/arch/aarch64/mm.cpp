@@ -542,11 +542,22 @@ namespace mm {
         l2_table = reinterpret_cast<U64*>(address_space->translation_table_l2);
         if (l2_table != NULL) {
             for (Size index = 0U; index < backend::TableEntries; ++index) {
-                if ((l2_table[index] & backend::DescTable) != backend::DescTable) {
+                const U64 descriptor = l2_table[index];
+                const PhysAddr table_phys = descriptor & backend::OutputAddressMask;
+
+                if ((descriptor & backend::DescTable) != backend::DescTable) {
+                    continue;
+                }
+                // User page-table teardown only owns heap-backed L3 tables allocated
+                // on demand for page mappings. A zero output address can never name a
+                // live heap table here, so skip it instead of translating physical 0
+                // into the kernel higher-half alias and handing that bogus pointer to
+                // the heap during cleanup.
+                if (table_phys == 0U) {
                     continue;
                 }
 
-                Heap::free(table_virt(l2_table[index] & backend::OutputAddressMask));
+                Heap::free(table_virt(table_phys));
             }
         }
 

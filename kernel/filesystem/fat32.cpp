@@ -1,5 +1,6 @@
 #include "filesystem/fat32.h"
 
+#include "block_io.h"
 #include "device.h"
 
 namespace filesystem {
@@ -55,12 +56,14 @@ namespace filesystem {
 
         static constexpr Size Fat32SectorSize = 512U;
         static constexpr Size Fat32DirectoryEntrySize = 32U;
+        inline constexpr Size Fat32AsyncReadThreshold = 4U * Fat32SectorSize;
         static constexpr Size Fat32ShortNameSize = 11U;
         static constexpr Size Fat32LongNameCapacity = 256U;
         static constexpr Size Fat32PathCapacity = 260U;
 
         typedef struct Fat32BootSectorInfo {
             U16 bytes_per_sector;
+
             U8 sectors_per_cluster;
             U16 reserved_sectors;
             U8 fat_count;
@@ -200,7 +203,19 @@ namespace filesystem {
                 return StatusInvalidArgument;
             }
 
-            result = device->read(offset, buffer, length);
+            /*
+             * The worker-backed path only pays off once the transfer is large
+             * enough to amortize the extra queue, wake, and wait machinery.
+             * FAT32 metadata walks and many boot-time file reads still issue
+             * sector-sized exact reads, so keep those on the direct device path
+             * until the lower layer can aggregate or run multiple requests.
+             */
+            if (length <= Fat32AsyncReadThreshold) {
+                result = device->read(offset, buffer, length);
+            }
+            else {
+                result = BlockIoService::read(device, offset, buffer, length);
+            }
             if (result < 0) {
                 return static_cast<Status>(result);
             }
@@ -1862,6 +1877,7 @@ namespace filesystem {
                 U32 sector_in_cluster;
                 U32 sector_offset;
                 U32 sector_lba;
+                Size aligned_chunk;
                 Size chunk;
                 Status status = fat32_locate_cluster(state, static_cast<U32>(node->identifier), offset + total_read, &cluster);
 
@@ -1873,6 +1889,36 @@ namespace filesystem {
                 sector_in_cluster = cluster_offset / Fat32SectorSize;
                 sector_offset = cluster_offset % Fat32SectorSize;
                 sector_lba = fat32_cluster_to_lba(state, cluster) + sector_in_cluster;
+
+                /*
+                 * Sequential file loads usually start on sector boundaries and
+                 * consume many full sectors in one run. Reading the whole aligned
+                 * span directly avoids paying one worker handoff and one FAT32
+                 * stack frame per 512-byte sector while still falling back to the
+                 * old sector-buffer path for misaligned heads or tails.
+                 */
+                aligned_chunk = state->cluster_size - cluster_offset;
+                if (aligned_chunk > remaining) {
+                    aligned_chunk = remaining;
+                }
+                if (sector_offset == 0U) {
+                    aligned_chunk -= (aligned_chunk % Fat32SectorSize);
+                    if (aligned_chunk != 0U) {
+                        status = fat32_read_exact(
+                            state->device,
+                            static_cast<U64>(sector_lba) * Fat32SectorSize,
+                            output + total_read,
+                            aligned_chunk);
+                        if (status != StatusOK) {
+                            return (total_read != 0U) ? static_cast<SSize>(total_read) : status;
+                        }
+
+                        total_read += aligned_chunk;
+                        remaining -= aligned_chunk;
+                        continue;
+                    }
+                }
+
                 status = fat32_read_sector(state, sector_lba, sector);
                 if (status != StatusOK) {
                     return (total_read != 0U) ? static_cast<SSize>(total_read) : status;
